@@ -1,0 +1,170 @@
+# Transformer Variant L4 Lab — Project Defaults
+# This file defines shared defaults for all experiments.
+# Phase-specific configs (model, data, train) will override these as needed.
+
+project:
+  name: transformer_variant_l4_lab
+  description: >
+    A single-GPU benchmark and visualization framework for efficient Transformer
+    variants on an NVIDIA L4-24Q GPU.
+  target_hardware: NVIDIA L4-24Q
+  gpu_memory_gb: 24
+  task: decoder_only_language_modeling
+  objective: next_token_prediction
+
+hardware:
+  device: cuda
+  num_gpus: 1
+  precision_preference:
+    - bf16
+    - fp16
+    - fp32
+  max_gpu_memory_gb_target: 22
+  max_gpu_memory_gb_absolute: 24
+
+experiment_defaults:
+  main_context_length: 1024
+  debug_context_length: 512
+  long_context_eval_lengths:
+    - 1024
+    - 2048
+    - 4096
+
+  main_parameter_range:
+    min_parameters: 40_000_000
+    max_parameters: 70_000_000
+
+  debug_parameter_range:
+    min_parameters: 10_000_000
+    max_parameters: 20_000_000
+
+  stretch_parameter_range:
+    min_parameters: 100_000_000
+    max_parameters: 125_000_000
+
+  main_training_tokens:
+    min_tokens: 100_000_000
+    max_tokens: 300_000_000
+
+  debug_training_tokens:
+    min_tokens: 5_000_000
+    max_tokens: 20_000_000
+
+  random_seeds:
+    - 1
+    - 2
+    - 3
+
+model_defaults:
+  architecture: decoder_only_transformer
+  vocab_size: 32000
+  tie_input_output_embeddings: true
+  dropout: 0.0
+  bias: false
+
+  debug_model:
+    n_layer: 4
+    d_model: 256
+    n_head: 4
+    n_kv_head: 4
+    seq_len: 512
+
+  main_model:
+    n_layer: 8
+    d_model: 512
+    n_head: 8
+    n_kv_head: 8
+    seq_len: 1024
+
+  stretch_model:
+    n_layer: 12
+    d_model: 768
+    n_head: 12
+    n_kv_head: 12
+    seq_len: 1024
+
+training_defaults:
+  optimizer: adamw
+  learning_rate: 0.0003
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+
+  precision: bf16
+  activation_checkpointing: true
+
+  micro_batch_size: 8
+  grad_accum_steps: 8
+  effective_batch_tokens: 65536  # micro_batch * grad_accum * seq_len
+
+  warmup_tokens: 5_000_000
+  lr_schedule: cosine
+
+  eval_interval_tokens: 5_000_000
+  checkpoint_interval_tokens: 10_000_000
+  log_interval_steps: 10
+
+data_defaults:
+  tokenizer_type: gpt_style_bpe
+  sequence_packing: true
+  append_eos_between_documents: true
+  train_split: 0.98
+  validation_split: 0.01
+  test_split: 0.01
+
+  shard_format: binary_token_ids
+  tokens_per_shard: 10_000_000
+  create_manifest: true
+  create_checksums: true
+
+evaluation_defaults:
+  metrics:
+    - validation_loss
+    - perplexity
+    - tokens_per_second
+    - wall_clock_time_per_million_tokens
+    - peak_gpu_memory
+    - generation_tokens_per_second
+    - kv_cache_memory
+    - long_context_degradation
+
+  plots:
+    - loss_vs_tokens
+    - loss_vs_wall_clock
+    - tokens_per_second_vs_context_length
+    - peak_memory_vs_context_length
+    - perplexity_vs_context_length
+    - kv_cache_memory_comparison
+    - validation_loss_vs_tokens_per_second
+    - validation_loss_vs_peak_memory
+
+visualization_defaults:
+  dashboard_framework: streamlit
+  max_tokens_for_attention_heatmap: 512
+  enable_attention_heatmaps: true
+  enable_sparse_mask_view: true
+  enable_gqa_view: true
+  enable_head_statistics: true
+  enable_approximation_error_view: true
+
+checkpoint_defaults:
+  checkpoint_format: directory
+  atomic_writes: true
+  keep_latest: true
+  keep_best: true
+  keep_last_n: 3
+  save_rng_state: true
+  save_dataloader_state: true
+  save_optimizer_state: true
+  save_scheduler_state: true
+  save_gradient_scaler_state: true
+  verify_checksums: true
+
+fault_tolerance_defaults:
+  enable_resume: true
+  enable_corruption_fallback: true
+  test_process_interruption: true
+  test_checkpoint_write_interruption: true
+  test_corrupted_latest_checkpoint: true
+  test_validation_loss_continuity: true
