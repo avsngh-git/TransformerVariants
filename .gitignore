@@ -216,3 +216,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific: experiment outputs and data
+runs/
+data/
+
+# Agent configuration and skills
+.agents/
+CLAUDE.md
+docs/agents/
+docs/CLAUDE.md
+docs/AGENT_WORKFLOW.md
+docs/PHASE_INDEX.md
+docs/README_PHASE_DOCS.md
+docs/phase_*.md
+.kiro/
+.scratch/

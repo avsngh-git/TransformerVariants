@@ -1,0 +1,21 @@
+# Debug experiment: vanilla transformer, tiny data, fast training
+# Use this for rapid smoke-testing of the full pipeline.
+
+experiment:
+  name: debug_vanilla
+  description: "Vanilla Transformer debug run for pipeline validation"
+  seed: 1
+
+# Inherit and override
+includes:
+  - configs/model/vanilla.yaml
+  - configs/data/debug.yaml
+  - configs/train/debug.yaml
+
+# Scale override for debug
+model:
+  n_layer: 4
+  d_model: 256
+  n_head: 4
+  n_kv_head: 4
+  seq_len: 512

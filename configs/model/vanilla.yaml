@@ -1,0 +1,13 @@
+# V0: Vanilla Transformer
+# Learned position embeddings, LayerNorm, standard multi-head attention
+
+model:
+  variant: vanilla
+  variant_id: V0
+  position_encoding: learned
+  normalization: layernorm
+  ffn_type: standard  # linear -> relu -> linear
+  attention_type: standard_mha
+
+  # These can be overridden per scale tier
+  # See project_defaults.yaml for debug/main/stretch model sizes

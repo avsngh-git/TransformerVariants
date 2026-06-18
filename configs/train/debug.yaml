@@ -1,0 +1,10 @@
+# Debug training config — fast iteration, small batches
+
+training:
+  max_tokens: 5_000_000
+  micro_batch_size: 4
+  grad_accum_steps: 2
+  eval_interval_tokens: 500_000
+  checkpoint_interval_tokens: 1_000_000
+  log_interval_steps: 5
+  warmup_tokens: 500_000
