@@ -1,0 +1,9 @@
+# Debug data config — small dataset for rapid iteration
+
+data:
+  dataset_name: wikitext-103-raw-v1
+  tokenizer: gpt2
+  max_tokens: 5_000_000
+  max_documents: 1000
+  tokens_per_shard: 1_000_000
+  sequence_length: 512

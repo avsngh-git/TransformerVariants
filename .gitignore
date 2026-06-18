@@ -219,7 +219,7 @@ __marimo__/
 
 # Project-specific: experiment outputs and data
 runs/
-data/
+
 
 # Agent configuration and skills
 .agents/
@@ -232,3 +232,4 @@ docs/README_PHASE_DOCS.md
 docs/phase_*.md
 .kiro/
 .scratch/
+skills-lock.json
