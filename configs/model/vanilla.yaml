@@ -1,13 +1,41 @@
-# V0: Vanilla Transformer
-# Learned position embeddings, LayerNorm, standard multi-head attention
+# V0: Vanilla Transformer (GPT-2 style)
+# Learned position embeddings, Pre-LayerNorm, standard multi-head attention, ReLU FFN
 
 model:
   variant: vanilla
   variant_id: V0
   position_encoding: learned
-  normalization: layernorm
+  normalization: pre_layernorm
   ffn_type: standard  # linear -> relu -> linear
   attention_type: standard_mha
+  activation: relu
 
-  # These can be overridden per scale tier
-  # See project_defaults.yaml for debug/main/stretch model sizes
+  # Shared across all model sizes
+  vocab_size: 50257       # GPT-2 tokenizer
+  ffn_multiplier: 4       # d_ff = 4 * d_model
+  dropout: 0.0            # no dropout for pretraining
+  bias: false             # no bias in linear layers
+  tie_embeddings: true    # share token embedding and output head weights
+
+  # Weight initialization
+  init_std: 0.02          # N(0, 0.02) for most layers
+  residual_scaling: true  # scale residual projections by 1/sqrt(2*n_layers)
+
+  # --- Scale tiers ---
+  debug:
+    n_layer: 4
+    d_model: 256
+    n_head: 4
+    seq_len: 512
+
+  main:
+    n_layer: 8
+    d_model: 512
+    n_head: 8
+    seq_len: 1024
+
+  stretch:
+    n_layer: 12
+    d_model: 768
+    n_head: 12
+    seq_len: 1024
