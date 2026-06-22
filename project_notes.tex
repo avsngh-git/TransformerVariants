@@ -1,0 +1,1003 @@
+\documentclass[11pt, a4paper]{article}
+
+% ─── Packages ────────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{tcolorbox}
+\usepackage{caption}
+
+\geometry{margin=2.5cm}
+\hypersetup{colorlinks=true, linkcolor=blue!70!black, citecolor=green!50!black, urlcolor=blue!60!black}
+
+% ─── Theorem environments ────────────────────────────────────────────────────
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[section]
+\newtheorem{remark}{Remark}[section]
+\newtheorem{proposition}{Proposition}[section]
+\newtheorem{example}{Example}[section]
+
+% ─── Code listing style ──────────────────────────────────────────────────────
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codeframe}{RGB}{200,200,200}
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    backgroundcolor=\color{codebg},
+    frame=single,
+    rulecolor=\color{codeframe},
+    keywordstyle=\color{blue!70!black}\bfseries,
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!50!black}\itshape,
+    showstringspaces=false,
+    breaklines=true,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    xleftmargin=2em,
+    framexleftmargin=1.5em,
+}
+
+% ─── Custom commands ─────────────────────────────────────────────────────────
+\newcommand{\vx}{\bm{x}}
+\newcommand{\vq}{\bm{q}}
+\newcommand{\vk}{\bm{k}}
+\newcommand{\vv}{\bm{v}}
+\newcommand{\vo}{\bm{o}}
+\newcommand{\vw}{\bm{w}}
+\newcommand{\vh}{\bm{h}}
+\newcommand{\vy}{\bm{y}}
+\newcommand{\vz}{\bm{z}}
+\newcommand{\mW}{\bm{W}}
+\newcommand{\mQ}{\bm{Q}}
+\newcommand{\mK}{\bm{K}}
+\newcommand{\mV}{\bm{V}}
+\newcommand{\mA}{\bm{A}}
+\newcommand{\mR}{\bm{R}}
+\newcommand{\mI}{\bm{I}}
+\newcommand{\reals}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\dmodel}{d_{\text{model}}}
+\newcommand{\dhead}{d_{\text{head}}}
+\newcommand{\dff}{d_{\text{ff}}}
+\newcommand{\nhead}{n_{\text{head}}}
+\newcommand{\nlayer}{n_{\text{layer}}}
+\DeclareMathOperator{\softmax}{softmax}
+\DeclareMathOperator{\ReLU}{ReLU}
+\DeclareMathOperator{\GELU}{GELU}
+\DeclareMathOperator{\SiLU}{SiLU}
+\DeclareMathOperator{\RMS}{RMS}
+\DeclareMathOperator{\diag}{diag}
+
+% ─── Title ───────────────────────────────────────────────────────────────────
+\title{\textbf{Transformer Variant Lab: Conceptual Notes} \\[0.5em]
+\large From Vanilla GPT-2 (V0) to Modern LLaMA-Style (V1)}
+\author{Project Notes — Decoder-Only Transformer Architecture}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Introduction}
+% ══════════════════════════════════════════════════════════════════════════════
+
+This document presents the conceptual and mathematical foundations underlying two decoder-only Transformer variants implemented in this project:
+
+\begin{itemize}
+    \item \textbf{V0 (Vanilla):} A GPT-2--style model with learned position embeddings, LayerNorm, standard multi-head attention, and ReLU/GELU activation in the feed-forward network.
+    \item \textbf{V1 (Modern):} A LLaMA-style model replacing four components: Rotary Position Embeddings (RoPE), RMSNorm, SwiGLU activation, and Flash Attention.
+\end{itemize}
+
+The exposition assumes familiarity with linear algebra, probability theory, and standard neural network training (backpropagation, gradient descent, loss functions). We develop each component from first principles, focusing on \emph{why} each design choice is made and what mathematical properties justify it.
+
+\subsection{Notation}
+
+Throughout, we adopt the following conventions:
+\begin{itemize}[nosep]
+    \item $B$ = batch size, $T$ = sequence length, $\dmodel$ = hidden dimension (``residual stream'' width).
+    \item $\nhead$ = number of attention heads, $\dhead = \dmodel / \nhead$ = dimension per head.
+    \item $\dff$ = feed-forward hidden dimension.
+    \item $\nlayer$ = number of Transformer blocks (depth).
+    \item Bold lowercase $\vx, \vq, \vk$ denote vectors; bold uppercase $\mW, \mQ$ denote matrices.
+    \item $\odot$ denotes the Hadamard (element-wise) product.
+    \item $\sigma(\cdot)$ denotes the logistic sigmoid function $\sigma(x) = (1 + e^{-x})^{-1}$.
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{The Residual Stream and Why Normalization Matters}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{The Residual Stream}
+
+A decoder-only Transformer consists of $\nlayer$ identical blocks, each with two sublayers (attention and FFN). The key architectural principle is the \emph{residual connection}: each sublayer \emph{adds} its output to the input rather than replacing it:
+\begin{equation}\label{eq:residual}
+    \vx^{(\ell+1)} = \vx^{(\ell)} + f^{(\ell)}(\vx^{(\ell)})
+\end{equation}
+where $f^{(\ell)}$ is either the attention or FFN sublayer at layer $\ell$. The sequence of vectors $\vx^{(0)}, \vx^{(1)}, \ldots, \vx^{(\nlayer)}$ is called the \emph{residual stream}. Information accumulates additively as it flows through the network.
+
+\subsection{The Variance Growth Problem}
+
+Consider the residual stream after $L$ layers (each with two sublayer additions):
+\begin{equation}
+    \vx^{(L)} = \vx^{(0)} + \sum_{\ell=1}^{2L} f_\ell(\cdot)
+\end{equation}
+If the sublayer outputs are roughly independent with variance $\sigma^2_f$, then:
+\begin{equation}
+    \Var\bigl[\vx^{(L)}_i\bigr] \approx \Var\bigl[\vx^{(0)}_i\bigr] + 2L \cdot \sigma^2_f
+\end{equation}
+The variance of activations grows linearly with depth. This causes two problems:
+\begin{enumerate}
+    \item \textbf{Downstream layers receive inputs of unpredictable scale}, making it hard for learned weight matrices to produce useful outputs.
+    \item \textbf{Gradients may explode or vanish}, because the Jacobian $\partial \vx^{(\ell+1)} / \partial \vx^{(\ell)} = \mI + \partial f^{(\ell)} / \partial \vx^{(\ell)}$ compounds across layers.
+\end{enumerate}
+
+\textbf{Normalization solves this} by re-scaling activations to unit variance before each sublayer. This ensures that regardless of depth, every sublayer receives inputs of a controlled magnitude.
+
+\subsection{LayerNorm (V0)}
+
+\begin{definition}[Layer Normalization]
+For an input vector $\vx \in \reals^d$, Layer Normalization computes:
+\begin{equation}\label{eq:layernorm}
+    \mathrm{LayerNorm}(\vx) = \bm{\gamma} \odot \frac{\vx - \mu}{\sqrt{\sigma^2 + \epsilon}} + \bm{\beta}
+\end{equation}
+where $\mu = \frac{1}{d}\sum_{i=1}^d x_i$, \quad $\sigma^2 = \frac{1}{d}\sum_{i=1}^d (x_i - \mu)^2$, \quad and $\bm{\gamma}, \bm{\beta} \in \reals^d$ are learnable scale and shift parameters.
+\end{definition}
+
+LayerNorm performs two operations:
+\begin{enumerate}
+    \item \textbf{Centering:} subtract the mean $\mu$ (shifts the distribution to have zero mean).
+    \item \textbf{Scaling:} divide by the standard deviation $\sigma$ (normalizes to unit variance).
+\end{enumerate}
+The learnable parameters $\bm{\gamma}$ (scale) and $\bm{\beta}$ (shift) allow the network to undo the normalization if needed — but at a controlled, learned scale.
+
+\begin{remark}
+In our V0 implementation, we set $\bm{\beta} = \bm{0}$ (no bias), so LayerNorm only centers and scales, then applies the learnable gain $\bm{\gamma}$.
+\end{remark}
+
+\subsection{RMSNorm (V1)}
+
+\begin{definition}[Root Mean Square Normalization]
+For an input vector $\vx \in \reals^d$, RMSNorm computes:
+\begin{equation}\label{eq:rmsnorm}
+    \mathrm{RMSNorm}(\vx) = \bm{\gamma} \odot \frac{\vx}{\RMS(\vx)}
+\end{equation}
+where
+\begin{equation}
+    \RMS(\vx) = \sqrt{\frac{1}{d}\sum_{i=1}^d x_i^2 + \epsilon}
+\end{equation}
+and $\bm{\gamma} \in \reals^d$ is a learnable scale parameter.
+\end{definition}
+
+\subsubsection{Why Drop Mean-Centering?}
+
+The key difference: RMSNorm does \emph{not} subtract the mean. The justification is both empirical and theoretical:
+
+\begin{enumerate}
+    \item \textbf{Empirical:} Zhang and Sennrich (2019) showed that the re-centering operation in LayerNorm contributes negligibly to model quality at scale. The scaling operation (controlling magnitude) is what matters.
+    
+    \item \textbf{Theoretical:} Consider what centering does. If $\vx$ has mean $\mu$, then $\vx - \mu$ has mean zero. But the subsequent learnable scale $\bm{\gamma}$ and downstream linear projections can shift the mean anyway. The centering is redundant in the presence of later affine transformations.
+    
+    \item \textbf{Computational:} RMSNorm requires one fewer reduction operation per normalization:
+    \begin{itemize}[nosep]
+        \item LayerNorm: compute mean (1 reduction), compute variance (1 reduction), normalize.
+        \item RMSNorm: compute mean of squares (1 reduction), normalize.
+    \end{itemize}
+    In a model with $\nlayer$ blocks, each performing 2 normalizations (one before attention, one before FFN), this saves $2\nlayer$ reduction operations per forward pass.
+    
+    \item \textbf{No bias term:} RMSNorm has no $\bm{\beta}$ shift parameter, consistent with the modern ``no bias'' design philosophy where normalization handles scale and downstream layers handle any necessary shifting.
+\end{enumerate}
+
+\subsubsection{Mathematical Relationship}
+
+Let $\vx \in \reals^d$ with mean $\mu$ and variance $\sigma^2$. Then:
+\begin{equation}
+    \RMS(\vx)^2 = \frac{1}{d}\|\vx\|^2 = \frac{1}{d}\sum_i x_i^2 = \sigma^2 + \mu^2
+\end{equation}
+So $\RMS(\vx) = \sqrt{\sigma^2 + \mu^2}$. When $\mu \approx 0$ (which tends to happen after random initialization and in deep pre-norm networks), $\RMS(\vx) \approx \sigma$ and the two norms are nearly equivalent.
+
+\begin{remark}[Implementation]
+In our codebase (\texttt{src/models/rmsnorm.py}):
+\begin{lstlisting}
+rms = torch.sqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+return (x / rms) * self.weight
+\end{lstlisting}
+The \texttt{self.weight} is $\bm{\gamma}$, initialized to ones so that normalization is initially an identity-like operation (just rescaling to unit RMS).
+\end{remark}
+
+\subsection{Pre-Normalization vs.\ Post-Normalization}
+
+The \emph{placement} of normalization matters as much as its form. In the original Transformer (Vaswani et al., 2017), normalization was applied \emph{after} the residual addition (``Post-LN''):
+\begin{equation}
+    \vx^{(\ell+1)} = \mathrm{Norm}\bigl(\vx^{(\ell)} + f(\vx^{(\ell)})\bigr) \tag{Post-LN}
+\end{equation}
+
+Modern architectures (GPT-2 onwards) use \emph{pre-normalization} (``Pre-LN''):
+\begin{equation}
+    \vx^{(\ell+1)} = \vx^{(\ell)} + f\bigl(\mathrm{Norm}(\vx^{(\ell)})\bigr) \tag{Pre-LN}
+\end{equation}
+
+\begin{proposition}[Gradient Flow in Pre-LN]
+In the Pre-LN formulation, the gradient of the loss $\mathcal{L}$ with respect to layer $\ell$'s input satisfies:
+\begin{equation}
+    \frac{\partial \mathcal{L}}{\partial \vx^{(\ell)}} = \frac{\partial \mathcal{L}}{\partial \vx^{(L)}} + \sum_{k=\ell}^{L-1} \frac{\partial \mathcal{L}}{\partial \vx^{(L)}} \cdot \frac{\partial f_k}{\partial \vx^{(\ell)}}
+\end{equation}
+The first term is the \emph{direct gradient path} through the residual connections — it flows unimpeded from the loss to any layer. This ensures that even the earliest layers receive meaningful gradient signal regardless of depth.
+\end{proposition}
+
+In Post-LN, the normalization sits \emph{on} the residual path, blocking this clean gradient flow and making training sensitive to initialization and learning rate warmup.
+
+Both V0 and V1 use Pre-Normalization. V0 uses Pre-LayerNorm; V1 uses Pre-RMSNorm.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Activation Functions: From ReLU to SwiGLU}
+% ══════════════════════════════════════════════════════════════════════════════
+
+The feed-forward network (FFN) in each Transformer block is a position-wise MLP. Its role: after attention has allowed tokens to exchange information, the FFN processes each token independently through a nonlinear transformation. Without the nonlinearity, the composition of linear layers would collapse to a single linear map.
+
+\subsection{The Standard FFN Architecture (V0)}
+
+The vanilla FFN applies an expand-activate-compress pattern:
+\begin{equation}\label{eq:standard_ffn}
+    \mathrm{FFN}(\vx) = \mW_2 \cdot \phi(\mW_1 \vx) + \bm{b}
+\end{equation}
+where $\mW_1 \in \reals^{\dff \times \dmodel}$, $\mW_2 \in \reals^{\dmodel \times \dff}$, and $\phi$ is the activation function. The hidden dimension $\dff = 4 \cdot \dmodel$ by convention (a 4$\times$ expansion).
+
+The expansion to a higher-dimensional space gives the network more ``room'' to represent nonlinear functions. Think of it via the Johnson-Lindenstrauss perspective: in higher dimensions, randomly chosen subspaces are more likely to be nearly orthogonal, allowing the network to represent more independent features.
+
+\subsection{ReLU}
+
+\begin{definition}[Rectified Linear Unit]
+\begin{equation}
+    \ReLU(x) = \max(0, x) = x \cdot \mathbf{1}[x > 0]
+\end{equation}
+\end{definition}
+
+\textbf{Derivative:}
+\begin{equation}
+    \frac{d}{dx}\ReLU(x) = \begin{cases} 1 & x > 0 \\ 0 & x < 0 \\ \text{undefined} & x = 0 \end{cases}
+\end{equation}
+
+\textbf{Problems:}
+\begin{enumerate}
+    \item \textbf{Dead neurons:} If a neuron's pre-activation is negative for all inputs in a batch, its gradient is identically zero and the weight never updates. Once dead, a neuron stays dead. In deep networks with many neurons, a significant fraction can die during training.
+    
+    \item \textbf{Information destruction:} All negative information is permanently discarded. If the signal $\vx$ has useful information encoded in negative values, it is lost irrecoverably.
+    
+    \item \textbf{Non-smooth:} The kink at $x=0$ means the function is not differentiable at the origin. While this is handled in practice by defining $\ReLU'(0) = 0$, it creates a discontinuous gradient landscape.
+\end{enumerate}
+
+\subsection{GELU}
+
+\begin{definition}[Gaussian Error Linear Unit]
+\begin{equation}\label{eq:gelu}
+    \GELU(x) = x \cdot \Phi(x)
+\end{equation}
+where $\Phi(x) = P(Z \leq x)$ is the CDF of the standard normal distribution $Z \sim \mathcal{N}(0,1)$.
+\end{definition}
+
+\textbf{Interpretation:} GELU multiplies the input by its ``probability of being positive'' under a standard normal model. This is a smooth, probabilistic gate:
+\begin{itemize}[nosep]
+    \item Large positive $x$: $\Phi(x) \approx 1$, so $\GELU(x) \approx x$ (passes through).
+    \item Large negative $x$: $\Phi(x) \approx 0$, so $\GELU(x) \approx 0$ (suppressed).
+    \item Near zero: smooth interpolation (partial suppression).
+\end{itemize}
+
+\textbf{Approximation used in practice (GPT-2):}
+\begin{equation}
+    \GELU(x) \approx 0.5 \, x \left(1 + \tanh\left[\sqrt{\frac{2}{\pi}}\left(x + 0.044715\, x^3\right)\right]\right)
+\end{equation}
+
+\textbf{Derivative:}
+\begin{equation}
+    \GELU'(x) = \Phi(x) + x \cdot \phi(x)
+\end{equation}
+where $\phi(x) = \frac{1}{\sqrt{2\pi}}e^{-x^2/2}$ is the standard normal PDF. This is smooth everywhere — no dead neuron problem.
+
+\subsection{SiLU / Swish}
+
+Before defining SwiGLU, we need its building block:
+
+\begin{definition}[SiLU (Sigmoid Linear Unit), also called Swish]
+\begin{equation}\label{eq:silu}
+    \SiLU(x) = x \cdot \sigma(x) = \frac{x}{1 + e^{-x}}
+\end{equation}
+\end{definition}
+
+SiLU is similar to GELU but uses the logistic sigmoid instead of the normal CDF. Both are smooth approximations to ReLU that allow small negative values to pass through with diminished magnitude.
+
+\textbf{Key property:} $\SiLU'(x) = \sigma(x)(1 + x(1 - \sigma(x)))$. This is smooth, always nonzero, and avoids dead neurons.
+
+\subsection{SwiGLU: Gated Feed-Forward Network (V1)}
+
+\begin{definition}[SwiGLU Feed-Forward Network]
+The SwiGLU FFN uses a gating mechanism with three weight matrices:
+\begin{equation}\label{eq:swiglu}
+    \mathrm{SwiGLU}(\vx) = \mW_{\text{down}} \left[\SiLU(\mW_{\text{gate}} \vx) \odot (\mW_{\text{up}} \vx)\right]
+\end{equation}
+where $\mW_{\text{gate}}, \mW_{\text{up}} \in \reals^{d_h \times \dmodel}$ and $\mW_{\text{down}} \in \reals^{\dmodel \times d_h}$, with hidden dimension $d_h = \lceil \frac{8}{3}\dmodel \rceil_{64}$ (rounded to the nearest multiple of 64).
+\end{definition}
+
+\subsubsection{Why Gating?}
+
+The fundamental idea is to give the network \emph{two} parallel computations and let it learn which information to pass through:
+
+\begin{itemize}
+    \item \textbf{Gate path:} $\bm{g} = \SiLU(\mW_{\text{gate}} \vx)$ — computes a set of ``importance scores'' (values in roughly $(-0.3, \infty)$).
+    \item \textbf{Content path:} $\bm{u} = \mW_{\text{up}} \vx$ — computes the actual information to be passed.
+    \item \textbf{Gated output:} $\bm{g} \odot \bm{u}$ — the gate modulates what passes through.
+\end{itemize}
+
+This is analogous to the gating mechanism in LSTMs, but applied within the FFN. The gate can learn to:
+\begin{enumerate}
+    \item Selectively zero out irrelevant features (when $g_i \approx 0$).
+    \item Amplify important features (when $g_i > 1$).
+    \item Allow negative values through when appropriate (unlike ReLU).
+\end{enumerate}
+
+\subsubsection{Parameter Count Matching}
+
+The standard FFN has $2 \cdot \dmodel \cdot \dff = 2 \cdot \dmodel \cdot 4\dmodel = 8\dmodel^2$ parameters. SwiGLU has three matrices: $3 \cdot \dmodel \cdot d_h$. To match parameter count:
+\begin{equation}
+    3 \cdot \dmodel \cdot d_h = 8\dmodel^2 \implies d_h = \frac{8}{3}\dmodel
+\end{equation}
+This is why SwiGLU uses a $\frac{8}{3}\times$ expansion instead of $4\times$.
+
+\subsubsection{Empirical Results}
+
+Shazeer (2020) showed that SwiGLU consistently outperforms ReLU and GELU across model sizes from 100M to 1B parameters when controlling for total parameter count. The improvement is typically 0.1--0.3 perplexity points — small per experiment but consistent and significant at scale.
+
+\begin{remark}[Implementation]
+In our codebase (\texttt{src/models/swiglu\_ffn.py}):
+\begin{lstlisting}
+gate = F.silu(self.w_gate(x))   # Gate path: SiLU activation
+up = self.w_up(x)               # Content path: linear
+hidden = gate * up              # Hadamard product (gating)
+out = self.w_down(hidden)       # Project back to d_model
+\end{lstlisting}
+The hidden dimension is rounded to a multiple of 64 for GPU memory alignment, which improves throughput on tensor cores.
+\end{remark}
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Position Encoding: From Learned Embeddings to RoPE}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Why Position Matters}
+
+Self-attention is fundamentally a \emph{set operation}: the output is invariant to permutations of the input. Given a set of token vectors $\{\vx_1, \ldots, \vx_T\}$, the attention operation:
+\begin{equation}
+    \mathrm{Attn}(\vx_i) = \sum_{j=1}^T \frac{\exp(\vq_i^\top \vk_j / \sqrt{\dhead})}{\sum_k \exp(\vq_i^\top \vk_k / \sqrt{\dhead})} \vv_j
+\end{equation}
+produces the same output regardless of the ordering of $\{\vx_j\}_{j \neq i}$. But language is inherently sequential: ``the cat sat on the mat'' means something different from ``the mat sat on the cat.'' Without position information, the model cannot distinguish these.
+
+\subsection{Learned Position Embeddings (V0)}
+
+The simplest approach: maintain a lookup table $\mW_{\text{pos}} \in \reals^{T_{\max} \times \dmodel}$ where row $t$ is a learned vector representing position $t$. The model input is:
+\begin{equation}
+    \vx_t = \mW_{\text{tok}}[w_t] + \mW_{\text{pos}}[t]
+\end{equation}
+where $w_t$ is the token at position $t$.
+
+\textbf{Limitations:}
+\begin{enumerate}
+    \item \textbf{Absolute, not relative:} The model learns ``what position 47 looks like'' rather than ``what being 3 positions apart looks like.'' This makes it harder to generalize patterns that depend on relative distance.
+    \item \textbf{Fixed maximum length:} The embedding table has $T_{\max}$ rows. The model cannot process sequences longer than $T_{\max}$ without retraining or interpolation.
+    \item \textbf{No inductive bias for locality:} There's no built-in notion that nearby positions should have similar embeddings. The model must learn this from data.
+\end{enumerate}
+
+\subsection{Rotary Position Embeddings (RoPE) — V1}
+
+RoPE (Su et al., 2021) encodes position by \emph{rotating} the query and key vectors in 2D subspaces. The core insight: if we rotate $\vq$ at position $m$ by angle $m\theta$ and $\vk$ at position $n$ by angle $n\theta$, then their dot product depends on $(m-n)\theta$ — the \emph{relative} distance.
+
+\subsubsection{Mathematical Formulation}
+
+Consider a pair of dimensions $(x_0, x_1)$ from the head vector. RoPE applies the 2D rotation:
+\begin{equation}\label{eq:rope_rotation}
+    \begin{pmatrix} x_0' \\ x_1' \end{pmatrix} = \begin{pmatrix} \cos(m\theta) & -\sin(m\theta) \\ \sin(m\theta) & \cos(m\theta) \end{pmatrix} \begin{pmatrix} x_0 \\ x_1 \end{pmatrix}
+\end{equation}
+where $m$ is the position index and $\theta$ is the frequency for this dimension pair.
+
+For a head of dimension $\dhead$ (which must be even), we partition the dimensions into $\dhead/2$ pairs, each with a different frequency:
+\begin{equation}\label{eq:rope_freqs}
+    \theta_k = \frac{1}{\Theta^{2k/\dhead}}, \quad k = 0, 1, \ldots, \frac{\dhead}{2} - 1
+\end{equation}
+where $\Theta = 10000$ is the base frequency (a hyperparameter). Low-index pairs rotate at high frequency (capturing fine-grained local position), while high-index pairs rotate at low frequency (capturing long-range position).
+
+\subsubsection{The Full Rotation}
+
+Let $\vq_m \in \reals^{\dhead}$ be the query vector at position $m$. We write $\vq_m = (q_0, q_1, q_2, q_3, \ldots, q_{\dhead-2}, q_{\dhead-1})$ and apply the block-diagonal rotation:
+\begin{equation}
+    \mR_m = \diag\bigl(R(m\theta_0), R(m\theta_1), \ldots, R(m\theta_{\dhead/2-1})\bigr)
+\end{equation}
+where each $R(\alpha) = \begin{psmallmatrix} \cos\alpha & -\sin\alpha \\ \sin\alpha & \cos\alpha \end{psmallmatrix}$ is a 2D rotation matrix. The rotated query is $\tilde{\vq}_m = \mR_m \vq_m$.
+
+\subsubsection{Why Relative Position Emerges}
+
+\begin{proposition}[Relative Position from Rotation]
+Let $\tilde{\vq}_m = \mR_m \vq_m$ and $\tilde{\vk}_n = \mR_n \vk_n$. Then:
+\begin{equation}
+    \tilde{\vq}_m^\top \tilde{\vk}_n = \vq_m^\top \mR_m^\top \mR_n \, \vk_n = \vq_m^\top \mR_{n-m} \, \vk_n
+\end{equation}
+since rotation matrices satisfy $\mR_m^\top \mR_n = \mR_{n-m}$.
+\end{proposition}
+
+\begin{proof}
+For a single 2D subspace with frequency $\theta_k$:
+\begin{align}
+    R(m\theta_k)^\top R(n\theta_k) &= R(-m\theta_k) \cdot R(n\theta_k) \\
+    &= R((n-m)\theta_k)
+\end{align}
+since $R(\alpha)^\top = R(-\alpha)$ and $R(\alpha)R(\beta) = R(\alpha + \beta)$ (rotation group property). Applying this to each 2D block yields $\mR_m^\top \mR_n = \mR_{n-m}$.
+\end{proof}
+
+This means the attention score between positions $m$ and $n$ depends on their \emph{relative distance} $m - n$, not their absolute positions. The model gets relative position attention for free, without any additional parameters.
+
+\subsubsection{Multi-Frequency Design}
+
+The frequencies $\theta_k = \Theta^{-2k/\dhead}$ form a geometric progression spanning several orders of magnitude. For $\dhead = 64$ and $\Theta = 10000$:
+\begin{itemize}[nosep]
+    \item $\theta_0 = 1.0$ (highest frequency: full rotation every $2\pi \approx 6$ positions)
+    \item $\theta_{15} = 10000^{-0.5} = 0.01$ (rotates every $\sim 628$ positions)
+    \item $\theta_{31} = 10000^{-1} = 0.0001$ (lowest frequency: rotates every $\sim 62{,}800$ positions)
+\end{itemize}
+
+This is analogous to a Fourier basis: different dimension pairs encode position at different scales, from local (``are these tokens adjacent?'') to global (``are they in the same paragraph?'').
+
+\subsubsection{Advantages over Learned Embeddings}
+
+\begin{enumerate}
+    \item \textbf{Length generalization:} The rotation pattern is a smooth, extrapolable function. A model trained on sequences of length 2048 can, with some degradation, process sequences of length 4096 because the rotation continues its pattern.
+    
+    \item \textbf{No additional parameters:} RoPE uses no learned embedding table. The cos/sin values are deterministic functions of position.
+    
+    \item \textbf{Natural distance decay:} The inner product $\vq_m^\top \mR_{n-m} \vk_n$ tends to decrease for large $|m-n|$ due to the oscillatory nature of the rotations across many frequency bands. This provides a soft inductive bias for locality.
+    
+    \item \textbf{Compatible with KV-cache:} During generation, we simply apply the rotation for the current position to the new token's Q and K. The cached K vectors (already rotated at their creation time) remain valid.
+\end{enumerate}
+
+\subsubsection{Applied to Q and K Only}
+
+RoPE is applied to queries $\mQ$ and keys $\mK$ but \emph{not} to values $\mV$. The reason: values represent \emph{content} to be aggregated, while keys and queries determine the \emph{attention pattern} (who attends to whom). Position information is needed for the attention routing but not for the content itself.
+
+\begin{remark}[Implementation]
+In our codebase (\texttt{src/models/rope.py}), the ``interleaved'' split is used (LLaMA style):
+\begin{lstlisting}
+# Split into first half and second half
+x1 = x[..., :d_half]      # "real" part
+x2 = x[..., d_half:]      # "imaginary" part
+
+# Apply rotation
+x1_rot = x1 * cos - x2 * sin
+x2_rot = x1 * sin + x2 * cos
+return torch.cat([x1_rot, x2_rot], dim=-1)
+\end{lstlisting}
+This is equivalent to applying the 2D rotation matrices blockwise. The cos/sin tables are precomputed once for all positions up to $T_{\max}$ and stored as non-learnable buffers.
+\end{remark}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Attention Mechanisms}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Scaled Dot-Product Attention}
+
+\begin{definition}[Scaled Dot-Product Attention]
+Given queries $\mQ \in \reals^{T_q \times \dhead}$, keys $\mK \in \reals^{T_k \times \dhead}$, and values $\mV \in \reals^{T_k \times \dhead}$:
+\begin{equation}\label{eq:attention}
+    \mathrm{Attention}(\mQ, \mK, \mV) = \softmax\left(\frac{\mQ \mK^\top}{\sqrt{\dhead}}\right) \mV
+\end{equation}
+\end{definition}
+
+\subsubsection{Why Scale by $\sqrt{\dhead}$?}
+
+Let $\vq, \vk \in \reals^{\dhead}$ with i.i.d.\ components $q_i, k_i$ having zero mean and unit variance. Then:
+\begin{equation}
+    \E[\vq^\top \vk] = \sum_{i=1}^{\dhead} \E[q_i k_i] = 0
+\end{equation}
+\begin{equation}
+    \Var[\vq^\top \vk] = \sum_{i=1}^{\dhead} \Var[q_i k_i] = \dhead
+\end{equation}
+So $\vq^\top \vk \sim \mathcal{O}(\sqrt{\dhead})$ in magnitude. Without scaling, for $\dhead = 64$, the dot products would have standard deviation $8$. After softmax, this would push the distribution toward one-hot vectors (one key gets nearly all the weight), starving the gradient. Dividing by $\sqrt{\dhead}$ normalizes to unit variance, keeping the softmax in its sensitive (non-saturated) regime.
+
+\subsection{Multi-Head Attention}
+
+Rather than computing a single attention function with $\dmodel$-dimensional queries/keys/values, we split into $\nhead$ heads:
+\begin{equation}
+    \mQ^{(h)} = \vx \mW_Q^{(h)}, \quad \mK^{(h)} = \vx \mW_K^{(h)}, \quad \mV^{(h)} = \vx \mW_V^{(h)}
+\end{equation}
+where $\mW_Q^{(h)}, \mW_K^{(h)}, \mW_V^{(h)} \in \reals^{\dmodel \times \dhead}$. Each head computes attention independently:
+\begin{equation}
+    \text{head}_h = \mathrm{Attention}(\mQ^{(h)}, \mK^{(h)}, \mV^{(h)})
+\end{equation}
+Then concatenate and project:
+\begin{equation}
+    \mathrm{MultiHead}(\vx) = \mathrm{Concat}(\text{head}_1, \ldots, \text{head}_{\nhead}) \cdot \mW_O
+\end{equation}
+where $\mW_O \in \reals^{\dmodel \times \dmodel}$.
+
+\textbf{Why multiple heads?} Different heads can learn to attend to different types of relationships: one head might learn syntactic dependencies (subject-verb), another might learn coreference (pronoun-antecedent), another might focus on local context. This is an architectural form of ensemble learning within a single layer.
+
+\subsection{Causal Masking}
+
+For autoregressive language modeling, position $t$ must not attend to positions $t+1, t+2, \ldots$ (the ``future''). This is enforced by setting future attention scores to $-\infty$ before softmax:
+\begin{equation}
+    A_{ij} = \begin{cases}
+        \frac{\vq_i^\top \vk_j}{\sqrt{\dhead}} & \text{if } j \leq i \\
+        -\infty & \text{if } j > i
+    \end{cases}
+\end{equation}
+After softmax, $-\infty$ entries become zero, so each position only attends to past positions and itself.
+
+\textbf{Mask shape:} The causal mask is a lower-triangular matrix $\mM \in \{0, 1\}^{T \times T}$ with $M_{ij} = \mathbf{1}[j \leq i]$.
+
+\subsection{Vanilla Attention (V0 Implementation)}
+
+In our V0 model, attention is computed explicitly:
+
+\begin{algorithm}[H]
+\caption{V0: Explicit Causal Self-Attention}
+\begin{algorithmic}[1]
+\State $[\mQ; \mK; \mV] \gets \vx \cdot \mW_{\text{qkv}}$ \Comment{Combined projection, shape $(B, T, 3\dmodel)$}
+\State Reshape to $(B, \nhead, T, \dhead)$ for each of $\mQ, \mK, \mV$
+\State $\mA \gets \mQ \mK^\top / \sqrt{\dhead}$ \Comment{Attention scores: $(B, \nhead, T, T)$}
+\State $\mA \gets \mA \odot \mM + (-\infty)(1 - \mM)$ \Comment{Apply causal mask}
+\State $\mA \gets \softmax(\mA, \text{dim}=-1)$ \Comment{Normalize to probabilities}
+\State $\text{out} \gets \mA \cdot \mV$ \Comment{Weighted sum of values: $(B, \nhead, T, \dhead)$}
+\State Concatenate heads, apply $\mW_O$
+\end{algorithmic}
+\end{algorithm}
+
+\textbf{Complexity:} The attention matrix $\mA$ has shape $(B, \nhead, T, T)$. This requires:
+\begin{itemize}[nosep]
+    \item \textbf{Compute:} $\mathcal{O}(T^2 \cdot \dhead)$ per head for the matrix multiply.
+    \item \textbf{Memory:} $\mathcal{O}(B \cdot \nhead \cdot T^2)$ to store the full attention matrix.
+\end{itemize}
+For $T = 2048$, $B = 4$, $\nhead = 8$, that's $4 \times 8 \times 2048^2 \times 4$ bytes $\approx 512$ MB just for the attention matrix.
+
+\subsection{Flash Attention (V1 Implementation)}
+
+Flash Attention (Dao et al., 2022) computes \emph{mathematically identical} results to standard attention but without materializing the $T \times T$ attention matrix in GPU HBM (High Bandwidth Memory).
+
+\subsubsection{The Memory Hierarchy Insight}
+
+GPUs have a memory hierarchy:
+\begin{itemize}[nosep]
+    \item \textbf{HBM (High Bandwidth Memory):} Large (24 GB on L4), slow to access ($\sim$2 TB/s).
+    \item \textbf{SRAM (on-chip):} Small ($\sim$192 KB per streaming multiprocessor), fast ($\sim$19 TB/s).
+\end{itemize}
+
+Standard attention writes the full $T \times T$ matrix to HBM, then reads it back for the softmax and value multiplication. Flash Attention instead processes the attention computation in \emph{tiles} that fit in SRAM, computing partial softmax results and accumulating them without ever writing the full matrix to HBM.
+
+\subsubsection{Tiled Computation (Conceptual)}
+
+The key algorithmic idea is the \emph{online softmax} trick. Instead of computing all attention scores, applying softmax globally, then multiplying by values, Flash Attention:
+
+\begin{enumerate}
+    \item Loads a tile of $\mQ$ (a block of query rows) into SRAM.
+    \item Iterates over tiles of $\mK, \mV$ (blocks of key/value columns).
+    \item For each $(\mQ_{\text{tile}}, \mK_{\text{tile}}, \mV_{\text{tile}})$:
+    \begin{itemize}
+        \item Computes local attention scores $\mQ_{\text{tile}} \mK_{\text{tile}}^\top$.
+        \item Updates a running softmax normalization (tracking the running max and sum of exponentials).
+        \item Accumulates the partial weighted sum $\mA_{\text{tile}} \mV_{\text{tile}}$.
+    \end{itemize}
+    \item After all K/V tiles are processed, the final result is the correctly normalized attention output.
+\end{enumerate}
+
+\subsubsection{Memory Reduction}
+
+\begin{itemize}
+    \item \textbf{Standard attention:} $\mathcal{O}(T^2)$ memory for the attention matrix.
+    \item \textbf{Flash Attention:} $\mathcal{O}(T)$ memory — only the output and a few scalars (running max, running sum) per query row are kept.
+\end{itemize}
+
+The outputs are \emph{numerically identical} (up to floating-point associativity). This is not an approximation — it's a more efficient computation of the exact same mathematical operation.
+
+\subsubsection{Our V1 Implementation}
+
+We use PyTorch's \texttt{scaled\_dot\_product\_attention}, which automatically dispatches to the fastest available kernel:
+\begin{lstlisting}
+out = F.scaled_dot_product_attention(
+    q, k, v,
+    attn_mask=None,
+    dropout_p=dropout_p,
+    is_causal=is_causal,  # True during training
+)
+\end{lstlisting}
+The \texttt{is\_causal=True} flag tells the kernel to apply the causal mask internally (more efficient than passing an explicit mask tensor).
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{The KV-Cache: Efficient Autoregressive Generation}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{The Problem: Redundant Computation}
+
+Autoregressive generation produces one token at a time. At step $t$, the model has generated tokens $(w_1, w_2, \ldots, w_t)$ and must compute the probability distribution $P(w_{t+1} \mid w_1, \ldots, w_t)$.
+
+A naive implementation recomputes the full forward pass over all $t$ tokens at each step. Since attention requires computing Q, K, V for every position, the total work across all generation steps is:
+\begin{equation}
+    \text{Total compute (naive)} = \sum_{t=1}^{T} \mathcal{O}(t \cdot \dmodel) = \mathcal{O}(T^2 \cdot \dmodel)
+\end{equation}
+
+\subsection{The Insight: Causal Independence}
+
+In causal attention, the key and value vectors at position $j < t$ depend only on tokens $w_1, \ldots, w_j$ (due to the causal mask). They are \emph{completely independent} of what tokens are generated at positions $j+1, j+2, \ldots$. Therefore, $\vk_j$ and $\vv_j$ computed at step $j$ remain valid at all future steps.
+
+\subsection{The Solution: Cache K and V}
+
+\begin{definition}[KV-Cache]
+The KV-cache is a per-layer storage of previously computed key and value tensors:
+\begin{equation}
+    \text{cache}^{(\ell)} = \bigl(\mK^{(\ell)}_{1:t-1}, \; \mV^{(\ell)}_{1:t-1}\bigr) \in \reals^{(t-1) \times \dhead} \times \reals^{(t-1) \times \dhead}
+\end{equation}
+At generation step $t$, we:
+\begin{enumerate}
+    \item Compute $\vq_t, \vk_t, \vv_t$ for the new token only.
+    \item Append $\vk_t$ and $\vv_t$ to the cache.
+    \item Compute attention: $\vq_t$ against all cached keys $\mK_{1:t}$, weighted sum of cached values $\mV_{1:t}$.
+\end{enumerate}
+\end{definition}
+
+\subsection{Complexity Analysis}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+& \textbf{Per-step compute} & \textbf{Total (T steps)} \\
+\midrule
+Without cache & $\mathcal{O}(t \cdot \dmodel)$ & $\mathcal{O}(T^2 \cdot \dmodel)$ \\
+With cache    & $\mathcal{O}(\dmodel)$ (projection) $+ \mathcal{O}(t \cdot \dhead)$ (attention) & $\mathcal{O}(T^2 \cdot \dhead + T \cdot \dmodel)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The dominant speedup comes from avoiding the recomputation of Q, K, V projections for all past positions. The attention computation itself still scans over the cache ($\mathcal{O}(t)$ per step), but this is a single vector-matrix product rather than a full matrix-matrix product.
+
+\subsection{Memory Cost}
+
+The KV-cache memory per layer is:
+\begin{equation}
+    \text{Memory}^{(\ell)} = 2 \times B \times \nhead \times T \times \dhead \times \text{bytes\_per\_element}
+\end{equation}
+Total across all layers:
+\begin{equation}
+    \text{Total KV-cache} = 2 \cdot \nlayer \cdot B \cdot \nhead \cdot T \cdot \dhead \cdot s
+\end{equation}
+where $s$ is the element size (2 bytes for bfloat16, 4 for float32).
+
+\begin{example}[Cache Size for Our Models]
+\begin{itemize}[nosep]
+    \item \textbf{Debug} ($\nlayer=4, \nhead=4, \dhead=64, T=512$, bf16): $2 \times 4 \times 1 \times 4 \times 512 \times 64 \times 2 = 2$ MB
+    \item \textbf{Main} ($\nlayer=8, \nhead=8, \dhead=64, T=1024$, bf16): $2 \times 8 \times 1 \times 8 \times 1024 \times 64 \times 2 = 16$ MB
+    \item \textbf{LLaMA-7B} ($\nlayer=32, \nhead=32, \dhead=128, T=4096$, bf16): $2 \times 32 \times 1 \times 32 \times 4096 \times 128 \times 2 \approx 2$ GB
+\end{itemize}
+\end{example}
+
+\subsection{Limitations}
+
+\begin{enumerate}
+    \item \textbf{Memory bound:} For long sequences and large batch sizes, the KV-cache can exceed GPU memory. This is the primary bottleneck for serving LLMs in production (not compute, but memory for the cache).
+    
+    \item \textbf{Cannot modify history:} Once a token's K/V is cached, it cannot be changed. Techniques that rewrite or edit prior tokens (e.g., speculative decoding with rejection) must handle cache invalidation carefully.
+    
+    \item \textbf{Linear growth with sequence length:} The cache grows by $2 \cdot \nlayer \cdot \nhead \cdot \dhead$ bytes per generated token. For very long generations (10K+ tokens), memory management becomes critical.
+    
+    \item \textbf{Incompatible with \texttt{torch.compile}:} The cache grows dynamically (shape changes every step), which breaks the static-shape assumption of graph compilation. We use \texttt{torch.compile} for training (fixed shapes) and KV-cache for generation (dynamic shapes) — they complement each other but cannot be combined.
+\end{enumerate}
+
+\subsection{KV-Cache with RoPE}
+
+An important compatibility note: in V1 (with RoPE), the cached key vectors are stored \emph{after} rotation has been applied. When generating token $t$:
+\begin{enumerate}
+    \item Compute $\vk_t = \mW_K \vx_t$.
+    \item Apply RoPE: $\tilde{\vk}_t = \mR_t \vk_t$ (rotate by angle proportional to position $t$).
+    \item Append $\tilde{\vk}_t$ to cache.
+    \item The cached keys from positions $1, \ldots, t-1$ were already rotated by their respective positions when they were first computed. No re-rotation needed.
+\end{enumerate}
+This is why RoPE and KV-cache are naturally compatible: each key is rotated exactly once at creation time.
+
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Architectural Design Decisions}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Weight Initialization}
+
+\subsubsection{The Problem}
+
+At initialization, a network with $L$ layers applies a sequence of linear transformations and nonlinearities. If weights are too large, activations grow exponentially with depth (\emph{explosion}). If too small, they shrink to zero (\emph{vanishing}). We need the variance of activations to remain roughly constant across layers.
+
+\subsubsection{Xavier / Glorot Initialization}
+
+For a linear layer $\vy = \mW \vx$ with $\mW \in \reals^{d_{\text{out}} \times d_{\text{in}}}$, if we want $\Var[y_i] = \Var[x_j]$:
+\begin{equation}
+    \Var[W_{ij}] = \frac{1}{d_{\text{in}}}
+\end{equation}
+This is Xavier initialization: $W_{ij} \sim \mathcal{N}(0, 1/d_{\text{in}})$ or $W_{ij} \sim \mathrm{Uniform}(-\sqrt{3/d_{\text{in}}}, \sqrt{3/d_{\text{in}}})$.
+
+\subsubsection{GPT-2 Initialization (Our Choice)}
+
+GPT-2 uses a fixed standard deviation of $0.02$ for all weights, with a special scaling for \emph{residual projections}:
+\begin{equation}\label{eq:gpt2_init}
+    W_{ij} \sim \begin{cases}
+        \mathcal{N}(0, \, 0.02^2) & \text{(most layers)} \\
+        \mathcal{N}\left(0, \, \frac{0.02^2}{2\nlayer}\right) & \text{(residual output projections)}
+    \end{cases}
+\end{equation}
+
+\textbf{Why the $1/\sqrt{2\nlayer}$ scaling?}
+
+Each layer adds to the residual stream twice (once from attention, once from FFN):
+\begin{equation}
+    \vx^{(\ell+1)} = \vx^{(\ell)} + \underbrace{\mW_O \cdot \text{Attn}(\cdot)}_{\text{attention output}} + \underbrace{\mW_2 \cdot \phi(\mW_1 \cdot)}_{\text{FFN output}}
+\end{equation}
+
+If each addition contributes variance $\sigma^2_{\text{add}}$, then after $\nlayer$ layers (i.e., $2\nlayer$ additions):
+\begin{equation}
+    \Var[\vx^{(L)}] \approx \Var[\vx^{(0)}] + 2\nlayer \cdot \sigma^2_{\text{add}}
+\end{equation}
+
+By initializing the output projections ($\mW_O$ in attention, $\mW_2$ in FFN) with std $= 0.02 / \sqrt{2\nlayer}$, we ensure that the variance contributed by each residual addition is $\sim 0.02^2 / (2\nlayer)$, and the total accumulated variance is $\sim 0.02^2$ regardless of depth.
+
+\begin{remark}
+In our V1 model, the same initialization applies: \texttt{out\_proj} (attention) and \texttt{w\_down} (SwiGLU) use the scaled initialization, while all other projections use std $= 0.02$.
+\end{remark}
+
+\subsection{Weight Tying}
+
+\begin{definition}[Weight Tying]
+The token embedding matrix $\mW_{\text{tok}} \in \reals^{V \times \dmodel}$ and the output head matrix $\mW_{\text{head}} \in \reals^{V \times \dmodel}$ share the same parameters:
+\begin{equation}
+    \mW_{\text{head}} = \mW_{\text{tok}}
+\end{equation}
+\end{definition}
+
+\textbf{Justification:} The embedding maps token $w$ to a vector $\vx_w \in \reals^{\dmodel}$. The output head computes logits via $z_w = \vx_w^\top \vh$ where $\vh$ is the final hidden state. With weight tying, the logit for token $w$ is the dot product between the final hidden state and that token's embedding vector. This creates a symmetric relationship: the model uses the same vector space to ``understand'' a token (input) and ``predict'' it (output).
+
+\textbf{Parameter savings:} For $V = 50257$ and $\dmodel = 512$: the embedding matrix has $\sim 25.7$M parameters. Without tying, the output head adds another $25.7$M. With tying, these are shared — a significant reduction for models of our scale.
+
+\subsection{No Bias}
+
+Modern LLMs (LLaMA, Mistral, PaLM) omit bias terms from all linear layers. The reasons:
+
+\begin{enumerate}
+    \item \textbf{Redundancy with normalization:} Pre-normalization (either LayerNorm or RMSNorm) rescales inputs before each linear layer. A bias in the linear layer attempts to shift the distribution, but the next normalization will undo much of that shift. The bias is fighting the normalization.
+    
+    \item \textbf{RoPE compatibility:} Rotary position embeddings operate on the Q and K vectors via rotation. A bias term in the Q/K projection would add a position-independent offset that does not rotate correctly, interfering with the positional encoding.
+    
+    \item \textbf{Marginal parameter cost:} For a layer with $\dmodel = 512$, the bias adds 512 parameters (vs.\ $512^2 = 262144$ for the weight matrix). The relative contribution is negligible, and empirically removing it does not hurt loss.
+\end{enumerate}
+
+\subsection{No Dropout}
+
+\begin{definition}[Dropout]
+During training, each activation $x_i$ is independently set to zero with probability $p$, and surviving activations are scaled by $1/(1-p)$ to maintain expected values:
+\begin{equation}
+    \text{Dropout}(x_i) = \begin{cases} 0 & \text{with probability } p \\ x_i / (1-p) & \text{with probability } 1-p \end{cases}
+\end{equation}
+\end{definition}
+
+Modern pretraining uses dropout $= 0$ because:
+\begin{enumerate}
+    \item \textbf{Data scale prevents overfitting:} Dropout is a regularizer designed for regimes where the model has more capacity than data. When training on hundreds of millions of tokens, the model cannot memorize the data — underfitting is the concern, not overfitting.
+    
+    \item \textbf{Empirical evidence:} LLaMA, GPT-3, Chinchilla, and PaLM all train with zero dropout. Adding dropout to these models slows convergence without improving generalization.
+    
+    \item \textbf{Controlled experiments:} In our project, using dropout$=0$ across all variants ensures that performance differences reflect architectural choices, not regularization effects.
+\end{enumerate}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Training: Optimization and Numerical Precision}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{AdamW Optimizer}
+
+\begin{definition}[AdamW]
+AdamW updates parameters $\bm{\theta}$ with decoupled weight decay:
+\begin{align}
+    \bm{m}_t &= \beta_1 \bm{m}_{t-1} + (1 - \beta_1) \bm{g}_t \label{eq:adam_m} \\
+    \bm{v}_t &= \beta_2 \bm{v}_{t-1} + (1 - \beta_2) \bm{g}_t^2 \label{eq:adam_v} \\
+    \hat{\bm{m}}_t &= \bm{m}_t / (1 - \beta_1^t) \label{eq:adam_mhat} \\
+    \hat{\bm{v}}_t &= \bm{v}_t / (1 - \beta_2^t) \label{eq:adam_vhat} \\
+    \bm{\theta}_t &= \bm{\theta}_{t-1} - \eta\left(\frac{\hat{\bm{m}}_t}{\sqrt{\hat{\bm{v}}_t} + \epsilon} + \lambda \bm{\theta}_{t-1}\right) \label{eq:adamw_update}
+\end{align}
+\end{definition}
+
+Our hyperparameters: $\beta_1 = 0.9$, $\beta_2 = 0.95$, $\lambda = 0.1$ (weight decay), $\eta = 3 \times 10^{-4}$ (peak learning rate).
+
+\textbf{Weight decay groups:} We apply weight decay only to 2D weight matrices (not to biases, normalization parameters, or 1D vectors). The intuition: weight decay regularizes by penalizing large weights, which makes sense for weight matrices that perform learned transformations. Applying it to normalization scales or bias terms would interfere with their functional roles.
+
+\subsection{Learning Rate Schedule: Cosine Decay with Warmup}
+
+\begin{equation}\label{eq:cosine_schedule}
+    \eta(t) = \begin{cases}
+        \eta_{\max} \cdot \frac{t}{t_{\text{warmup}}} & t < t_{\text{warmup}} \quad \text{(linear warmup)} \\[0.5em]
+        \eta_{\min} + \frac{\eta_{\max} - \eta_{\min}}{2}\left(1 + \cos\left(\pi \cdot \frac{t - t_{\text{warmup}}}{t_{\text{total}} - t_{\text{warmup}}}\right)\right) & t \geq t_{\text{warmup}} \quad \text{(cosine decay)}
+    \end{cases}
+\end{equation}
+
+\textbf{Why warmup?} At initialization, the model's loss landscape is poorly conditioned. Large learning rates in the first few steps can cause irreversible damage (activations explode, attention patterns degenerate). The warmup phase lets the model find a reasonable region of parameter space before applying full learning rate.
+
+\textbf{Why cosine decay?} Cosine gives a smooth annealing from $\eta_{\max}$ to $\eta_{\min}$, spending most time at intermediate learning rates. Compared to linear decay, cosine stays at higher learning rates longer (better exploration) and then drops quickly near the end (better convergence). Empirically, cosine schedules produce lower final loss than linear or step schedules.
+
+\subsection{Gradient Clipping}
+
+\begin{definition}[Gradient Clipping by Norm]
+If the global gradient norm $\|\bm{g}\| > c$ (clip threshold), rescale:
+\begin{equation}
+    \bm{g} \leftarrow c \cdot \frac{\bm{g}}{\|\bm{g}\|}
+\end{equation}
+\end{definition}
+
+We use $c = 1.0$. This prevents training instabilities from occasional large gradients (caused by unlucky data batches or numerical issues) without systematically changing the gradient direction.
+
+\subsection{Mixed Precision Training (bfloat16)}
+
+\subsubsection{Number Formats}
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Format & Sign & Exponent & Mantissa & Total bits \\
+\midrule
+float32 & 1 & 8 & 23 & 32 \\
+float16 & 1 & 5 & 10 & 16 \\
+bfloat16 & 1 & 8 & 7 & 16 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Why bfloat16 Works}
+
+The key insight: neural network gradients are \emph{stochastic}. The noise from mini-batch sampling has much larger magnitude than the rounding error introduced by reducing mantissa precision from 23 bits to 7 bits. Formally, if $g$ is the true gradient and $\hat{g}$ is the mini-batch estimate:
+\begin{equation}
+    \underbrace{|g - \hat{g}|}_{\text{sampling noise}} \gg \underbrace{|\hat{g} - \text{round}_{\text{bf16}}(\hat{g})|}_{\text{quantization error}}
+\end{equation}
+
+What \emph{does} matter is \textbf{range}: if the exponent is too small, large gradients overflow to infinity or small values underflow to zero, breaking training. bfloat16's 8-bit exponent has the same range as float32 ($\sim 10^{-38}$ to $\sim 10^{38}$), so no gradient scaler is needed (unlike float16's 5-bit exponent).
+
+\subsubsection{Mixed Precision Strategy}
+
+Not all operations use bf16:
+\begin{itemize}[nosep]
+    \item \textbf{Matrix multiplications} (linear layers, attention $\mQ\mK^\top$): bf16 — these dominate compute and benefit most from halved memory bandwidth.
+    \item \textbf{Reductions} (softmax, normalization, loss): float32 — sensitive to accumulation errors.
+    \item \textbf{Optimizer state} (Adam moments $\bm{m}, \bm{v}$): float32 — need precision for tiny weight updates.
+    \item \textbf{Master weights}: float32 — the ``true'' weights; bf16 copies used for forward/backward.
+\end{itemize}
+
+\textbf{Throughput gain:} On NVIDIA tensor cores (Ampere+), bf16 matmuls run at 2$\times$ the throughput of float32. Combined with halved memory bandwidth requirements, typical end-to-end speedup is 1.5--2$\times$.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Decoding Strategies}
+% ══════════════════════════════════════════════════════════════════════════════
+
+After the forward pass produces logits $\vz \in \reals^V$ (one score per vocabulary token), we need a strategy to select the next token.
+
+\subsection{Temperature Scaling}
+
+Before applying any selection strategy, we can adjust the ``sharpness'' of the distribution:
+\begin{equation}
+    P(w_i) = \frac{\exp(z_i / \tau)}{\sum_j \exp(z_j / \tau)}
+\end{equation}
+where $\tau > 0$ is the temperature:
+\begin{itemize}[nosep]
+    \item $\tau \to 0$: distribution collapses to a point mass on the highest logit (greedy).
+    \item $\tau = 1$: the model's natural distribution.
+    \item $\tau > 1$: flatter distribution (more randomness, more ``creativity'').
+\end{itemize}
+
+\subsection{Greedy Decoding}
+
+\begin{equation}
+    w_{t+1} = \arg\max_w P(w \mid w_1, \ldots, w_t)
+\end{equation}
+
+Deterministic and fast but produces repetitive, ``safe'' text. The mode of the distribution is not necessarily the best sequence — this is a locally optimal choice that can lead to globally suboptimal sequences.
+
+\subsection{Top-$k$ Sampling}
+
+Restrict the sampling distribution to the $k$ highest-probability tokens:
+\begin{equation}
+    P_{\text{top-}k}(w_i) = \begin{cases}
+        P(w_i) / \sum_{j \in \text{top-}k} P(w_j) & w_i \in \text{top-}k \\
+        0 & \text{otherwise}
+    \end{cases}
+\end{equation}
+
+\textbf{Limitation:} $k$ is fixed regardless of the distribution shape. If the model is very confident (one token has 95\% probability), $k=50$ still samples from 50 tokens. If the model is uncertain (flat distribution), $k=50$ might exclude reasonable options.
+
+\subsection{Nucleus Sampling (Top-$p$)}
+
+Sort tokens by descending probability and include tokens until the cumulative probability exceeds $p$:
+\begin{equation}
+    V_p = \min\left\{V' \subseteq V : \sum_{w \in V'} P(w) \geq p\right\}
+\end{equation}
+where the minimization is over the smallest set of highest-probability tokens that together exceed probability $p$.
+
+\textbf{Advantage over top-$k$:} The number of candidate tokens adapts to the model's uncertainty. When confident, $|V_p|$ might be 2--3 tokens. When uncertain, $|V_p|$ might be hundreds. This is the current industry standard (used in GPT-3, Claude, etc.).
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{V0 to V1: Summary of Changes}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\begin{center}
+\begin{tabular}{p{3.5cm}p{5cm}p{5cm}}
+\toprule
+\textbf{Component} & \textbf{V0 (Vanilla / GPT-2)} & \textbf{V1 (Modern / LLaMA)} \\
+\midrule
+Position encoding & Learned embedding table $\mW_{\text{pos}} \in \reals^{T_{\max} \times \dmodel}$ & RoPE: deterministic rotation in 2D subspaces, relative position emerges from $\mR_m^\top \mR_n = \mR_{n-m}$ \\
+\addlinespace
+Normalization & LayerNorm: center (subtract $\mu$) + scale (divide by $\sigma$) + learnable $\bm{\gamma}$ & RMSNorm: scale only (divide by $\RMS$) + learnable $\bm{\gamma}$. One fewer reduction per norm. \\
+\addlinespace
+FFN activation & ReLU or GELU: $\phi(\mW_1 \vx)$, two weight matrices & SwiGLU: gated $\SiLU(\mW_g \vx) \odot (\mW_u \vx)$, three weight matrices, $\frac{8}{3}\times$ expansion \\
+\addlinespace
+Attention compute & Explicit $\mQ\mK^\top$ materializing full $T \times T$ matrix: $\mathcal{O}(T^2)$ memory & Flash Attention via SDPA: tiled computation, $\mathcal{O}(T)$ memory, identical output \\
+\addlinespace
+Embedding & Token + Position (added) & Token only (RoPE applied inside attention) \\
+\midrule
+\multicolumn{3}{l}{\textit{Unchanged between V0 and V1:}} \\
+\addlinespace
+\multicolumn{3}{l}{Pre-normalization pattern, residual connections, KV-cache, weight tying, GPT-2 initialization,} \\
+\multicolumn{3}{l}{no bias, no dropout, AdamW with cosine schedule, bfloat16 mixed precision.} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{1em}
+
+The V1 model is architecturally identical to LLaMA (Touvron et al., 2023) and represents the current standard for open-source LLMs. Every change from V0 to V1 is motivated by either:
+\begin{enumerate}
+    \item \textbf{Computational efficiency} without loss of quality (Flash Attention, RMSNorm).
+    \item \textbf{Better inductive bias} (RoPE: relative position for free; SwiGLU: learned gating).
+    \item \textbf{Empirical superiority} demonstrated across multiple scales (SwiGLU > GELU > ReLU consistently).
+\end{enumerate}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Computational Infrastructure}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{\texttt{torch.compile}: Graph-Level Optimization}
+
+PyTorch's default execution mode is \emph{eager}: each operation launches a GPU kernel immediately. \texttt{torch.compile} traces the computation graph and optimizes it:
+
+\begin{enumerate}
+    \item \textbf{Kernel fusion:} Multiple small operations (normalization + linear + reshape) become a single kernel launch, eliminating CPU dispatch overhead and redundant memory reads/writes.
+    \item \textbf{Memory planning:} Intermediate tensors are kept in fast SRAM registers rather than written to HBM between operations.
+    \item \textbf{Operation reordering:} Independent operations are parallelized.
+\end{enumerate}
+
+\textbf{Limitation:} Requires static tensor shapes. During training, all shapes are fixed (batch size, sequence length, model dimensions) — ideal for compilation. During generation with KV-cache, the sequence dimension grows by 1 each step — dynamic shapes trigger recompilation, negating the benefit. Thus:
+\begin{itemize}[nosep]
+    \item Training: use \texttt{torch.compile} (15--25\% speedup).
+    \item Generation: use KV-cache without compilation.
+\end{itemize}
+
+\subsection{Gradient Accumulation}
+
+When the desired batch size exceeds GPU memory, we accumulate gradients over multiple \emph{micro-batches}:
+\begin{equation}
+    \bm{g}_{\text{effective}} = \frac{1}{A} \sum_{a=1}^{A} \bm{g}_{\text{micro}}^{(a)}
+\end{equation}
+where $A$ is the number of accumulation steps. The optimizer update is applied once every $A$ steps. This simulates a larger batch size ($B_{\text{effective}} = A \cdot B_{\text{micro}}$) without requiring $A\times$ memory.
+
+% ══════════════════════════════════════════════════════════════════════════════
+% ─── End ─────────────────────────────────────────────────────────────────────
+% ══════════════════════════════════════════════════════════════════════════════
+
+\end{document}
