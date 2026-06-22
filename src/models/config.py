@@ -22,6 +22,7 @@ class ModelConfig:
         dropout: Dropout probability (0.0 = no dropout).
         bias: Whether linear layers include a bias term.
         tie_embeddings: Whether to tie input/output embedding weights.
+        activation: Activation function in FFN ("relu" or "gelu").
     """
 
     n_layer: int = 4
@@ -33,6 +34,7 @@ class ModelConfig:
     dropout: float = 0.0
     bias: bool = False
     tie_embeddings: bool = True
+    activation: str = "relu"  # "relu" for pure vanilla, "gelu" for GPT-2
 
     @property
     def d_head(self) -> int:

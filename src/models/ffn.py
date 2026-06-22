@@ -42,7 +42,12 @@ class FeedForward(nn.Module):
         # ReLU activation — the nonlinearity between the two linear layers.
         # Without this, two linear layers collapse into one (linear(linear(x)) = linear(x)).
         # ReLU is the original choice from GPT-2. Modern variants use SwiGLU/GELU instead.
-        self.act = nn.ReLU()
+        if config.activation == "gelu":
+            self.act = nn.GELU(approximate="tanh")
+        elif config.activation == "relu":
+            self.act = nn.ReLU()
+        else:
+            raise ValueError(f"Unknown activation: {config.activation}. Use 'relu' or 'gelu'.")
 
         # Dropout on the output (before adding back to the residual stream)
         self.dropout = nn.Dropout(config.dropout)

@@ -1,14 +1,17 @@
 # V0: Vanilla Transformer (GPT-2 style)
-# Learned position embeddings, Pre-LayerNorm, standard multi-head attention, ReLU FFN
+# Learned position embeddings, Pre-LayerNorm, standard multi-head attention
+
+# --- Two presets ---
+# V0-vanilla: Pure textbook Transformer (ReLU, greedy decode)
+# V0-gpt2:   Matches actual GPT-2 (GELU, sampling decode)
 
 model:
   variant: vanilla
   variant_id: V0
   position_encoding: learned
   normalization: pre_layernorm
-  ffn_type: standard  # linear -> relu -> linear
+  ffn_type: standard  # linear -> activation -> linear
   attention_type: standard_mha
-  activation: relu
 
   # Shared across all model sizes
   vocab_size: 50257       # GPT-2 tokenizer
@@ -16,6 +19,9 @@ model:
   dropout: 0.0            # no dropout for pretraining
   bias: false             # no bias in linear layers
   tie_embeddings: true    # share token embedding and output head weights
+
+  # Activation: "relu" for pure vanilla, "gelu" for GPT-2 match
+  activation: relu
 
   # Weight initialization
   init_std: 0.02          # N(0, 0.02) for most layers

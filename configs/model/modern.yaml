@@ -1,0 +1,38 @@
+# V1: Modern Transformer (LLaMA-style)
+# RoPE, RMSNorm, SwiGLU, Flash Attention
+
+model:
+  variant: modern
+  variant_id: V1
+  position_encoding: rope
+  normalization: rmsnorm
+  ffn_type: swiglu
+  attention_type: flash_sdpa
+
+  vocab_size: 50257
+  ffn_multiplier: 4       # not used directly — SwiGLU uses 8/3 ratio internally
+  dropout: 0.0
+  bias: false
+  tie_embeddings: true
+  activation: swiglu      # for reference (FFN type determines this)
+
+  init_std: 0.02
+  residual_scaling: true
+
+  debug:
+    n_layer: 4
+    d_model: 256
+    n_head: 4
+    seq_len: 512
+
+  main:
+    n_layer: 8
+    d_model: 512
+    n_head: 8
+    seq_len: 1024
+
+  stretch:
+    n_layer: 12
+    d_model: 768
+    n_head: 12
+    seq_len: 1024

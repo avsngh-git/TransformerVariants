@@ -1,0 +1,42 @@
+# V0-GPT2: Vanilla Transformer with GPT-2 improvements
+# Same architecture as vanilla.yaml but with GELU activation
+# This matches the actual GPT-2 paper implementation
+
+model:
+  variant: vanilla
+  variant_id: V0-gpt2
+  position_encoding: learned
+  normalization: pre_layernorm
+  ffn_type: standard  # linear -> gelu -> linear
+  attention_type: standard_mha
+
+  # The key difference: GELU instead of ReLU
+  activation: gelu
+
+  # Everything else is identical to vanilla.yaml
+  vocab_size: 50257
+  ffn_multiplier: 4
+  dropout: 0.0
+  bias: false
+  tie_embeddings: true
+
+  init_std: 0.02
+  residual_scaling: true
+
+  debug:
+    n_layer: 4
+    d_model: 256
+    n_head: 4
+    seq_len: 512
+
+  main:
+    n_layer: 8
+    d_model: 512
+    n_head: 8
+    seq_len: 1024
+
+  stretch:
+    n_layer: 12
+    d_model: 768
+    n_head: 12
+    seq_len: 1024

@@ -1,1 +1,1 @@
-"""Training loop, optimizer, and checkpointing."""
+# Training utilities: scheduler, training loop, checkpointing.

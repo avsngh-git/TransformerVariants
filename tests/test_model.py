@@ -47,7 +47,7 @@ class TestCausalSelfAttention:
     def test_output_shape(self, config):
         attn = CausalSelfAttention(config)
         x = torch.randn(2, 16, config.d_model)
-        out = attn(x)
+        out, _ = attn(x)
         assert out.shape == (2, 16, config.d_model)
 
     def test_causal_mask(self, config):
@@ -60,8 +60,8 @@ class TestCausalSelfAttention:
         x2 = x1.clone()
         x2[:, 5, :] = torch.randn(config.d_model)  # change position 5
 
-        out1 = attn(x1)
-        out2 = attn(x2)
+        out1, _ = attn(x1)
+        out2, _ = attn(x2)
 
         # Positions 0-4 should be identical (they can't see position 5)
         assert torch.allclose(out1[:, :5, :], out2[:, :5, :], atol=1e-6)
@@ -92,7 +92,7 @@ class TestTransformerBlock:
     def test_output_shape(self, config):
         block = TransformerBlock(config)
         x = torch.randn(2, 16, config.d_model)
-        out = block(x)
+        out, _ = block(x)
         assert out.shape == (2, 16, config.d_model)
 
     def test_residual_connection(self, config):
@@ -106,7 +106,7 @@ class TestTransformerBlock:
                 param.zero_()
 
         x = torch.randn(2, 16, config.d_model)
-        out = block(x)
+        out, _ = block(x)
         # Residual should pass through: x + 0 + 0 = x
         assert torch.allclose(out, x, atol=1e-5)
 
@@ -117,7 +117,7 @@ class TestVanillaTransformer:
     def test_logits_shape(self, model, config):
         """Logits should be (batch, seq_len, vocab_size)."""
         idx = torch.randint(0, config.vocab_size, (2, 16))
-        logits, loss = model(idx)
+        logits, loss, _ = model(idx)
         assert logits.shape == (2, 16, config.vocab_size)
         assert loss is None
 
@@ -125,7 +125,7 @@ class TestVanillaTransformer:
         """When targets are provided, should return a scalar loss."""
         idx = torch.randint(0, config.vocab_size, (2, 16))
         targets = torch.randint(0, config.vocab_size, (2, 16))
-        logits, loss = model(idx, targets)
+        logits, loss, _ = model(idx, targets)
         assert logits.shape == (2, 16, config.vocab_size)
         assert loss is not None
         assert loss.dim() == 0  # scalar
@@ -135,7 +135,7 @@ class TestVanillaTransformer:
         """Initial loss should be approximately -ln(1/vocab_size) = ln(vocab_size)."""
         idx = torch.randint(0, config.vocab_size, (4, 16))
         targets = torch.randint(0, config.vocab_size, (4, 16))
-        _, loss = model(idx, targets)
+        _, loss, _ = model(idx, targets)
         expected = math.log(config.vocab_size)  # ~4.6 for vocab_size=100
         # Should be within 2x of random (init is noisy but not crazy)
         assert loss.item() < expected * 2
@@ -189,3 +189,138 @@ class TestVanillaTransformer:
         idx = torch.randint(0, config.vocab_size, (1, config.seq_len + 1))
         with pytest.raises(AssertionError):
             model(idx)
+
+
+class TestGeneration:
+    """Tests for temperature, top-k, and top-p generation."""
+
+    @pytest.fixture
+    def model(self, config):
+        return VanillaTransformer(config)
+
+    def test_greedy_is_deterministic(self, model, config):
+        """Temperature=0 (greedy) should always produce the same output."""
+        prompt = torch.randint(0, config.vocab_size, (1, 5))
+        out1 = model.generate(prompt, max_new_tokens=10, temperature=0.0)
+        out2 = model.generate(prompt, max_new_tokens=10, temperature=0.0)
+        assert torch.equal(out1, out2)
+
+    def test_sampling_produces_variety(self, model, config):
+        """Temperature=1.0 with sampling should sometimes produce different outputs."""
+        prompt = torch.randint(0, config.vocab_size, (1, 5))
+        outputs = set()
+        for _ in range(10):
+            out = model.generate(prompt, max_new_tokens=5, temperature=1.0)
+            outputs.add(tuple(out[0, 5:].tolist()))
+        # With 100 vocab and random model, sampling should produce variation
+        assert len(outputs) > 1
+
+    def test_low_temperature_less_random(self, model, config):
+        """Lower temperature should produce less variety than higher."""
+        prompt = torch.randint(0, config.vocab_size, (1, 5))
+
+        low_temp_outputs = set()
+        high_temp_outputs = set()
+        for _ in range(20):
+            out_low = model.generate(prompt, max_new_tokens=3, temperature=0.1)
+            out_high = model.generate(prompt, max_new_tokens=3, temperature=2.0)
+            low_temp_outputs.add(tuple(out_low[0, 5:].tolist()))
+            high_temp_outputs.add(tuple(out_high[0, 5:].tolist()))
+
+        # High temperature should produce more unique sequences
+        assert len(high_temp_outputs) >= len(low_temp_outputs)
+
+    def test_top_k_limits_choices(self, model, config):
+        """Top-k should still generate valid tokens and correct length."""
+        prompt = torch.randint(0, config.vocab_size, (1, 5))
+        out = model.generate(prompt, max_new_tokens=10, temperature=1.0, top_k=5)
+        assert out.shape == (1, 15)
+
+    def test_top_p_generates_correct_length(self, model, config):
+        """Top-p should generate the correct number of tokens."""
+        prompt = torch.randint(0, config.vocab_size, (1, 5))
+        out = model.generate(prompt, max_new_tokens=10, temperature=1.0, top_p=0.9)
+        assert out.shape == (1, 15)
+
+    def test_top_k_and_top_p_together(self, model, config):
+        """Both top-k and top-p can be applied simultaneously."""
+        prompt = torch.randint(0, config.vocab_size, (1, 5))
+        out = model.generate(prompt, max_new_tokens=5, temperature=0.8, top_k=10, top_p=0.9)
+        assert out.shape == (1, 10)
+
+
+class TestKVCache:
+    """Tests for KV-cache correctness."""
+
+    @pytest.fixture
+    def model(self, config):
+        model = VanillaTransformer(config)
+        model.eval()
+        return model
+
+    def test_cached_matches_uncached(self, model, config):
+        """Generation with and without KV-cache should produce identical results."""
+        torch.manual_seed(42)
+        prompt = torch.randint(0, config.vocab_size, (1, 5))
+
+        # Generate with cache
+        torch.manual_seed(123)
+        out_cached = model.generate(prompt, max_new_tokens=10, temperature=0.0, use_cache=True)
+
+        # Generate without cache
+        torch.manual_seed(123)
+        out_uncached = model.generate(prompt, max_new_tokens=10, temperature=0.0, use_cache=False)
+
+        assert torch.equal(out_cached, out_uncached)
+
+    def test_cache_shape(self, model, config):
+        """KV-cache should have correct shape after forward pass."""
+        idx = torch.randint(0, config.vocab_size, (2, 10))
+        _, _, kv_cache = model(idx)
+
+        # Should have one cache entry per layer
+        assert len(kv_cache) == config.n_layer
+
+        # Each cache entry is (k, v), shape (B, n_head, seq_len, d_head)
+        for k, v in kv_cache:
+            assert k.shape == (2, config.n_head, 10, config.d_head)
+            assert v.shape == (2, config.n_head, 10, config.d_head)
+
+    def test_cache_grows_by_one(self, model, config):
+        """Each generation step should grow the cache by 1 position."""
+        # First forward: process 5 tokens
+        idx = torch.randint(0, config.vocab_size, (1, 5))
+        _, _, cache1 = model(idx)
+        assert cache1[0][0].size(2) == 5  # 5 cached positions
+
+        # Second forward: process 1 new token with cache
+        new_token = torch.randint(0, config.vocab_size, (1, 1))
+        _, _, cache2 = model(new_token, kv_cache=cache1)
+        assert cache2[0][0].size(2) == 6  # grew by 1
+
+    def test_cache_speeds_up_generation(self, model, config):
+        """Cached generation should be faster (or at least not slower)."""
+        import time
+
+        prompt = torch.randint(0, config.vocab_size, (1, 5))
+
+        # Warm up
+        model.generate(prompt, max_new_tokens=5, temperature=0.0, use_cache=True)
+
+        # Time cached
+        start = time.time()
+        for _ in range(5):
+            model.generate(prompt, max_new_tokens=20, temperature=0.0, use_cache=True)
+        cached_time = time.time() - start
+
+        # Time uncached
+        start = time.time()
+        for _ in range(5):
+            model.generate(prompt, max_new_tokens=20, temperature=0.0, use_cache=False)
+        uncached_time = time.time() - start
+
+        # Cached should be faster (or at worst similar for tiny models)
+        # Allow some slack since model is tiny and overhead matters
+        assert cached_time <= uncached_time * 1.5, (
+            f"Cached ({cached_time:.3f}s) should not be much slower than uncached ({uncached_time:.3f}s)"
+        )

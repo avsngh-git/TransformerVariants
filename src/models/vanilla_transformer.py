@@ -52,24 +52,30 @@ class TransformerBlock(nn.Module):
         # The FFN sublayer
         self.ffn = FeedForward(config)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """Apply one Transformer block.
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, d_model).
+            kv_cache: Optional KV-cache for this layer's attention.
 
         Returns:
-            Output tensor of shape (batch_size, seq_len, d_model).
+            Tuple of (output, new_kv_cache):
+            - output: shape (batch_size, seq_len, d_model)
+            - new_kv_cache: updated cache for this layer
         """
         # Attention with residual connection
-        # Pre-LN: normalize first, then attend, then add back
-        x = x + self.attn(self.ln1(x))
+        attn_out, new_kv_cache = self.attn(self.ln1(x), kv_cache=kv_cache)
+        x = x + attn_out
 
         # FFN with residual connection
-        # Pre-LN: normalize first, then FFN, then add back
         x = x + self.ffn(self.ln2(x))
 
-        return x
+        return x, new_kv_cache
 
 
 class VanillaTransformer(nn.Module):
@@ -157,36 +163,57 @@ class VanillaTransformer(nn.Module):
                     nn.init.zeros_(module.bias)
 
     def forward(
-        self, idx: torch.Tensor, targets: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        self,
+        idx: torch.Tensor,
+        targets: torch.Tensor | None = None,
+        kv_cache: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, list[tuple[torch.Tensor, torch.Tensor]]]:
         """Forward pass: token IDs → logits (and optionally loss).
 
         Args:
             idx: Token indices of shape (batch_size, seq_len). Integer tensor.
             targets: Target token indices for loss computation. Same shape as idx.
                      If None, only returns logits (used during generation).
+            kv_cache: Optional list of KV-cache tuples, one per layer.
+                      Pass None during training. During generation, pass the
+                      cache returned from the previous step.
 
         Returns:
-            Tuple of (logits, loss):
+            Tuple of (logits, loss, new_kv_cache):
             - logits: (batch_size, seq_len, vocab_size)
             - loss: scalar cross-entropy loss, or None if targets not provided.
+            - new_kv_cache: list of (k, v) tuples for each layer.
         """
         B, T = idx.shape
-        assert T <= self.config.seq_len, (
-            f"Sequence length {T} exceeds model max {self.config.seq_len}"
+
+        # Determine position offset from cache
+        # If we have cached positions, the new tokens start after them
+        if kv_cache is not None and kv_cache[0] is not None:
+            past_len = kv_cache[0][0].size(2)  # number of cached positions
+        else:
+            past_len = 0
+
+        total_len = past_len + T
+        assert total_len <= self.config.seq_len, (
+            f"Total sequence length {total_len} exceeds model max {self.config.seq_len}"
         )
 
-        # Create position indices: [0, 1, 2, ..., T-1]
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        # Create position indices starting from past_len
+        # During cached generation: pos = [past_len] (just one new position)
+        # During training (no cache): pos = [0, 1, 2, ..., T-1]
+        pos = torch.arange(past_len, past_len + T, dtype=torch.long, device=idx.device)
 
         # Embed tokens and positions, then add them together
         tok = self.tok_emb(idx)   # (B, T, d_model)
         pos = self.pos_emb(pos)   # (T, d_model) — broadcasts over batch
         x = self.drop(tok + pos)  # (B, T, d_model)
 
-        # Pass through all Transformer blocks
-        for block in self.blocks:
-            x = block(x)
+        # Pass through all Transformer blocks, collecting updated caches
+        new_kv_cache = []
+        for i, block in enumerate(self.blocks):
+            layer_cache = kv_cache[i] if kv_cache is not None else None
+            x, layer_new_cache = block(x, kv_cache=layer_cache)
+            new_kv_cache.append(layer_new_cache)
 
         # Final LayerNorm
         x = self.ln_f(x)  # (B, T, d_model)
@@ -200,10 +227,10 @@ class VanillaTransformer(nn.Module):
             # Reshape for cross_entropy: it expects (N, C) and (N,)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),  # (B*T, vocab_size)
-                targets.view(-1),                   # (B*T,)
+                targets.reshape(-1),               # (B*T,)
             )
 
-        return logits, loss
+        return logits, loss, new_kv_cache
 
     @torch.no_grad()
     def generate(
@@ -211,37 +238,83 @@ class VanillaTransformer(nn.Module):
         idx: torch.Tensor,
         max_new_tokens: int,
         temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        use_cache: bool = True,
     ) -> torch.Tensor:
-        """Generate tokens autoregressively using greedy decoding.
+        """Generate tokens autoregressively with KV-cache acceleration.
 
-        Starts from a prompt (idx) and generates one token at a time by:
-        1. Forward pass to get logits for the last position
-        2. Pick the highest-probability token (greedy) or sample
-        3. Append it to the sequence
-        4. Repeat
+        With use_cache=True (default):
+        - First step: process the entire prompt, cache all K/V
+        - Subsequent steps: only process the NEW token (seq_len=1),
+          reusing cached K/V from prior positions. Much faster.
+
+        Without cache (use_cache=False):
+        - Every step reprocesses the full sequence. Slower but simpler.
+          Useful for debugging or when you need to modify prior tokens.
 
         Args:
             idx: Starting token indices, shape (batch_size, prompt_len).
             max_new_tokens: How many new tokens to generate.
-            temperature: Scales logits before softmax. 1.0 = normal,
-                        <1.0 = more confident/greedy, >1.0 = more random.
+            temperature: Scales logits before softmax.
+                        0.0 = greedy, 1.0 = natural, <1.0 = sharper, >1.0 = flatter.
+            top_k: If set, only sample from the top-k tokens.
+            top_p: If set, nucleus sampling (cumulative probability threshold).
+            use_cache: Whether to use KV-cache for fast generation.
 
         Returns:
-            Token indices including generated tokens, shape (batch_size, prompt_len + max_new_tokens).
+            Token indices including generated tokens,
+            shape (batch_size, prompt_len + max_new_tokens).
         """
-        for _ in range(max_new_tokens):
-            # Crop to max sequence length if needed (sliding window)
-            idx_cond = idx if idx.size(1) <= self.config.seq_len else idx[:, -self.config.seq_len:]
+        kv_cache = None
 
-            # Forward pass — only need logits, not loss
-            logits, _ = self(idx_cond)
+        for step in range(max_new_tokens):
+            if use_cache:
+                if kv_cache is None:
+                    # First step: process the full prompt, build initial cache
+                    input_ids = idx
+                else:
+                    # Subsequent steps: only the last token (new one we just picked)
+                    input_ids = idx[:, -1:]
+            else:
+                # No cache: always process the full (growing) sequence
+                input_ids = idx if idx.size(1) <= self.config.seq_len else idx[:, -self.config.seq_len:]
+
+            # Forward pass
+            logits, _, new_kv_cache = self(input_ids, kv_cache=kv_cache if use_cache else None)
+
+            if use_cache:
+                kv_cache = new_kv_cache
 
             # Get logits for the last position only: (B, vocab_size)
-            logits = logits[:, -1, :] / temperature
+            logits = logits[:, -1, :]
 
-            # Greedy: pick the token with highest probability
+            # --- Temperature = 0: greedy decoding ---
+            if temperature == 0.0:
+                next_token = torch.argmax(logits, dim=-1, keepdim=True)
+                idx = torch.cat([idx, next_token], dim=1)
+                continue
+
+            # --- Apply temperature scaling ---
+            logits = logits / temperature
+
+            # --- Top-k filtering ---
+            if top_k is not None:
+                top_k_values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                threshold = top_k_values[:, -1, None]
+                logits = logits.masked_fill(logits < threshold, float("-inf"))
+
+            # --- Top-p (nucleus) filtering ---
+            if top_p is not None:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                sorted_mask = cumulative_probs - F.softmax(sorted_logits, dim=-1) >= top_p
+                sorted_logits[sorted_mask] = float("-inf")
+                logits = sorted_logits.scatter(1, sorted_indices, sorted_logits)
+
+            # --- Sample from the (filtered) distribution ---
             probs = F.softmax(logits, dim=-1)
-            next_token = torch.argmax(probs, dim=-1, keepdim=True)  # (B, 1)
+            next_token = torch.multinomial(probs, num_samples=1)
 
             # Append to sequence
             idx = torch.cat([idx, next_token], dim=1)

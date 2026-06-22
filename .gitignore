@@ -219,6 +219,8 @@ __marimo__/
 
 # Project-specific: experiment outputs and data
 runs/
+data/
+checkpoints/
 
 
 # Agent configuration and skills
