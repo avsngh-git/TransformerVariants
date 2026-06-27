@@ -29,6 +29,7 @@ import torch.nn as nn
 
 from src.data.dataloader import ShardedDataLoader
 from src.training.scheduler import get_lr
+from src.training.run_logger import RunLogger
 
 
 @dataclass
@@ -122,6 +123,13 @@ class Trainer:
         self.tokens_processed = 0
         self.best_val_loss = float("inf")
 
+        # Run logger (optional — set via set_run_logger)
+        self.run_logger: RunLogger | None = None
+
+    def set_run_logger(self, run_logger: RunLogger) -> None:
+        """Attach a RunLogger for structured logging."""
+        self.run_logger = run_logger
+
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create AdamW optimizer with proper weight decay grouping.
 
@@ -187,6 +195,7 @@ class Trainer:
                     f"step {self.step:>6d} | "
                     f"loss {step_metrics['loss']:.4f} | "
                     f"lr {step_metrics['lr']:.2e} | "
+                    f"grad_norm {step_metrics['grad_norm']:.2f} | "
                     f"tok/s {tokens_per_sec:,.0f} | "
                     f"tokens {self.tokens_processed:,}"
                 )
@@ -194,12 +203,24 @@ class Trainer:
                     "step": self.step,
                     "loss": step_metrics["loss"],
                     "lr": step_metrics["lr"],
+                    "grad_norm": step_metrics["grad_norm"],
                     "tokens_per_sec": tokens_per_sec,
                     "tokens_processed": self.tokens_processed,
                 }
                 log_history.append(entry)
 
-                # Append to live log file (JSONL format — one JSON object per line)
+                # Log to RunLogger if attached
+                if self.run_logger:
+                    self.run_logger.log_step(
+                        step=self.step,
+                        train_loss=step_metrics["loss"],
+                        lr=step_metrics["lr"],
+                        grad_norm=step_metrics["grad_norm"],
+                        tokens_per_sec=tokens_per_sec,
+                        tokens_processed=self.tokens_processed,
+                    )
+
+                # Legacy: append to JSONL in checkpoint dir
                 log_dir = Path(self.config.checkpoint_dir)
                 log_dir.mkdir(parents=True, exist_ok=True)
                 with open(log_dir / "train_log.jsonl", "a") as f:
@@ -209,10 +230,14 @@ class Trainer:
 
             # Evaluation
             if self.step % self.config.eval_interval == 0 and self.step > 0:
+                eval_start = time.time()
                 val_loss = self._evaluate()
+                eval_time = time.time() - eval_start
                 print(f"  → val_loss: {val_loss:.4f}")
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
+                if self.run_logger:
+                    self.run_logger.log_eval(self.step, val_loss, eval_time)
 
             # Checkpointing
             if self.step % self.config.checkpoint_interval == 0 and self.step > 0:
@@ -221,21 +246,30 @@ class Trainer:
             self.step += 1
 
         # Final evaluation and checkpoint
+        eval_start = time.time()
         val_loss = self._evaluate()
+        eval_time = time.time() - eval_start
         print(f"\nTraining complete. Final val_loss: {val_loss:.4f}")
         self._save_checkpoint()
 
+        total_time = time.time() - t_start
         results = {
             "final_train_loss": step_metrics["loss"],
             "final_val_loss": val_loss,
             "best_val_loss": self.best_val_loss,
             "total_tokens": self.tokens_processed,
-            "total_time": time.time() - t_start,
+            "total_time": total_time,
+            "avg_tokens_per_sec": self.tokens_processed / total_time if total_time > 0 else 0,
             "log_history": log_history,
         }
 
         # Save training log to checkpoint directory
         self._save_log(results)
+
+        # Save to RunLogger
+        if self.run_logger:
+            self.run_logger.log_eval(self.step, val_loss, eval_time)
+            self.run_logger.log_summary(results)
 
         return results
 
@@ -281,15 +315,17 @@ class Trainer:
 
         # Gradient clipping (prevents exploding gradients)
         if self.config.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(
+            grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.config.grad_clip
-            )
+            ).item()
+        else:
+            grad_norm = 0.0
 
         # Optimizer step (update weights)
         self.optimizer.step()
 
         avg_loss = total_loss / self.config.grad_accum_steps
-        return {"loss": avg_loss, "lr": lr}
+        return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm}
 
     @torch.no_grad()
     def _evaluate(self) -> float:
@@ -315,11 +351,15 @@ class Trainer:
         ckpt_dir = Path(self.config.checkpoint_dir)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+        # Strip _orig_mod. prefix from compiled models so checkpoints are portable
+        model_state = self.model.state_dict()
+        cleaned_state = {k.replace("_orig_mod.", ""): v for k, v in model_state.items()}
+
         checkpoint = {
             "step": self.step,
             "tokens_processed": self.tokens_processed,
             "best_val_loss": self.best_val_loss,
-            "model_state_dict": self.model.state_dict(),
+            "model_state_dict": cleaned_state,
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
 
@@ -377,12 +417,34 @@ class Trainer:
     def load_checkpoint(self, path: str | Path) -> None:
         """Resume training from a checkpoint.
 
+        Handles checkpoints saved from both compiled and non-compiled models
+        by stripping the '_orig_mod.' prefix that torch.compile adds.
+
         Args:
             path: Path to checkpoint file.
         """
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+        # Handle torch.compile prefix mismatch
+        # Checkpoints are saved with clean keys (no _orig_mod. prefix).
+        # If loading into a compiled model, its state_dict expects "_orig_mod." prefix.
+        model_state = checkpoint["model_state_dict"]
+
+        # Check if the current model expects the _orig_mod. prefix
+        current_keys = set(self.model.state_dict().keys())
+        needs_prefix = any(k.startswith("_orig_mod.") for k in current_keys)
+
+        cleaned_state = {}
+        for k, v in model_state.items():
+            # Strip any existing prefix first (normalize)
+            clean_key = k.replace("_orig_mod.", "")
+            # Add prefix if the compiled model expects it
+            if needs_prefix:
+                cleaned_state[f"_orig_mod.{clean_key}"] = v
+            else:
+                cleaned_state[clean_key] = v
+
+        self.model.load_state_dict(cleaned_state)
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.step = checkpoint["step"]
         self.tokens_processed = checkpoint["tokens_processed"]

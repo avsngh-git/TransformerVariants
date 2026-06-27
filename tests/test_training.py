@@ -19,6 +19,7 @@ import torch
 from src.data.dataloader import ShardedDataLoader
 from src.models.config import ModelConfig
 from src.models.vanilla_transformer import VanillaTransformer
+from src.models.modern_transformer import ModernTransformer
 from src.training.scheduler import get_lr
 from src.training.trainer import Trainer, TrainConfig
 
@@ -138,6 +139,71 @@ class TestTrainingIntegration:
             seq_len=32, dropout=0.0, bias=False, tie_embeddings=True,
         )
         model = VanillaTransformer(config)
+
+        # Create synthetic training data (random tokens)
+        n_tokens = 4096
+        tokens = np.random.randint(0, 256, size=n_tokens, dtype=np.uint16)
+        shard_path = tmp_path / "train_0000.bin"
+        tokens.tofile(shard_path)
+
+        # Also create validation data
+        val_tokens = np.random.randint(0, 256, size=2048, dtype=np.uint16)
+        val_path = tmp_path / "val_0000.bin"
+        val_tokens.tofile(val_path)
+
+        manifest = {
+            "shards": [
+                {"filename": "train_0000.bin", "split": "train", "n_tokens": n_tokens},
+                {"filename": "val_0000.bin", "split": "val", "n_tokens": 2048},
+            ]
+        }
+        with open(tmp_path / "manifest.json", "w") as f:
+            json.dump(manifest, f)
+
+        # Training config for a quick run
+        train_config = TrainConfig(
+            max_lr=1e-3,
+            min_lr=1e-4,
+            warmup_steps=5,
+            max_steps=50,
+            micro_batch_size=4,
+            grad_accum_steps=1,
+            dtype="float32",  # CPU doesn't support bf16 well
+            log_interval=100,  # suppress logging
+            eval_interval=100,
+            checkpoint_interval=1000,
+            checkpoint_dir=str(tmp_path / "ckpts"),
+            data_dir=str(tmp_path),
+            seq_len=32,
+        )
+
+        trainer = Trainer(model, train_config, device="cpu")
+
+        # Get initial loss
+        x, y = trainer.train_loader.next_batch()
+        with torch.no_grad():
+            _, initial_loss, _ = model(x, y)
+        initial_loss = initial_loss.item()
+
+        # Reset loader and train
+        trainer.train_loader.reset()
+        results = trainer.train()
+
+        # Loss should decrease
+        assert results["final_train_loss"] < initial_loss
+
+
+class TestModernTrainingIntegration:
+    """Integration test: verify the V1 Modern Transformer learns through the training loop."""
+
+    def test_loss_decreases(self, tmp_path):
+        """A short training run with V1 should reduce loss (model is learning)."""
+        # Create tiny V1 model (same dimensions as V0 test for comparability)
+        config = ModelConfig(
+            n_layer=2, d_model=64, n_head=4, vocab_size=256,
+            seq_len=32, dropout=0.0, bias=False, tie_embeddings=True,
+        )
+        model = ModernTransformer(config)
 
         # Create synthetic training data (random tokens)
         n_tokens = 4096

@@ -1,12 +1,8 @@
-# Project Context — Transformer Variant Lab
+# Project Status — Transformer Variant Lab
 
-This document summarizes what has been built so far. Read this to understand the current state of the project before making changes.
+Operational state of the project. Read this to understand what's built, what's running, and how to work with the codebase.
 
 ---
-
-## Project Goal
-
-Build, train, compare, and visualize 6 decoder-only Transformer variants on an NVIDIA L4-24Q GPU (24GB). The focus is controlled experimentation under practical hardware constraints, not frontier-scale training.
 
 ## Hardware
 
@@ -16,16 +12,16 @@ Build, train, compare, and visualize 6 decoder-only Transformer variants on an N
 
 ---
 
-## What's Been Built
+## Phases Completed
 
-### Phase 1: Repository Skeleton (✅ Complete)
+### Phase 1: Repository Skeleton ✅
 - Project structure with `src/`, `tests/`, `configs/`, `scripts/`, `docs/`
 - Utility modules: `src/utils/seed.py`, `src/utils/config.py`, `src/utils/run_dir.py`, `src/utils/logging.py`, `src/utils/params.py`
 - YAML config loading with multi-file merge
 - Run directory management (timestamped experiment dirs)
 - 33 tests covering all utilities
 
-### Phase 2: Data Pipeline (✅ Complete)
+### Phase 2: Data Pipeline ✅
 - `src/data/tokenizer.py` — GPT-2 tokenizer wrapper (get_tokenizer, encode, decode, get_eot_token, get_vocab_size)
 - `src/data/prepare.py` — Full pipeline: HuggingFace download → tokenize → binary shards → manifest.json + data_report.json
 - `src/data/dataloader.py` — Memory-mapped shard reader, serves (input, target) pairs for next-token prediction
@@ -34,7 +30,7 @@ Build, train, compare, and visualize 6 decoder-only Transformer variants on an N
 - Data format: uint16 binary shards with JSON manifest
 - 9 tests
 
-### Phase 3: Vanilla Transformer V0 (✅ Complete)
+### Phase 3: Vanilla Transformer V0 ✅
 - `src/models/config.py` — ModelConfig dataclass with all hyperparameters
 - `src/models/attention.py` — CausalSelfAttention with KV-cache support
 - `src/models/ffn.py` — FeedForward with configurable activation (relu/gelu)
@@ -49,13 +45,11 @@ Build, train, compare, and visualize 6 decoder-only Transformer variants on an N
 - GPT-2 weight initialization (N(0, 0.02), residual scaling 1/√(2*n_layers))
 
 **Generation features:**
-- Temperature scaling
-- Top-k sampling
-- Top-p (nucleus) sampling
+- Temperature scaling, top-k sampling, top-p (nucleus) sampling
 - KV-cache for fast autoregressive generation
 - Greedy decoding (temperature=0)
 
-**Model sizes (all use same code, different config):**
+**Model sizes:**
 | Scale | Layers | d_model | Heads | Seq Len | Parameters |
 |-------|--------|---------|-------|---------|-----------|
 | debug | 4 | 256 | 4 | 512 | 16.1M |
@@ -64,7 +58,7 @@ Build, train, compare, and visualize 6 decoder-only Transformer variants on an N
 
 - 22 tests (model + generation + KV-cache)
 
-### Phase 4: Training Loop (✅ Complete)
+### Phase 4: Training Loop ✅
 - `src/training/scheduler.py` — Cosine LR with linear warmup
 - `src/training/trainer.py` — Full training loop with:
   - Mixed precision (bfloat16/float16/float32)
@@ -89,23 +83,55 @@ Build, train, compare, and visualize 6 decoder-only Transformer variants on an N
 - Precision: bfloat16
 - Effective batch: micro_batch × grad_accum × seq_len tokens
 
+### Phase 5: Modern Transformer V1 ✅
+- `src/models/rope.py` — Rotary position embeddings
+- `src/models/rmsnorm.py` — RMSNorm
+- `src/models/swiglu_ffn.py` — SwiGLU feed-forward
+- `src/models/modern_attention.py` — Attention with RoPE + Flash Attention
+- `src/models/modern_transformer.py` — ModernTransformer (LLaMA-style)
+- Training script supports `--variant modern`
+- torch.compile stable (no recompilation per step)
+- Checkpoint resume works with compiled models (fixed prefix mismatch)
+
 ---
 
 ## Training Runs Completed
 
-| Model | Params | Data | Steps | Final Val Loss | Throughput | Time |
-|-------|--------|------|-------|---------------|-----------|------|
-| debug (relu) | 16.1M | 5M tokens | 2000 | 5.42 | 126K tok/s | 4.3 min |
-| main (relu) | 51.4M | 100M tokens | 5000 | 4.43 | ~42K tok/s | 39 min |
-| stretch (relu) | 124.3M | 120M tokens | 3000 | in progress | ~25K tok/s | ~3 hrs |
+| Model | Params | Data | Steps | Final Val Loss | Throughput | Peak Memory | Time |
+|-------|--------|------|-------|---------------|-----------|-------------|------|
+| V0 debug (relu) | 16.1M | 5M tokens | 2000 | 5.42 | 126K tok/s | — | 4.3 min |
+| V0 main (relu) | 51.4M | 328M tokens | 5000 | 3.56 | ~28K tok/s | 9.70 GB | 192.5 min |
+| V0 stretch (relu) | 124.3M | 164M tokens | 5000 | 3.84 | ~27K tok/s | 15.63 GB | 99.3 min |
+| V1 main | 51.4M | 328M tokens | 5000 | 3.43 | ~32K tok/s | 7.41 GB | 171.9 min |
+| V1 stretch | 123.6M | 164M tokens | 5000 | 3.62 | ~58K tok/s | 10.42 GB | 47.2 min |
+
+---
+
+## V0 vs V1 Comparison
+
+| Metric | Main Scale | Stretch Scale |
+|--------|-----------|--------------|
+| **Parameter count** | V0: 51.4M, V1: 51.4M (0.0% diff) | V0: 124.3M, V1: 123.6M (-0.6% diff) |
+| **Within ±5%** | ✅ Yes | ✅ Yes |
+| **Val loss** | V0: 3.56, V1: 3.43 (V1 wins) | V0: 3.84, V1: 3.62 (V1 wins) |
+| **Throughput** | V0: 28K, V1: 32K tok/s (+12%) | V0: 27K, V1: 58K tok/s (+110%) |
+| **Peak memory** | V0: 9.70 GB, V1: 7.41 GB (-24%) | V0: 15.63 GB, V1: 10.42 GB (-33%) |
+| **Wall-clock** | V0: 192.5 min, V1: 171.9 min (-11%) | V0: 99.3 min, V1: 47.2 min (-52%) |
+
+**Key observations:**
+- V1 wins on all axes: better loss, faster throughput, lower memory usage
+- Flash Attention's memory savings are dramatic at stretch scale (33% less memory)
+- The throughput difference at stretch scale (2.1×) is far larger than at main scale (1.12×) — Flash Attention's O(T) memory advantage becomes more pronounced with larger models
+- Parameter counts are essentially identical at both scales, confirming fair comparison
 
 ---
 
 ## Test Suite
 
-101+ tests total, all passing:
+130 tests total, all passing:
 - `tests/test_model.py` — shapes, causal mask, generation, KV-cache, weight init
-- `tests/test_training.py` — scheduler, dataloader, integration (loss decreases)
+- `tests/test_modern_model.py` — V1 components (RMSNorm, RoPE, SwiGLU, ModernAttention, ModernTransformer)
+- `tests/test_training.py` — scheduler, dataloader, V0 and V1 training integration
 - `tests/test_data_pipeline.py` — tokenizer, sharding, manifest
 - `tests/test_seed.py`, `test_run_dir.py`, `test_params.py` — utilities
 
@@ -118,9 +144,9 @@ Run all tests: `conda run -n transformer_lab python -m pytest tests/ -v`
 | Directory | Tokens | Shards | Use |
 |-----------|--------|--------|-----|
 | `data/processed/wikitext-103-raw-v1/` | 62K train + 55K val | 1+1 | Quick sanity checks |
-| `data/processed/wikitext-full/` | 5M train + 251K val | 5+1 | Debug model training |
-| `data/processed/wikitext-100M/` | 100M train + 251K val | 10+1 | Main model training |
-| `data/processed/wikitext-120M/` | 120M train + 251K val | 12+1 | Stretch model training |
+| `data/processed/wikitext-full/` | 5M train + 251K val | 5+1 | Debug scale training |
+| `data/processed/wikitext-100M/` | 100M train + 251K val | 10+1 | Main scale training |
+| `data/processed/wikitext-120M/` | 120M train + 251K val | 12+1 | Stretch scale training |
 
 ---
 
@@ -136,14 +162,13 @@ Run all tests: `conda run -n transformer_lab python -m pytest tests/ -v`
 ## Key Design Decisions
 
 Documented in `docs/learnings_from_project.md`:
-- Learned position embeddings (V0) → will switch to RoPE in V1
-- Pre-LayerNorm (not Post-LN) for training stability
+- Learned position embeddings (V0) → RoPE in V1
+- Pre-Norm (not Post-Norm) for training stability
 - No dropout (modern pretraining best practice)
 - No bias in linear layers (modern LLM standard)
 - GPT-2 weight initialization with depth scaling
-- KV-cache is a computation optimization (not a model change) — used in all variants
-- torch.compile for training only (fixed shapes), KV-cache for generation (dynamic shapes)
-- bfloat16 mixed precision (same quality, 2x speed)
+- KV-cache for generation, torch.compile for training
+- bfloat16 mixed precision
 
 ---
 
@@ -156,18 +181,11 @@ Install: `pip install -e ".[data]"`
 
 ---
 
-## What's Next: Phase 5 — V1 Modern Baseline
+## What's Next
 
-The next variant to implement (V1) swaps 4 components from V0:
-
-| Component | V0 (Vanilla) | V1 (Modern) |
-|-----------|-------------|-------------|
-| Position encoding | Learned embeddings | RoPE (rotary) |
-| Normalization | LayerNorm | RMSNorm |
-| FFN activation | ReLU/GELU | SwiGLU |
-| Attention | Manual implementation | Flash Attention |
-
-All other infrastructure (training loop, data pipeline, checkpointing, configs) is reusable.
+- Phase 6: ALiBi (V2), GQA/MQA (V3)
+- Phase 7: Sparse attention (V4), Linformer/Performer (V5)
+- Phase 8: Evaluation framework
 
 ---
 
@@ -177,20 +195,27 @@ All other infrastructure (training loop, data pipeline, checkpointing, configs) 
 src/
 ├── models/
 │   ├── config.py              # ModelConfig dataclass
-│   ├── attention.py           # CausalSelfAttention + KV-cache
-│   ├── ffn.py                 # FeedForward (relu/gelu configurable)
-│   └── vanilla_transformer.py # TransformerBlock + VanillaTransformer
+│   ├── attention.py           # V0: CausalSelfAttention + KV-cache
+│   ├── ffn.py                 # V0: FeedForward (relu/gelu)
+│   ├── vanilla_transformer.py # V0: TransformerBlock + VanillaTransformer
+│   ├── modern_attention.py    # V1: RoPE + Flash Attention
+│   ├── modern_transformer.py  # V1: ModernTransformer (LLaMA-style)
+│   ├── rmsnorm.py             # V1: RMSNorm
+│   ├── rope.py                # V1: Rotary Position Embeddings
+│   └── swiglu_ffn.py          # V1: SwiGLU feed-forward
 ├── data/
 │   ├── tokenizer.py           # GPT-2 tokenizer wrapper
 │   ├── prepare.py             # Data pipeline (HF → shards)
 │   └── dataloader.py          # ShardedDataLoader
 ├── training/
 │   ├── scheduler.py           # Cosine LR with warmup
-│   └── trainer.py             # Training loop + checkpointing
+│   ├── trainer.py             # Training loop + checkpointing
+│   └── run_logger.py          # Run logging utilities
 └── utils/
     ├── config.py              # YAML config loading
     ├── seed.py                # Reproducibility
     ├── run_dir.py             # Run directory management
+    ├── device.py              # Device detection
     ├── logging.py             # Logging utilities
     └── params.py              # Parameter counting
 
