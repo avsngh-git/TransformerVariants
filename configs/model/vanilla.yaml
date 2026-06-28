@@ -7,11 +7,10 @@
 
 model:
   variant: vanilla
-  variant_id: V0
+  norm_type: layernorm
   position_encoding: learned
-  normalization: pre_layernorm
   ffn_type: standard  # linear -> activation -> linear
-  attention_type: standard_mha
+  attention_type: full
 
   # Shared across all model sizes
   vocab_size: 50257       # GPT-2 tokenizer

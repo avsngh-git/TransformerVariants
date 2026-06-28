@@ -6,7 +6,7 @@ This module implements the core training logic:
 - Gradient clipping to prevent exploding gradients
 - Periodic evaluation on validation data
 - Checkpointing (save/resume)
-- Logging of loss, learning rate, throughput
+- Logging delegated to RunLogger
 
 The training loop follows the standard recipe:
     for each step:
@@ -15,11 +15,10 @@ The training loop follows the standard recipe:
         3. Compute loss
         4. Backward pass (accumulate gradients)
         5. Every N steps: clip gradients, optimizer step, zero gradients
-        6. Log metrics
+        6. Log metrics via RunLogger
         7. Periodically evaluate and checkpoint
 """
 
-import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,7 +26,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from src.data.dataloader import ShardedDataLoader
+from src.training.protocols import DataLoader
 from src.training.scheduler import get_lr
 from src.training.run_logger import RunLogger
 
@@ -67,10 +66,6 @@ class TrainConfig:
     checkpoint_interval: int = 500
     checkpoint_dir: str = "checkpoints"
 
-    # Data
-    data_dir: str = "data"
-    seq_len: int = 512
-
 
 class Trainer:
     """Handles the training loop, evaluation, and checkpointing.
@@ -78,6 +73,8 @@ class Trainer:
     Args:
         model: The Transformer model to train.
         train_config: TrainConfig with all hyperparameters.
+        train_loader: A DataLoader providing training batches via next_batch().
+        val_loader: A DataLoader providing validation batches via next_batch().
         device: Device to train on ("cuda" or "cpu").
     """
 
@@ -85,6 +82,10 @@ class Trainer:
         self,
         model: nn.Module,
         train_config: TrainConfig,
+        *,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        run_logger: RunLogger,
         device: str = "cuda",
     ) -> None:
         self.model = model.to(device)
@@ -102,33 +103,17 @@ class Trainer:
         # Set up optimizer (AdamW with weight decay only on 2D params)
         self.optimizer = self._create_optimizer()
 
-        # Set up data loaders
-        self.train_loader = ShardedDataLoader(
-            data_dir=train_config.data_dir,
-            batch_size=train_config.micro_batch_size,
-            seq_len=train_config.seq_len,
-            split="train",
-            device=device,
-        )
-        self.val_loader = ShardedDataLoader(
-            data_dir=train_config.data_dir,
-            batch_size=train_config.micro_batch_size,
-            seq_len=train_config.seq_len,
-            split="val",
-            device=device,
-        )
+        # Store injected data loaders
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+
+        # Run logger (required — all logging delegated here)
+        self.run_logger = run_logger
 
         # Training state
         self.step = 0
         self.tokens_processed = 0
         self.best_val_loss = float("inf")
-
-        # Run logger (optional — set via set_run_logger)
-        self.run_logger: RunLogger | None = None
-
-    def set_run_logger(self, run_logger: RunLogger) -> None:
-        """Attach a RunLogger for structured logging."""
-        self.run_logger = run_logger
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create AdamW optimizer with proper weight decay grouping.
@@ -173,13 +158,13 @@ class Trainer:
             Dictionary with final metrics (train_loss, val_loss, tokens_processed, etc.)
         """
         self.model.train()
-        log_history = []
         t_start = time.time()
 
         print(f"Starting training for {self.config.max_steps} steps")
         print(f"  Micro batch size: {self.config.micro_batch_size}")
         print(f"  Grad accumulation: {self.config.grad_accum_steps}")
-        print(f"  Effective batch tokens: {self.config.micro_batch_size * self.config.grad_accum_steps * self.config.seq_len:,}")
+        # Note: seq_len is determined by the data loader, not TrainConfig
+        print(f"  Effective batch size: {self.config.micro_batch_size * self.config.grad_accum_steps}")
         print(f"  Precision: {self.config.dtype}")
         print(f"  Device: {self.device}")
         print()
@@ -199,34 +184,16 @@ class Trainer:
                     f"tok/s {tokens_per_sec:,.0f} | "
                     f"tokens {self.tokens_processed:,}"
                 )
-                entry = {
-                    "step": self.step,
-                    "loss": step_metrics["loss"],
-                    "lr": step_metrics["lr"],
-                    "grad_norm": step_metrics["grad_norm"],
-                    "tokens_per_sec": tokens_per_sec,
-                    "tokens_processed": self.tokens_processed,
-                }
-                log_history.append(entry)
 
-                # Log to RunLogger if attached
-                if self.run_logger:
-                    self.run_logger.log_step(
-                        step=self.step,
-                        train_loss=step_metrics["loss"],
-                        lr=step_metrics["lr"],
-                        grad_norm=step_metrics["grad_norm"],
-                        tokens_per_sec=tokens_per_sec,
-                        tokens_processed=self.tokens_processed,
-                    )
-
-                # Legacy: append to JSONL in checkpoint dir
-                log_dir = Path(self.config.checkpoint_dir)
-                log_dir.mkdir(parents=True, exist_ok=True)
-                with open(log_dir / "train_log.jsonl", "a") as f:
-                    f.write(json.dumps(entry) + "\n")
-                # Write running log so progress is visible during training
-                self._save_running_log(log_history)
+                # Delegate all structured logging to RunLogger
+                self.run_logger.log_step(
+                    step=self.step,
+                    train_loss=step_metrics["loss"],
+                    lr=step_metrics["lr"],
+                    grad_norm=step_metrics["grad_norm"],
+                    tokens_per_sec=tokens_per_sec,
+                    tokens_processed=self.tokens_processed,
+                )
 
             # Evaluation
             if self.step % self.config.eval_interval == 0 and self.step > 0:
@@ -236,8 +203,7 @@ class Trainer:
                 print(f"  → val_loss: {val_loss:.4f}")
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
-                if self.run_logger:
-                    self.run_logger.log_eval(self.step, val_loss, eval_time)
+                self.run_logger.log_eval(self.step, val_loss, eval_time)
 
             # Checkpointing
             if self.step % self.config.checkpoint_interval == 0 and self.step > 0:
@@ -260,16 +226,11 @@ class Trainer:
             "total_tokens": self.tokens_processed,
             "total_time": total_time,
             "avg_tokens_per_sec": self.tokens_processed / total_time if total_time > 0 else 0,
-            "log_history": log_history,
         }
 
-        # Save training log to checkpoint directory
-        self._save_log(results)
-
-        # Save to RunLogger
-        if self.run_logger:
-            self.run_logger.log_eval(self.step, val_loss, eval_time)
-            self.run_logger.log_summary(results)
+        # Delegate summary writing to RunLogger
+        self.run_logger.log_eval(self.step, val_loss, eval_time)
+        self.run_logger.log_summary(results)
 
         return results
 
@@ -372,47 +333,6 @@ class Trainer:
         torch.save(checkpoint, latest_path)
 
         print(f"  → Saved checkpoint at step {self.step}")
-
-    def _save_log(self, results: dict) -> None:
-        """Save training log as JSON for later analysis.
-
-        Writes to checkpoint_dir/train_log.json with all metrics from the run.
-        """
-        log_dir = Path(self.config.checkpoint_dir)
-        log_dir.mkdir(parents=True, exist_ok=True)
-
-        log_path = log_dir / "train_log.json"
-        log_data = {
-            "final_train_loss": results["final_train_loss"],
-            "final_val_loss": results["final_val_loss"],
-            "best_val_loss": results["best_val_loss"],
-            "total_tokens": results["total_tokens"],
-            "total_time_seconds": results["total_time"],
-            "steps": results["log_history"],
-        }
-        with open(log_path, "w") as f:
-            json.dump(log_data, f, indent=2)
-        print(f"  → Saved training log to {log_path}")
-
-    def _save_running_log(self, log_history: list) -> None:
-        """Write a running log file updated every log_interval steps.
-
-        This way you can monitor progress even while training is ongoing.
-        Overwrites the file each time (keeps the full history).
-        """
-        log_dir = Path(self.config.checkpoint_dir)
-        log_dir.mkdir(parents=True, exist_ok=True)
-
-        log_path = log_dir / "running_log.json"
-        log_data = {
-            "status": "running",
-            "current_step": self.step,
-            "tokens_processed": self.tokens_processed,
-            "best_val_loss": self.best_val_loss,
-            "steps": log_history,
-        }
-        with open(log_path, "w") as f:
-            json.dump(log_data, f, indent=2)
 
     def load_checkpoint(self, path: str | Path) -> None:
         """Resume training from a checkpoint.

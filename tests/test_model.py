@@ -18,6 +18,7 @@ from src.models.config import ModelConfig
 from src.models.attention import CausalSelfAttention
 from src.models.ffn import FeedForward
 from src.models.vanilla_transformer import TransformerBlock, VanillaTransformer
+from src.models.generate import generate
 
 
 # Use a small debug config for fast tests
@@ -144,13 +145,13 @@ class TestVanillaTransformer:
         """Generate should produce exactly max_new_tokens additional tokens."""
         prompt = torch.randint(0, config.vocab_size, (1, 5))
         max_new = 10
-        output = model.generate(prompt, max_new_tokens=max_new)
+        output = generate(model, prompt, max_new_tokens=max_new)
         assert output.shape == (1, 5 + max_new)
 
     def test_generate_preserves_prompt(self, model, config):
         """Generated output should start with the original prompt."""
         prompt = torch.randint(0, config.vocab_size, (1, 5))
-        output = model.generate(prompt, max_new_tokens=3)
+        output = generate(model, prompt, max_new_tokens=3)
         assert torch.equal(output[:, :5], prompt)
 
     def test_weight_tying(self, model):
@@ -201,8 +202,8 @@ class TestGeneration:
     def test_greedy_is_deterministic(self, model, config):
         """Temperature=0 (greedy) should always produce the same output."""
         prompt = torch.randint(0, config.vocab_size, (1, 5))
-        out1 = model.generate(prompt, max_new_tokens=10, temperature=0.0)
-        out2 = model.generate(prompt, max_new_tokens=10, temperature=0.0)
+        out1 = generate(model, prompt, max_new_tokens=10, temperature=0.0)
+        out2 = generate(model, prompt, max_new_tokens=10, temperature=0.0)
         assert torch.equal(out1, out2)
 
     def test_sampling_produces_variety(self, model, config):
@@ -210,7 +211,7 @@ class TestGeneration:
         prompt = torch.randint(0, config.vocab_size, (1, 5))
         outputs = set()
         for _ in range(10):
-            out = model.generate(prompt, max_new_tokens=5, temperature=1.0)
+            out = generate(model, prompt, max_new_tokens=5, temperature=1.0)
             outputs.add(tuple(out[0, 5:].tolist()))
         # With 100 vocab and random model, sampling should produce variation
         assert len(outputs) > 1
@@ -222,8 +223,8 @@ class TestGeneration:
         low_temp_outputs = set()
         high_temp_outputs = set()
         for _ in range(20):
-            out_low = model.generate(prompt, max_new_tokens=3, temperature=0.1)
-            out_high = model.generate(prompt, max_new_tokens=3, temperature=2.0)
+            out_low = generate(model, prompt, max_new_tokens=3, temperature=0.1)
+            out_high = generate(model, prompt, max_new_tokens=3, temperature=2.0)
             low_temp_outputs.add(tuple(out_low[0, 5:].tolist()))
             high_temp_outputs.add(tuple(out_high[0, 5:].tolist()))
 
@@ -233,19 +234,19 @@ class TestGeneration:
     def test_top_k_limits_choices(self, model, config):
         """Top-k should still generate valid tokens and correct length."""
         prompt = torch.randint(0, config.vocab_size, (1, 5))
-        out = model.generate(prompt, max_new_tokens=10, temperature=1.0, top_k=5)
+        out = generate(model, prompt, max_new_tokens=10, temperature=1.0, top_k=5)
         assert out.shape == (1, 15)
 
     def test_top_p_generates_correct_length(self, model, config):
         """Top-p should generate the correct number of tokens."""
         prompt = torch.randint(0, config.vocab_size, (1, 5))
-        out = model.generate(prompt, max_new_tokens=10, temperature=1.0, top_p=0.9)
+        out = generate(model, prompt, max_new_tokens=10, temperature=1.0, top_p=0.9)
         assert out.shape == (1, 15)
 
     def test_top_k_and_top_p_together(self, model, config):
         """Both top-k and top-p can be applied simultaneously."""
         prompt = torch.randint(0, config.vocab_size, (1, 5))
-        out = model.generate(prompt, max_new_tokens=5, temperature=0.8, top_k=10, top_p=0.9)
+        out = generate(model, prompt, max_new_tokens=5, temperature=0.8, top_k=10, top_p=0.9)
         assert out.shape == (1, 10)
 
 
@@ -265,11 +266,11 @@ class TestKVCache:
 
         # Generate with cache
         torch.manual_seed(123)
-        out_cached = model.generate(prompt, max_new_tokens=10, temperature=0.0, use_cache=True)
+        out_cached = generate(model, prompt, max_new_tokens=10, temperature=0.0, use_cache=True)
 
         # Generate without cache
         torch.manual_seed(123)
-        out_uncached = model.generate(prompt, max_new_tokens=10, temperature=0.0, use_cache=False)
+        out_uncached = generate(model, prompt, max_new_tokens=10, temperature=0.0, use_cache=False)
 
         assert torch.equal(out_cached, out_uncached)
 
@@ -305,18 +306,18 @@ class TestKVCache:
         prompt = torch.randint(0, config.vocab_size, (1, 5))
 
         # Warm up
-        model.generate(prompt, max_new_tokens=5, temperature=0.0, use_cache=True)
+        generate(model, prompt, max_new_tokens=5, temperature=0.0, use_cache=True)
 
         # Time cached
         start = time.time()
         for _ in range(5):
-            model.generate(prompt, max_new_tokens=20, temperature=0.0, use_cache=True)
+            generate(model, prompt, max_new_tokens=20, temperature=0.0, use_cache=True)
         cached_time = time.time() - start
 
         # Time uncached
         start = time.time()
         for _ in range(5):
-            model.generate(prompt, max_new_tokens=20, temperature=0.0, use_cache=False)
+            generate(model, prompt, max_new_tokens=20, temperature=0.0, use_cache=False)
         uncached_time = time.time() - start
 
         # Cached should be faster (or at worst similar for tiny models)

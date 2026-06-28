@@ -58,48 +58,6 @@ def setup_logging(
     return logger
 
 
-class MetricsLogger:
-    """Append-only JSONL metrics logger.
-
-    Writes one JSON object per line to a metrics file. Each entry is
-    immediately flushed for crash safety.
-
-    Usage:
-        metrics = MetricsLogger("runs/my_run/metrics.jsonl")
-        metrics.log(step=100, train_loss=5.91, lr=0.0003, tokens_per_sec=18750)
-    """
-
-    def __init__(self, path: str | Path) -> None:
-        """Initialize metrics logger.
-
-        Args:
-            path: Path to the JSONL metrics file.
-        """
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = open(self.path, "a")
-
-    def log(self, **kwargs: Any) -> None:
-        """Log a metrics event as a single JSON line.
-
-        Args:
-            **kwargs: Metric key-value pairs. Values should be JSON-serializable.
-        """
-        line = json.dumps(kwargs, default=str)
-        self._file.write(line + "\n")
-        self._file.flush()
-
-    def close(self) -> None:
-        """Close the metrics file."""
-        self._file.close()
-
-    def __enter__(self) -> "MetricsLogger":
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self.close()
-
-
 def load_metrics(path: str | Path) -> list[dict[str, Any]]:
     """Load all metrics events from a JSONL file.
 

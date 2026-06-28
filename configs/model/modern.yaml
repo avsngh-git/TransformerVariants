@@ -4,8 +4,8 @@
 model:
   variant: modern
   variant_id: V1
+  norm_type: rmsnorm
   position_encoding: rope
-  normalization: rmsnorm
   ffn_type: swiglu
   attention_type: flash_sdpa
 

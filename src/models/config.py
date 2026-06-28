@@ -23,6 +23,13 @@ class ModelConfig:
         bias: Whether linear layers include a bias term.
         tie_embeddings: Whether to tie input/output embedding weights.
         activation: Activation function in FFN ("relu" or "gelu").
+        variant: Variant name identifying the recipe ("vanilla", "modern").
+        norm_type: Normalization layer type ("layernorm" or "rmsnorm").
+        position_encoding: Position encoding method ("learned", "rope", "alibi", "none").
+        ffn_type: FFN architecture ("standard" or "swiglu").
+        attention_type: Attention mechanism ("full", "flash_sdpa", "sliding_window", "linear").
+        n_kv_head: Number of key-value heads for grouped query attention;
+            None means same as n_head (full MHA).
     """
 
     n_layer: int = 4
@@ -35,6 +42,14 @@ class ModelConfig:
     bias: bool = False
     tie_embeddings: bool = True
     activation: str = "relu"  # "relu" for pure vanilla, "gelu" for GPT-2
+
+    # Variant identity fields
+    variant: str = "vanilla"
+    norm_type: str = "layernorm"
+    position_encoding: str = "learned"
+    ffn_type: str = "standard"
+    attention_type: str = "full"
+    n_kv_head: int | None = None
 
     @property
     def d_head(self) -> int:

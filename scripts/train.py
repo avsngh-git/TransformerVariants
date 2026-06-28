@@ -13,28 +13,23 @@ import argparse
 
 import torch
 
-from src.models.config import ModelConfig
-from src.models.vanilla_transformer import VanillaTransformer
-from src.models.modern_transformer import ModernTransformer
+from src.models.registry import build as registry_build, SCALES, VARIANTS
+from src.data.dataloader import ShardedDataLoader
 from src.training.trainer import Trainer, TrainConfig
 from src.training.run_logger import RunLogger, generate_run_dir
 
 
-# Pre-defined model scales (matching configs/model/vanilla.yaml)
-MODEL_SCALES = {
-    "debug": {"n_layer": 4, "d_model": 256, "n_head": 4, "seq_len": 512, "default_steps": 2000},
-    "main": {"n_layer": 8, "d_model": 512, "n_head": 8, "seq_len": 1024, "default_steps": 5000},
-    "stretch": {"n_layer": 12, "d_model": 768, "n_head": 12, "seq_len": 1024, "default_steps": 5000},
-}
+# Default training steps per scale (not part of model dimensions)
+DEFAULT_STEPS = {"debug": 2000, "main": 5000, "stretch": 5000}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a Transformer variant")
 
     # Model
-    parser.add_argument("--variant", type=str, default="vanilla", choices=["vanilla", "modern"],
+    parser.add_argument("--variant", type=str, default="vanilla", choices=VARIANTS.keys(),
                         help="Model variant (vanilla=V0, modern=V1 LLaMA-style)")
-    parser.add_argument("--scale", type=str, default="debug", choices=MODEL_SCALES.keys(),
+    parser.add_argument("--scale", type=str, default="debug", choices=SCALES.keys(),
                         help="Model scale tier (debug/main/stretch)")
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "gelu"],
                         help="FFN activation function (vanilla only: relu or gelu)")
@@ -82,35 +77,21 @@ def main() -> None:
         print(f"  GPU: {torch.cuda.get_device_name()}")
         print(f"  Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
-    # Create model config from scale
-    scale_params = MODEL_SCALES[args.scale]
+    # Create model via registry
+    model, model_config = registry_build(args.variant, args.scale)
+
+    # Override activation for vanilla variant (registry uses default "relu")
+    if args.variant == "vanilla" and args.activation != model_config.activation:
+        model_config.activation = args.activation
+        # Rebuild model with updated activation
+        spec = VARIANTS[args.variant]
+        model = spec.model_class(model_config)
 
     # Apply default max_steps from scale if not explicitly set
     if args.max_steps is None:
-        args.max_steps = scale_params["default_steps"]
+        args.max_steps = DEFAULT_STEPS[args.scale]
 
-    model_config = ModelConfig(
-        n_layer=scale_params["n_layer"],
-        d_model=scale_params["d_model"],
-        n_head=scale_params["n_head"],
-        seq_len=scale_params["seq_len"],
-        vocab_size=50257,
-        ffn_multiplier=4,
-        dropout=0.0,
-        bias=False,
-        tie_embeddings=True,
-        activation=args.activation,
-    )
-
-    # Create model based on variant
-    if args.variant == "vanilla":
-        model = VanillaTransformer(model_config)
-        variant_label = f"vanilla_{args.activation}"
-    elif args.variant == "modern":
-        model = ModernTransformer(model_config)
-        variant_label = "modern"
-    else:
-        raise ValueError(f"Unknown variant: {args.variant}")
+    variant_label = f"vanilla_{args.activation}" if args.variant == "vanilla" else args.variant
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"\nModel: {args.variant} ({args.scale})")
@@ -151,12 +132,23 @@ def main() -> None:
         eval_interval=args.eval_interval,
         checkpoint_interval=args.checkpoint_interval,
         checkpoint_dir=checkpoint_dir,
-        data_dir=args.data_dir,
-        seq_len=model_config.seq_len,
     )
 
-    # Create trainer
-    trainer = Trainer(model, train_config, device=device)
+    # Create data loaders
+    train_loader = ShardedDataLoader(
+        data_dir=args.data_dir,
+        batch_size=train_config.micro_batch_size,
+        seq_len=model_config.seq_len,
+        split="train",
+        device=device,
+    )
+    val_loader = ShardedDataLoader(
+        data_dir=args.data_dir,
+        batch_size=train_config.micro_batch_size,
+        seq_len=model_config.seq_len,
+        split="val",
+        device=device,
+    )
 
     # Set up structured run logging
     activation_label = args.activation if args.variant == "vanilla" else "swiglu"
@@ -205,8 +197,16 @@ def main() -> None:
     }
 
     run_logger = RunLogger(run_dir, run_config)
-    trainer.set_run_logger(run_logger)
     print(f"  Run dir: {run_dir}")
+
+    # Create trainer with injected run_logger
+    trainer = Trainer(
+        model, train_config,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        run_logger=run_logger,
+        device=device,
+    )
 
     # Resume from checkpoint if specified
     if args.resume:

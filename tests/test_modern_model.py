@@ -11,6 +11,7 @@ from src.models.rope import precompute_rope_frequencies, apply_rope
 from src.models.swiglu_ffn import SwiGLUFeedForward
 from src.models.modern_attention import ModernAttention
 from src.models.modern_transformer import ModernTransformerBlock, ModernTransformer
+from src.models.generate import generate
 
 
 @pytest.fixture
@@ -140,20 +141,20 @@ class TestModernTransformer:
 
     def test_generate_length(self, model, config):
         prompt = torch.randint(0, config.vocab_size, (1, 5))
-        out = model.generate(prompt, max_new_tokens=10, temperature=0.0)
+        out = generate(model, prompt, max_new_tokens=10, temperature=0.0)
         assert out.shape == (1, 15)
 
     def test_generate_greedy_deterministic(self, model, config):
         prompt = torch.randint(0, config.vocab_size, (1, 5))
-        out1 = model.generate(prompt, max_new_tokens=8, temperature=0.0)
-        out2 = model.generate(prompt, max_new_tokens=8, temperature=0.0)
+        out1 = generate(model, prompt, max_new_tokens=8, temperature=0.0)
+        out2 = generate(model, prompt, max_new_tokens=8, temperature=0.0)
         assert torch.equal(out1, out2)
 
     def test_cached_matches_uncached(self, model, config):
         model.eval()
         prompt = torch.randint(0, config.vocab_size, (1, 5))
-        out_cached = model.generate(prompt, max_new_tokens=8, temperature=0.0, use_cache=True)
-        out_uncached = model.generate(prompt, max_new_tokens=8, temperature=0.0, use_cache=False)
+        out_cached = generate(model, prompt, max_new_tokens=8, temperature=0.0, use_cache=True)
+        out_uncached = generate(model, prompt, max_new_tokens=8, temperature=0.0, use_cache=False)
         assert torch.equal(out_cached, out_uncached)
 
     def test_weight_tying(self, model):

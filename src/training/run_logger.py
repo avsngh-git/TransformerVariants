@@ -31,6 +31,30 @@ class RunLogger:
         config: Dictionary with full run configuration.
     """
 
+    @classmethod
+    def create(
+        cls,
+        variant: str,
+        scale: str,
+        activation: str = "",
+        config: dict | None = None,
+        base_dir: str = "runs",
+    ) -> "RunLogger":
+        """Factory: generate timestamped run dir and return initialized RunLogger.
+
+        Args:
+            variant: Model variant (e.g., "vanilla", "modern").
+            scale: Model scale (e.g., "debug", "main", "stretch").
+            activation: Activation function (e.g., "relu", "gelu", "swiglu").
+            config: Dictionary with full run configuration.
+            base_dir: Base directory for all runs.
+
+        Returns:
+            A new RunLogger instance with a generated timestamped run directory.
+        """
+        run_dir = generate_run_dir(variant, scale, activation, base_dir)
+        return cls(run_dir, config if config is not None else {})
+
     def __init__(self, run_dir: str | Path, config: dict) -> None:
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -49,6 +73,10 @@ class RunLogger:
 
         # Write header to train.log
         self._write_header()
+
+        # Create empty metrics.jsonl if it doesn't exist
+        if not self.metrics_path.exists():
+            self.metrics_path.touch()
 
     def _write_header(self) -> None:
         """Write the human-readable header to train.log."""
@@ -118,6 +146,9 @@ Warmup:       {training.get('warmup_steps', 0)} steps
             f.write(line)
 
         # Machine-readable JSON
+        # Crash-safety guarantee: opening in append mode, writing, and closing
+        # the file on each call ensures the entry is flushed to disk immediately.
+        # No explicit flush() is needed — close() triggers the OS-level write.
         entry = {
             "type": "train",
             "step": step,
@@ -153,6 +184,8 @@ Warmup:       {training.get('warmup_steps', 0)} steps
             f.write(line)
 
         # Machine-readable
+        # Crash-safety guarantee: open/write/close per call ensures immediate
+        # flush to disk without needing explicit flush().
         entry = {
             "type": "eval",
             "step": step,
@@ -185,6 +218,38 @@ Warmup:       {training.get('warmup_steps', 0)} steps
     def checkpoint_dir(self) -> Path:
         """Path to the checkpoints subdirectory."""
         return self.run_dir / "checkpoints"
+
+    def validate(self) -> bool:
+        """Check that the run directory has the expected structure.
+
+        Returns:
+            True if the directory contains run_config.json, train.log,
+            metrics.jsonl, and checkpoints/ directory; False otherwise.
+        """
+        expected = [
+            self.run_dir / "run_config.json",
+            self.run_dir / "train.log",
+            self.run_dir / "metrics.jsonl",
+            self.run_dir / "checkpoints",
+        ]
+        return all(p.exists() for p in expected)
+
+    def close(self) -> None:
+        """Close any open file handles.
+
+        Currently a no-op since RunLogger opens and closes files per write
+        operation, but provides the context manager protocol for forward
+        compatibility.
+        """
+        pass
+
+    def __enter__(self) -> "RunLogger":
+        """Enter context manager, returning self."""
+        return self
+
+    def __exit__(self, *args) -> None:
+        """Exit context manager, calling close()."""
+        self.close()
 
     def _format_time(self, seconds: float) -> str:
         """Format seconds as H:MM:SS."""

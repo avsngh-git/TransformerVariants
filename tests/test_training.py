@@ -8,8 +8,6 @@ Tests verify:
 """
 
 import json
-import math
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +19,9 @@ from src.models.config import ModelConfig
 from src.models.vanilla_transformer import VanillaTransformer
 from src.models.modern_transformer import ModernTransformer
 from src.training.scheduler import get_lr
+from src.training.synthetic_loader import SyntheticLoader
 from src.training.trainer import Trainer, TrainConfig
+from src.training.run_logger import RunLogger
 
 
 class TestScheduler:
@@ -140,25 +140,18 @@ class TestTrainingIntegration:
         )
         model = VanillaTransformer(config)
 
-        # Create synthetic training data (random tokens)
-        n_tokens = 4096
-        tokens = np.random.randint(0, 256, size=n_tokens, dtype=np.uint16)
-        shard_path = tmp_path / "train_0000.bin"
-        tokens.tofile(shard_path)
-
-        # Also create validation data
-        val_tokens = np.random.randint(0, 256, size=2048, dtype=np.uint16)
-        val_path = tmp_path / "val_0000.bin"
-        val_tokens.tofile(val_path)
-
-        manifest = {
-            "shards": [
-                {"filename": "train_0000.bin", "split": "train", "n_tokens": n_tokens},
-                {"filename": "val_0000.bin", "split": "val", "n_tokens": 2048},
-            ]
-        }
-        with open(tmp_path / "manifest.json", "w") as f:
-            json.dump(manifest, f)
+        # Create synthetic loader with random tensor batches
+        micro_batch_size = 4
+        seq_len = 32
+        vocab_size = 256
+        batches = [
+            (
+                torch.randint(0, vocab_size, (micro_batch_size, seq_len), dtype=torch.int64),
+                torch.randint(0, vocab_size, (micro_batch_size, seq_len), dtype=torch.int64),
+            )
+            for _ in range(10)
+        ]
+        loader = SyntheticLoader(batches)
 
         # Training config for a quick run
         train_config = TrainConfig(
@@ -166,18 +159,25 @@ class TestTrainingIntegration:
             min_lr=1e-4,
             warmup_steps=5,
             max_steps=50,
-            micro_batch_size=4,
+            micro_batch_size=micro_batch_size,
             grad_accum_steps=1,
             dtype="float32",  # CPU doesn't support bf16 well
             log_interval=100,  # suppress logging
             eval_interval=100,
             checkpoint_interval=1000,
             checkpoint_dir=str(tmp_path / "ckpts"),
-            data_dir=str(tmp_path),
-            seq_len=32,
         )
 
-        trainer = Trainer(model, train_config, device="cpu")
+        # Create RunLogger for structured logging
+        run_logger = RunLogger(tmp_path / "run", config={"variant": "test", "scale": "debug"})
+
+        trainer = Trainer(
+            model, train_config,
+            train_loader=loader,
+            val_loader=loader,
+            run_logger=run_logger,
+            device="cpu",
+        )
 
         # Get initial loss
         x, y = trainer.train_loader.next_batch()
@@ -185,8 +185,7 @@ class TestTrainingIntegration:
             _, initial_loss, _ = model(x, y)
         initial_loss = initial_loss.item()
 
-        # Reset loader and train
-        trainer.train_loader.reset()
+        # Train
         results = trainer.train()
 
         # Loss should decrease
@@ -205,25 +204,18 @@ class TestModernTrainingIntegration:
         )
         model = ModernTransformer(config)
 
-        # Create synthetic training data (random tokens)
-        n_tokens = 4096
-        tokens = np.random.randint(0, 256, size=n_tokens, dtype=np.uint16)
-        shard_path = tmp_path / "train_0000.bin"
-        tokens.tofile(shard_path)
-
-        # Also create validation data
-        val_tokens = np.random.randint(0, 256, size=2048, dtype=np.uint16)
-        val_path = tmp_path / "val_0000.bin"
-        val_tokens.tofile(val_path)
-
-        manifest = {
-            "shards": [
-                {"filename": "train_0000.bin", "split": "train", "n_tokens": n_tokens},
-                {"filename": "val_0000.bin", "split": "val", "n_tokens": 2048},
-            ]
-        }
-        with open(tmp_path / "manifest.json", "w") as f:
-            json.dump(manifest, f)
+        # Create synthetic loader with random tensor batches
+        micro_batch_size = 4
+        seq_len = 32
+        vocab_size = 256
+        batches = [
+            (
+                torch.randint(0, vocab_size, (micro_batch_size, seq_len), dtype=torch.int64),
+                torch.randint(0, vocab_size, (micro_batch_size, seq_len), dtype=torch.int64),
+            )
+            for _ in range(10)
+        ]
+        loader = SyntheticLoader(batches)
 
         # Training config for a quick run
         train_config = TrainConfig(
@@ -231,18 +223,25 @@ class TestModernTrainingIntegration:
             min_lr=1e-4,
             warmup_steps=5,
             max_steps=50,
-            micro_batch_size=4,
+            micro_batch_size=micro_batch_size,
             grad_accum_steps=1,
             dtype="float32",  # CPU doesn't support bf16 well
             log_interval=100,  # suppress logging
             eval_interval=100,
             checkpoint_interval=1000,
             checkpoint_dir=str(tmp_path / "ckpts"),
-            data_dir=str(tmp_path),
-            seq_len=32,
         )
 
-        trainer = Trainer(model, train_config, device="cpu")
+        # Create RunLogger for structured logging
+        run_logger = RunLogger(tmp_path / "run", config={"variant": "test", "scale": "debug"})
+
+        trainer = Trainer(
+            model, train_config,
+            train_loader=loader,
+            val_loader=loader,
+            run_logger=run_logger,
+            device="cpu",
+        )
 
         # Get initial loss
         x, y = trainer.train_loader.next_batch()
@@ -250,8 +249,7 @@ class TestModernTrainingIntegration:
             _, initial_loss, _ = model(x, y)
         initial_loss = initial_loss.item()
 
-        # Reset loader and train
-        trainer.train_loader.reset()
+        # Train
         results = trainer.train()
 
         # Loss should decrease
