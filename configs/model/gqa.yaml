@@ -1,41 +1,40 @@
-# V1: Modern Transformer (LLaMA-style)
-# RoPE, RMSNorm, SwiGLU, Flash Attention
+# V3: Grouped-Query Attention (GQA)
+# Fewer KV heads than query heads — flash_attn handles head mismatch natively
 
 model:
-  variant: modern
-  variant_id: V1
+  variant: gqa
+  variant_id: V3
   norm_type: rmsnorm
   position_encoding: rope
   ffn_type: swiglu
-  attention_type: flash_sdpa
+  attention_type: flash_gqa
 
   # Compute optimization
-  attention_backend: sdpa
+  attention_backend: flash_attn
 
   vocab_size: 50257
-  ffn_multiplier: 4       # not used directly — SwiGLU uses 8/3 ratio internally
+  ffn_multiplier: 4
   dropout: 0.0
   bias: false
   tie_embeddings: true
-  activation: swiglu      # for reference (FFN type determines this)
-
-  init_std: 0.02
-  residual_scaling: true
 
   debug:
     n_layer: 4
     d_model: 256
     n_head: 4
+    n_kv_head: 1
     seq_len: 512
 
   main:
     n_layer: 8
     d_model: 512
     n_head: 8
+    n_kv_head: 2
     seq_len: 1024
 
   stretch:
     n_layer: 12
     d_model: 768
     n_head: 12
+    n_kv_head: 3
     seq_len: 1024

@@ -17,6 +17,7 @@ Architecture:
 """
 
 import math
+from typing import Type
 
 import torch
 import torch.nn as nn
@@ -36,12 +37,20 @@ class ModernTransformerBlock(nn.Module):
 
     Args:
         config: ModelConfig with all hyperparameters.
+        attention_class: The attention module class to use. Must accept `config`
+            as its sole constructor argument and implement
+            `forward(x, kv_cache=None) -> (output, new_kv_cache)`.
+            Defaults to ModernAttention.
     """
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        attention_class: Type[nn.Module] = ModernAttention,
+    ) -> None:
         super().__init__()
         self.ln1 = RMSNorm(config.d_model)
-        self.attn = ModernAttention(config)
+        self.attn = attention_class(config)
         self.ln2 = RMSNorm(config.d_model)
         self.ffn = SwiGLUFeedForward(config)
 
@@ -76,9 +85,17 @@ class ModernTransformer(nn.Module):
 
     Args:
         config: ModelConfig with all hyperparameters.
+        attention_class: The attention module class to use in each block.
+            Must accept `config` as its sole constructor argument and implement
+            `forward(x, kv_cache=None) -> (output, new_kv_cache)`.
+            Defaults to ModernAttention.
     """
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        attention_class: Type[nn.Module] = ModernAttention,
+    ) -> None:
         super().__init__()
         self.config = config
 
@@ -90,7 +107,8 @@ class ModernTransformer(nn.Module):
 
         # Stack of modern Transformer blocks
         self.blocks = nn.ModuleList([
-            ModernTransformerBlock(config) for _ in range(config.n_layer)
+            ModernTransformerBlock(config, attention_class=attention_class)
+            for _ in range(config.n_layer)
         ])
 
         # Final RMSNorm

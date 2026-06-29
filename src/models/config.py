@@ -30,6 +30,9 @@ class ModelConfig:
         attention_type: Attention mechanism ("full", "flash_sdpa", "sliding_window", "linear").
         n_kv_head: Number of key-value heads for grouped query attention;
             None means same as n_head (full MHA).
+        attention_backend: Kernel dispatch path for attention computation
+            ("sdpa" for PyTorch built-in SDPA, "flash_attn" for Dao AI Lab Flash Attention 2).
+            Does not change mathematical behavior — only speed and memory characteristics.
     """
 
     n_layer: int = 4
@@ -50,6 +53,9 @@ class ModelConfig:
     ffn_type: str = "standard"
     attention_type: str = "full"
     n_kv_head: int | None = None
+
+    # Compute optimization fields
+    attention_backend: str = "sdpa"
 
     @property
     def d_head(self) -> int:

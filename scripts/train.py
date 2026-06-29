@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
                         choices=["bfloat16", "float16", "float32"])
 
     # Data
-    parser.add_argument("--data_dir", type=str, required=True,
+    parser.add_argument("--data_dir", type=str, default="data/processed/wikitext-full",
                         help="Path to directory with binary shard files")
 
     # Logging & checkpointing

@@ -12,6 +12,9 @@ model:
   ffn_type: standard  # linear -> activation -> linear
   attention_type: full
 
+  # Compute optimization
+  attention_backend: sdpa
+
   # Shared across all model sizes
   vocab_size: 50257       # GPT-2 tokenizer
   ffn_multiplier: 4       # d_ff = 4 * d_model
