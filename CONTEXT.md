@@ -16,14 +16,14 @@ A coherent design philosophy applied to the Model. Defined by a published recipe
 
 A variant is NOT defined by which "slots" it fills — it may introduce entirely new concepts that don't map to prior variants.
 
-| ID | Name | Design Philosophy |
-|----|------|-------------------|
-| V0 | Vanilla Transformer | GPT-2 recipe |
-| V1 | Modern Baseline | LLaMA recipe |
-| V2 | ALiBi | Attention with Linear Biases |
-| V3 | GQA / MQA | Grouped/multi-query attention |
-| V4 | Sparse local/global | Sliding window + global tokens |
-| V5 | Linformer or Performer | Linear-complexity attention |
+| ID | Name | Design Philosophy | Base |
+|----|------|-------------------|------|
+| V0 | Vanilla Transformer | GPT-2 recipe | — |
+| V1 | Modern Baseline | LLaMA recipe | — |
+| V2 | ALiBi | Swap RoPE → ALiBi (linear position biases) | V1 |
+| V3 | GQA | Swap independent heads → grouped-query attention | V1 |
+| V4 | Sparse local/global | Sliding window + global tokens | V1 |
+| V5 | Linformer or Performer | Linear-complexity attention | V1 |
 
 ### Sub-variant
 
@@ -47,6 +47,17 @@ A technique that changes speed or memory usage without altering the model's math
 Examples: Flash Attention, KV-cache, torch.compile, mixed precision.
 
 A variant's recipe may include compute optimizations alongside architectural components.
+
+### Attention Backend
+
+A config-level choice of kernel dispatch for the attention computation. Does not change mathematical behavior — only speed and memory characteristics. Controlled via `ModelConfig.attention_backend`.
+
+| Backend | Implementation | Notes |
+|---------|---------------|-------|
+| sdpa | `F.scaled_dot_product_attention` | PyTorch built-in, auto-selects best kernel |
+| flash_attn | `flash_attn` library (Dao AI Lab) | Explicit Flash Attention 2 kernel, supports ALiBi slopes natively |
+
+Within a controlled experiment, all compared variants use the same backend.
 
 ### Scale
 
@@ -105,7 +116,7 @@ Simulating a larger effective batch size by accumulating gradients over multiple
 ## Invariants
 
 - All variants in a comparison share: same tokenized data in same order, same token budget, same optimizer hyperparameters, same effective batch size, same precision (bf16).
-- Parameter counts across compared variants must be within ±5%.
+- Parameter counts across compared variants must be within ±5%. Exception: variants whose mechanism inherently reduces parameters (e.g., GQA) may exceed this tolerance — the difference is noted in results rather than compensated.
 - Results are reported over 3+ random seeds.
 - Comparisons happen at main and stretch scale only. Debug scale is never part of formal comparisons.
 
@@ -114,3 +125,4 @@ Simulating a larger effective batch size by accumulating gradients over multiple
 ## Open Questions
 
 - Evaluation framework: what the primary comparison axis is (fixed compute vs fixed data vs Pareto) — to be decided after all variants are implemented.
+- ALiBi extrapolation experiment: train-short/infer-long capability. Deferred until after the controlled comparison at fixed seq_len is complete.
