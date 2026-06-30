@@ -109,6 +109,15 @@ def main() -> None:
         model = torch.compile(model)
         print(f"  Compiled!")
 
+    # Cast model to bf16 for flash_attn variants (flash_attn requires fp16/bf16 inputs
+    # and doesn't work with torch.autocast's lazy casting)
+    if args.variant in ("alibi", "gqa") or model_config.attention_backend == "flash_attn":
+        dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
+        model_dtype = dtype_map[args.dtype]
+        if model_dtype in (torch.bfloat16, torch.float16):
+            model = model.to(model_dtype)
+            print(f"  Model cast to {args.dtype} (required by flash_attn)")
+
     print()
 
     # Auto-generate checkpoint directory if not specified

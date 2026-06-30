@@ -1908,6 +1908,143 @@ Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya, Trevor Ca
 \newblock Training Compute-Optimal Large Language Models.
 \newblock arXiv:2203.15556, 2022.
 
+\bibitem{press2022alibi}
+Ofir Press, Noah A. Smith, and Mike Lewis.
+\newblock Train Short, Test Long: Attention with Linear Biases Enables Input Length Extrapolation.
+\newblock \emph{ICLR}, 2022.
+
+\bibitem{ainslie2023gqa}
+Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yinfei Yang, Manzil Zaheer, and Sanghai Sumit.
+\newblock GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints.
+\newblock \emph{EMNLP}, 2023.
+
+\bibitem{shazeer2019mqa}
+Noam Shazeer.
+\newblock Fast Transformer Decoding: One Write-Head is All You Need.
+\newblock arXiv:1911.02150, 2019.
+
+\bibitem{dao2023flashattention2}
+Tri Dao.
+\newblock FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning.
+\newblock \emph{ICLR}, 2024.
+
 \end{thebibliography}
+
+% =============================================================================
+\section{Implemented Concepts Awaiting Full Notes}
+\label{sec:implemented-awaiting-notes}
+% =============================================================================
+
+The following concepts have been implemented in the project but are not yet explained in the main body of this document. Each entry follows the design-log template from \cref{sec:future-variants} and should be expanded into a full motivation-first subsection within its designated home section.
+
+\begin{enumerate}[leftmargin=2em]
+
+% --- ALiBi ---
+\item \textbf{ALiBi: Attention with Linear Biases (V2)} \emph{(home: \cref{sec:attention-position})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Baseline role:} RoPE encodes position by rotating Q and K vectors, making dot-product attention scores relative-position-aware.
+    \item \textbf{Limitation:} RoPE requires explicit frequency precomputation, introduces phase-wrapping at long contexts, and adds an irreversible transformation to Q/K before caching (cached keys are rotated and cannot be un-rotated). The multi-frequency structure is powerful but complex — position encoding is entangled with content representation.
+    \item \textbf{Design pressure:} Simpler position mechanism that leaves Q/K as pure content representations and encodes position exclusively in the attention logit space. Also motivated by potential extrapolation beyond training sequence length (the bias function is defined for arbitrary distances, unlike a finite learned table or fixed precomputed frequencies).
+    \item \textbf{Replacement mechanism:} Remove all position encoding from Q and K. Instead, add a fixed per-head linear bias to attention logits before softmax. For head $h$ with slope $m_h$, the bias at query position $i$ attending to key position $j$ is:
+    \begin{equation}
+        A_{ij} = \frac{\vq_i^\top \vk_j}{\sqrt{\dhead}} - m_h \cdot (i - j)
+    \end{equation}
+    where $\vq, \vk$ are raw linear projections (no rotation). Slopes follow a geometric series:
+    \begin{equation}
+        m_h = 2^{-8(h+1)/\nhead}, \qquad h = 0, \ldots, \nhead - 1
+    \end{equation}
+    Low-index heads have steep decay (attend locally); high-index heads decay slowly (attend broadly). This creates a built-in multi-scale attention pattern without learned parameters.
+    \item \textbf{Intuition:} ALiBi can be understood as a soft sliding window. Each head has a different ``attention horizon'' determined by its slope. A head with steep slope effectively ignores distant tokens (their bias penalty overwhelms content similarity). A head with gentle slope can still attend far away if the content match is strong enough. The model learns to use different heads for local syntax vs.\ long-range semantics.
+    \item \textbf{Comparison with RoPE:}
+    \begin{center}
+    \begin{tabular}{lll}
+    \toprule
+    Property & RoPE & ALiBi\\
+    \midrule
+    Where position enters & Q/K vector geometry & attention logits (additive)\\
+    Learned parameters & none (fixed rotations) & none (fixed slopes)\\
+    Relative vs.\ absolute & relative (via rotation composition) & relative (via distance penalty)\\
+    Position modulation & multi-frequency (rich patterns) & monotone linear decay (simple)\\
+    Extrapolation & requires frequency scaling tricks & naturally defined beyond training $T$\\
+    KV-cache keys & stored after rotation (position-encoded) & stored raw (content-only)\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+    \item \textbf{New trade-off:} Gives up RoPE's learned relative-distance modulation. RoPE's multi-frequency structure can learn that certain offsets matter more than others (e.g., the model might learn to attend strongly at distance 3 for trigrams). ALiBi imposes a fixed monotone decay — it cannot learn non-monotone position preferences. The simplicity is both the strength (no pathological phase interactions) and the weakness (less expressive position modeling).
+    \item \textbf{Parameter impact:} Zero additional parameters. Slopes are fixed constants derived from head count. The parameter count is essentially unchanged from V1 (removes RoPE frequency buffers, which are non-learnable anyway).
+    \item \textbf{Connection to KV-cache (\cref{sec:generation}):} With ALiBi, cached K/V are raw projections — no position encoding has been applied to them. The position bias is recomputed from scratch at each generation step based on the current total sequence length. This is conceptually simpler than RoPE caching (where keys must be stored post-rotation and the rotation convention must be consistent).
+\end{itemize}
+
+% --- GQA ---
+\item \textbf{Grouped-Query Attention / GQA (V3)} \emph{(home: \cref{sec:attention-position} and \cref{sec:generation})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Baseline role:} Standard multi-head attention (MHA) uses $\nhead$ independent Q, K, V heads. Each head has its own learned projections of size $\dmodel \to \dhead$. KV-cache stores $\nhead$ key and value vectors per layer per position.
+    \item \textbf{Limitation:} KV-cache memory scales linearly with $\nhead$. At inference with long contexts and large batches, KV-cache can dominate total memory. Additionally, at smaller model sizes, having many independent KV heads may be over-parameterized — empirical evidence suggests that K/V representations are more redundant across heads than Q representations.
+    \item \textbf{Design pressure:} Reduce KV-cache memory and KV projection parameters while preserving query expressiveness. The hypothesis: queries need to be diverse (different retrieval patterns), but keys and values can be shared across groups of queries without significant quality loss.
+    \item \textbf{Replacement mechanism:} Use $n_{\mathrm{kv}} < \nhead$ key-value heads. Each KV head serves a group of $\nhead / n_{\mathrm{kv}}$ query heads. The Q projection remains full size; K and V projections are reduced:
+    \begin{align}
+        \mW_Q &\in \reals^{\dmodel \times (\nhead \cdot \dhead)} \quad \text{(unchanged)}\\
+        \mW_K, \mW_V &\in \reals^{\dmodel \times (n_{\mathrm{kv}} \cdot \dhead)} \quad \text{(reduced)}
+    \end{align}
+    For query head $h$ in group $g = \lfloor h \cdot n_{\mathrm{kv}} / \nhead \rfloor$:
+    \begin{equation}
+        \mathrm{head}_h = \mathrm{Attention}(\mQ^{(h)}, \mK^{(g)}, \mV^{(g)})
+    \end{equation}
+    \item \textbf{Spectrum from MHA to MQA:}
+    \begin{center}
+    \begin{tabular}{lcl}
+    \toprule
+    Name & $n_{\mathrm{kv}}$ & Meaning\\
+    \midrule
+    MHA (multi-head) & $\nhead$ & every head has its own K/V\\
+    GQA (grouped-query) & $1 < n_{\mathrm{kv}} < \nhead$ & groups of queries share K/V\\
+    MQA (multi-query) & $1$ & all queries share one K/V\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+    In this project, $n_{\mathrm{kv}} = \nhead / 4$ (group size = 4):
+    \begin{center}
+    \begin{tabular}{lccc}
+    \toprule
+    Scale & $\nhead$ & $n_{\mathrm{kv}}$ & Group size\\
+    \midrule
+    debug & 4 & 1 & 4 (equivalent to MQA)\\
+    main & 8 & 2 & 4\\
+    stretch & 12 & 3 & 4\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+    \item \textbf{Parameter accounting:} Standard MHA has $3\dmodel^2$ parameters per layer for Q/K/V projections. GQA has $\dmodel(\nhead \cdot \dhead) + 2\dmodel(n_{\mathrm{kv}} \cdot \dhead) = \dmodel^2(1 + 2n_{\mathrm{kv}}/\nhead)$. At main scale: standard = $786\text{K}$ per layer; GQA = $393\text{K}$ per layer. Total model parameter reduction is approximately 6\%.
+    \item \textbf{KV-cache impact:} Cache shape becomes $(B, n_{\mathrm{kv}}, T, \dhead)$ instead of $(B, \nhead, T, \dhead)$. Memory reduced by factor $\nhead / n_{\mathrm{kv}} = 4$. For the cache size formula from \cref{sec:generation}:
+    \begin{equation}
+        \text{GQA cache} = 2 \cdot \nlayer \cdot B \cdot n_{\mathrm{kv}} \cdot T \cdot \dhead \cdot s
+    \end{equation}
+    \item \textbf{Intuition:} Think of GQA as having ``one librarian (KV head) serve multiple readers (query heads).'' The librarian organizes the same collection of facts; different readers ask different questions about those facts. If the readers' questions are diverse enough, they can extract different information from the same key-value store. The cost is that the librarian cannot customize the organization for each reader individually.
+    \item \textbf{New trade-off:} Fewer KV heads means less expressive key-value representations. If different query heads genuinely need different routing patterns (different keys), GQA forces them to share. At the 4:1 ratio, the approximately 6\% parameter reduction is inherent to the mechanism and is noted in results rather than compensated.
+    \item \textbf{Connection to RoPE:} RoPE is applied to Q (all $\nhead$ heads) and K (only $n_{\mathrm{kv}}$ heads). The relative-position property is preserved because each query-key dot product still involves one rotated Q and one rotated K, regardless of how many queries share that K.
+\end{itemize}
+
+% --- Flash Attention 2 ---
+\item \textbf{Flash Attention 2: Explicit Kernel Control} \emph{(home: \cref{sec:attention-position})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Baseline:} The existing notes explain Flash Attention as a tiling strategy that avoids materializing the $T \times T$ attention matrix. V1 accessed this via PyTorch's SDPA interface, which auto-selects the kernel.
+    \item \textbf{What's new:} Flash Attention 2 improves on Flash Attention 1 with better work partitioning across GPU thread blocks and reduced non-matmul FLOPs. More importantly for this project, the explicit library provides:
+    \begin{enumerate}[nosep]
+        \item Native \texttt{alibi\_slopes} parameter — fuses ALiBi bias into the tiled computation without materializing a bias matrix.
+        \item Native support for mismatched Q/KV head counts — handles GQA without manual tensor repetition.
+        \item Fused KV-cache append + attention in a single kernel call (\texttt{flash\_attn\_with\_kvcache}).
+    \end{enumerate}
+    \item \textbf{Why explicit kernel matters for experiments:} With SDPA, different variants might dispatch to different kernels (Flash for V1, memory-efficient for V2 with an attn\_mask). Using the same explicit Flash kernel for all variants eliminates this confound from throughput comparisons.
+    \item \textbf{Conceptual relationship:} Flash Attention is a compute optimization (same math, different execution). Flash Attention 2 is a better implementation of the same idea. Neither changes the statistical model — they change wall-clock time and memory usage. The notes should explain the online softmax recurrence (already present) and add: (a) the work-partitioning improvement in v2, and (b) how ALiBi slopes integrate into the tiled computation without breaking the O(T) memory property.
+\end{itemize}
+
+\end{enumerate}
+
+\begin{motivationbox}[Integration instructions for future writing pass]
+Each item above should be expanded into a full subsection within its designated home section, following the design-log template: baseline role $\to$ limitation $\to$ design pressure $\to$ replacement mechanism $\to$ new trade-off. Include mathematical definitions, TikZ figures where helpful, worked examples, and intuition boxes. Cross-reference related items (e.g., ALiBi cross-references the KV-cache section; GQA cross-references the KV-cache memory formula). Do not duplicate explanations already present in other sections. Do not include implementation code or API details --- focus on the mathematical and conceptual content.
+\end{motivationbox}
 
 \end{document}
