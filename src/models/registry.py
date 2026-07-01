@@ -4,13 +4,14 @@ Central place for all variant definitions and scale dimensions.
 Adding a new variant means adding one entry to the VARIANTS dict.
 """
 
-import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Type
 
+import torch
 import torch.nn as nn
 
 from src.models.config import ModelConfig
+from src.models.attention import CausalSelfAttention
 from src.models.vanilla_transformer import VanillaTransformer
 from src.models.modern_transformer import ModernTransformer
 from src.models.modern_attention import ModernAttention
@@ -36,6 +37,11 @@ class VariantSpec:
     ffn_type: str
     attention_type: str
     attention_class: Type[nn.Module] = ModernAttention
+    default_activation: str = "relu"
+    requires_bf16: bool = False
+    default_steps: dict[str, int] = field(default_factory=lambda: {
+        "debug": 2000, "main": 5000, "stretch": 5000
+    })
 
 
 VARIANTS: dict[str, VariantSpec] = {
@@ -46,6 +52,9 @@ VARIANTS: dict[str, VariantSpec] = {
         position_encoding="learned",
         ffn_type="standard",
         attention_type="full",
+        attention_class=CausalSelfAttention,
+        default_activation="relu",
+        requires_bf16=False,
     ),
     "modern": VariantSpec(
         model_class=ModernTransformer,
@@ -55,6 +64,8 @@ VARIANTS: dict[str, VariantSpec] = {
         ffn_type="swiglu",
         attention_type="flash_sdpa",
         attention_class=ModernAttention,
+        default_activation="swiglu",
+        requires_bf16=False,
     ),
     "alibi": VariantSpec(
         model_class=ModernTransformer,
@@ -64,6 +75,8 @@ VARIANTS: dict[str, VariantSpec] = {
         ffn_type="swiglu",
         attention_type="flash_alibi",
         attention_class=ALiBiAttention,
+        default_activation="swiglu",
+        requires_bf16=True,
     ),
     "gqa": VariantSpec(
         model_class=ModernTransformer,
@@ -73,12 +86,26 @@ VARIANTS: dict[str, VariantSpec] = {
         ffn_type="swiglu",
         attention_type="flash_gqa",
         attention_class=GQAAttention,
+        default_activation="swiglu",
+        requires_bf16=True,
     ),
 }
 
 
-def build(variant_name: str, scale: str, attention_backend: str | None = None) -> tuple[nn.Module, ModelConfig]:
+def build(
+    variant_name: str,
+    scale: str,
+    attention_backend: str | None = None,
+    activation: str | None = None,
+    dtype: str = "bfloat16",
+    compile_model: bool = False,
+) -> tuple[nn.Module, ModelConfig]:
     """Construct a model and its config from variant name and scale tier.
+
+    Handles all model construction policy:
+    - Activation override (uses override if provided, else spec.default_activation)
+    - bf16/fp16 casting (when spec.requires_bf16 or flash_attn backend)
+    - torch.compile (when requested)
 
     Args:
         variant_name: One of the registered variant keys (e.g., "vanilla", "modern").
@@ -87,6 +114,11 @@ def build(variant_name: str, scale: str, attention_backend: str | None = None) -
             When "flash_attn", uses FlashAttention instead of the variant's default
             attention class. When None, uses the variant's default (ModernAttention
             for "modern" variant, which dispatches via PyTorch SDPA).
+        activation: Optional override for the FFN activation function. When None,
+            uses the variant's default_activation from its VariantSpec.
+        dtype: Precision for model casting ("bfloat16", "float16", or "float32").
+            Used to determine whether to cast model when bf16 is required.
+        compile_model: Whether to apply torch.compile to the model.
 
     Returns:
         A tuple of (model_instance, config) where model is ready for training.
@@ -104,6 +136,9 @@ def build(variant_name: str, scale: str, attention_backend: str | None = None) -
     spec = VARIANTS[variant_name]
     dims = SCALES[scale]
 
+    # Determine effective activation: use override if provided, else spec default
+    effective_activation = activation if activation is not None else spec.default_activation
+
     # Determine effective attention backend
     effective_backend = attention_backend if attention_backend is not None else "sdpa"
 
@@ -118,6 +153,7 @@ def build(variant_name: str, scale: str, attention_backend: str | None = None) -
         ffn_type=spec.ffn_type,
         attention_type=spec.attention_type,
         attention_backend=effective_backend,
+        activation=effective_activation,
     )
 
     # Set n_kv_head for GQA variants (grouped-query attention needs fewer KV heads)
@@ -132,9 +168,18 @@ def build(variant_name: str, scale: str, attention_backend: str | None = None) -
     else:
         attention_class = spec.attention_class
 
-    sig = inspect.signature(spec.model_class.__init__)
-    if "attention_class" in sig.parameters:
-        model = spec.model_class(config, attention_class=attention_class)
-    else:
-        model = spec.model_class(config)
+    model = spec.model_class(config, attention_class=attention_class)
+
+    # bf16/fp16 casting: apply when variant requires it or flash_attn backend is used,
+    # AND the requested dtype is bfloat16 or float16
+    if spec.requires_bf16 or effective_backend == "flash_attn":
+        dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
+        model_dtype = dtype_map.get(dtype, torch.bfloat16)
+        if model_dtype in (torch.bfloat16, torch.float16):
+            model = model.to(model_dtype)
+
+    # torch.compile for kernel fusion and speedup
+    if compile_model:
+        model = torch.compile(model)
+
     return model, config

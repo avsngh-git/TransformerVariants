@@ -14,6 +14,7 @@ The architecture matches GPT-2:
 """
 
 import math
+from typing import Type
 
 import torch
 import torch.nn as nn
@@ -39,13 +40,17 @@ class TransformerBlock(nn.Module):
         config: ModelConfig with all hyperparameters.
     """
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        attention_class: Type[nn.Module] = CausalSelfAttention,
+    ) -> None:
         super().__init__()
 
         # LayerNorm before attention (Pre-LN)
         self.ln1 = nn.LayerNorm(config.d_model, bias=config.bias)
         # The attention sublayer
-        self.attn = CausalSelfAttention(config)
+        self.attn = attention_class(config)
 
         # LayerNorm before FFN (Pre-LN)
         self.ln2 = nn.LayerNorm(config.d_model, bias=config.bias)
@@ -96,7 +101,11 @@ class VanillaTransformer(nn.Module):
         config: ModelConfig with all hyperparameters.
     """
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        attention_class: Type[nn.Module] = CausalSelfAttention,
+    ) -> None:
         super().__init__()
         self.config = config
 
@@ -113,7 +122,8 @@ class VanillaTransformer(nn.Module):
         # --- Transformer blocks ---
         # ModuleList so PyTorch registers them as submodules (for .parameters(), .to(), etc.)
         self.blocks = nn.ModuleList([
-            TransformerBlock(config) for _ in range(config.n_layer)
+            TransformerBlock(config, attention_class=attention_class)
+            for _ in range(config.n_layer)
         ])
 
         # --- Output ---

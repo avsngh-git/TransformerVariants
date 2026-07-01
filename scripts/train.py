@@ -15,12 +15,9 @@ import torch
 
 from src.models.registry import build as registry_build, SCALES, VARIANTS
 from src.data.dataloader import ShardedDataLoader
-from src.training.trainer import Trainer, TrainConfig
+from src.training.trainer import Trainer
+from src.training.run_config_builder import RunConfigBuilder
 from src.training.run_logger import RunLogger, generate_run_dir
-
-
-# Default training steps per scale (not part of model dimensions)
-DEFAULT_STEPS = {"debug": 2000, "main": 5000, "stretch": 5000}
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,147 +67,58 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # Determine device
+    # Build model (registry handles activation override, dtype casting, compile)
+    model, model_config = registry_build(
+        args.variant, args.scale,
+        activation=args.activation if args.variant == "vanilla" else None,
+        dtype=args.dtype,
+        compile_model=args.compile,
+    )
+
+    # Build all config artifacts
+    bundle = RunConfigBuilder.from_args(args, model_config, model)
+
+    # Print model info
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    n_params = sum(p.numel() for p in model.parameters())
     print(f"Using device: {device}")
     if device == "cuda":
         print(f"  GPU: {torch.cuda.get_device_name()}")
         print(f"  Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-
-    # Create model via registry
-    model, model_config = registry_build(args.variant, args.scale)
-
-    # Override activation for vanilla variant (registry uses default "relu")
-    if args.variant == "vanilla" and args.activation != model_config.activation:
-        model_config.activation = args.activation
-        # Rebuild model with updated activation
-        spec = VARIANTS[args.variant]
-        model = spec.model_class(model_config)
-
-    # Apply default max_steps from scale if not explicitly set
-    if args.max_steps is None:
-        args.max_steps = DEFAULT_STEPS[args.scale]
-
-    variant_label = f"vanilla_{args.activation}" if args.variant == "vanilla" else args.variant
-
-    n_params = sum(p.numel() for p in model.parameters())
     print(f"\nModel: {args.variant} ({args.scale})")
     print(f"  Parameters: {n_params:,}")
     print(f"  Layers: {model_config.n_layer}, d_model: {model_config.d_model}, heads: {model_config.n_head}")
     print(f"  Seq len: {model_config.seq_len}")
-    if args.variant == "vanilla":
-        print(f"  Activation: {model_config.activation}")
-    else:
-        print(f"  Components: RoPE, RMSNorm, SwiGLU, Flash Attention")
-
-    # torch.compile — fuses operations, reduces kernel launches, 15-25% faster
-    if args.compile:
-        print(f"  Compiling model with torch.compile...")
-        model = torch.compile(model)
-        print(f"  Compiled!")
-
-    # Cast model to bf16 for flash_attn variants (flash_attn requires fp16/bf16 inputs
-    # and doesn't work with torch.autocast's lazy casting)
-    if args.variant in ("alibi", "gqa") or model_config.attention_backend == "flash_attn":
-        dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
-        model_dtype = dtype_map[args.dtype]
-        if model_dtype in (torch.bfloat16, torch.float16):
-            model = model.to(model_dtype)
-            print(f"  Model cast to {args.dtype} (required by flash_attn)")
-
+    print(f"  Activation: {bundle.activation_label}")
     print()
-
-    # Auto-generate checkpoint directory if not specified
-    # Format: checkpoints/{variant_label}_{scale}/
-    if args.checkpoint_dir is None:
-        checkpoint_dir = f"checkpoints/{variant_label}_{args.scale}"
-    else:
-        checkpoint_dir = args.checkpoint_dir
-
-    # Create training config
-    train_config = TrainConfig(
-        max_lr=args.max_lr,
-        min_lr=args.max_lr * 0.1,  # standard: min_lr = 10% of max
-        warmup_steps=args.warmup_steps,
-        max_steps=args.max_steps,
-        micro_batch_size=args.micro_batch_size,
-        grad_accum_steps=args.grad_accum_steps,
-        grad_clip=args.grad_clip,
-        dtype=args.dtype,
-        log_interval=args.log_interval,
-        eval_interval=args.eval_interval,
-        checkpoint_interval=args.checkpoint_interval,
-        checkpoint_dir=checkpoint_dir,
-    )
 
     # Create data loaders
     train_loader = ShardedDataLoader(
         data_dir=args.data_dir,
-        batch_size=train_config.micro_batch_size,
+        batch_size=bundle.train_config.micro_batch_size,
         seq_len=model_config.seq_len,
         split="train",
         device=device,
     )
     val_loader = ShardedDataLoader(
         data_dir=args.data_dir,
-        batch_size=train_config.micro_batch_size,
+        batch_size=bundle.train_config.micro_batch_size,
         seq_len=model_config.seq_len,
         split="val",
         device=device,
     )
 
-    # Set up structured run logging
-    activation_label = args.activation if args.variant == "vanilla" else "swiglu"
+    # Create logger and trainer
     run_dir = generate_run_dir(
         variant=args.variant,
         scale=args.scale,
-        activation=activation_label,
+        activation=bundle.activation_label,
     )
-
-    run_config = {
-        "variant": args.variant,
-        "scale": args.scale,
-        "model": {
-            "n_layer": model_config.n_layer,
-            "d_model": model_config.d_model,
-            "n_head": model_config.n_head,
-            "seq_len": model_config.seq_len,
-            "vocab_size": model_config.vocab_size,
-            "activation": activation_label,
-            "bias": model_config.bias,
-            "dropout": model_config.dropout,
-            "tie_embeddings": model_config.tie_embeddings,
-            "total_params": n_params,
-        },
-        "training": {
-            "max_steps": args.max_steps,
-            "max_lr": args.max_lr,
-            "min_lr": args.max_lr * 0.1,
-            "warmup_steps": args.warmup_steps,
-            "micro_batch_size": args.micro_batch_size,
-            "grad_accum_steps": args.grad_accum_steps,
-            "grad_clip": args.grad_clip,
-            "dtype": args.dtype,
-            "compiled": args.compile,
-        },
-        "data": {
-            "data_dir": args.data_dir,
-            "seq_len": model_config.seq_len,
-        },
-        "hardware": {
-            "device": device,
-            "gpu": torch.cuda.get_device_name() if device == "cuda" else "cpu",
-            "gpu_memory_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1) if device == "cuda" else 0,
-        },
-        "resumed_from": args.resume,
-    }
-
-    run_logger = RunLogger(run_dir, run_config)
+    run_logger = RunLogger(run_dir, bundle.run_config)
     print(f"  Run dir: {run_dir}")
 
-    # Create trainer with injected run_logger
     trainer = Trainer(
-        model, train_config,
+        model, bundle.train_config,
         train_loader=train_loader,
         val_loader=val_loader,
         run_logger=run_logger,
