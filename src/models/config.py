@@ -60,6 +60,9 @@ class ModelConfig:
     # Sliding Window Attention
     window_size: int | None = None
 
+    # Linformer low-rank projection
+    projection_rank: int | None = None
+
     def __post_init__(self):
         if self.window_size is not None:
             if self.window_size < 1 or self.window_size > self.seq_len:

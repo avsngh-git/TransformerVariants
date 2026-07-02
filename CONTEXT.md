@@ -136,13 +136,57 @@ Simulating a larger effective batch size by accumulating gradients over multiple
 
 - All variants in a comparison share: same tokenized data in same order, same token budget, same optimizer hyperparameters, same effective batch size, same precision (bf16).
 - Parameter counts across compared variants must be within ±5%. Exception: variants whose mechanism inherently reduces parameters (e.g., GQA) may exceed this tolerance — the difference is noted in results rather than compensated.
-- Results are reported over 3+ random seeds.
+- Results are reported as mean ± standard deviation over 3+ random seeds. Additional seeds may be added selectively for pairs with overlapping intervals.
 - Comparisons happen at main and stretch scale only. Debug scale is never part of formal comparisons.
+- All three comparison axes (fixed-data, fixed-compute/wall-clock, fixed-compute/FLOPs) are reported for every experiment.
+
+---
+
+## Evaluation Concepts
+
+### Comparison Axis
+
+A controlled perspective from which variants are compared. Three axes are used simultaneously:
+
+| Axis | Control variable | Comparison metric |
+|------|-----------------|-------------------|
+| Fixed-data | Same token budget across all variants | Final val loss at budget exhaustion |
+| Fixed-compute (wall-clock) | Same wall-clock duration | Val loss at the time threshold |
+| Fixed-compute (FLOPs) | Same cumulative FLOPs | Val loss at the FLOP threshold |
+
+Fixed-compute comparisons use post-hoc slicing of training logs — no separate training runs are needed. The wall-clock budget is determined dynamically as the minimum total training time across all variants at a given scale.
+
+### Component-Level FLOP Accounting
+
+Per-step FLOP estimation that sums actual operations per layer: projection matmuls, attention score computation (variant-dependent), FFN matmuls. Not the coarse 6NT approximation — captures that V4-SWA does O(T·W·d) attention vs V1's O(T²·d).
+
+### Model FLOPs Utilization (MFU)
+
+The ratio of achieved FLOPs (from component-level accounting) to the hardware's theoretical peak (L4: 242 TFLOPS BF16). Distinguishes compute-bound from memory-bandwidth-bound regimes.
+
+### Stable Rank
+
+A measure of the effective dimensionality of a hidden state matrix H: srank(H) = ||H||²_F / ||H||²_2. A low stable rank in deep layers indicates representation collapse. Measured at the final checkpoint, averaged over ~100 validation batches.
+
+### Multi-Query Associative Recall (MQAR)
+
+A synthetic evaluation probe that tests a model's ability to bind and recall key-value associations across context. Sequences contain planted token patterns; the metric is whether the model assigns high probability to the correct recall token. Isolates retrieval capacity — variants with limited context (V4-SWA, V5-Linformer) should show measurable degradation.
+
+### ICL Loss Decay Exponent (α)
+
+The power-law exponent of per-position validation loss: L(t) = A·t^(-α) + C. A steep α indicates effective context utilization; flattening at large t reveals hard information-processing limits imposed by position encoding or attention masking.
+
+### Centered Kernel Alignment (CKA)
+
+A similarity measure between representations at different layers. High CKA between non-adjacent layers indicates redundant computation. Presented as an adjacent-layer curve (primary) and full L×L heatmap (supplementary).
+
+### Roofline Diagram
+
+A plot of achieved performance (TFLOPS/s) vs arithmetic intensity (FLOPs/byte). The hardware boundary (L4: 242 TFLOPS peak, 300 GB/s bandwidth, ridge at ~807 FLOPs/byte) separates memory-bound from compute-bound regimes. Each variant is plotted as a point at varying sequence lengths.
 
 ---
 
 ## Open Questions
 
-- Evaluation framework: what the primary comparison axis is (fixed compute vs fixed data vs Pareto) — to be decided after all variants are implemented.
 - ALiBi extrapolation experiment: train-short/infer-long capability. Deferred until after the controlled comparison at fixed seq_len is complete.
 - KV-Cache unification: ModernAttention (SDPA) uses a concat-based 2-tuple cache; FlashAttentionBase uses a pre-allocated 3-tuple cache. These are incompatible seam contracts but `generate.py` currently works by passing cache opaquely. Unifying into a single `KVCache` abstraction is deferred until all variants (V4, V5) are implemented — it's a design smell, not a blocking bug today.

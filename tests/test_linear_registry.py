@@ -1,15 +1,13 @@
-"""Registry and YAML config tests for linear attention variant."""
+"""Registry and YAML config tests for Linformer attention variant."""
 import pytest
 import yaml
 from pathlib import Path
-
-import torch
 
 from src.models import registry
 from src.models.registry import VARIANTS, VariantSpec
 from src.models.config import ModelConfig
 from src.models.modern_transformer import ModernTransformer
-from src.models.linear_attention import LinearAttention
+from src.models.linear_attention import LinformerAttention
 
 
 class TestRegistryEntry:
@@ -25,9 +23,9 @@ class TestRegistryEntry:
         assert spec.variant == "linear"
         assert spec.attention_type == "linear"
         assert spec.model_class == ModernTransformer
-        assert spec.attention_class == LinearAttention
+        assert spec.attention_class == LinformerAttention
         assert spec.norm_type == "rmsnorm"
-        assert spec.position_encoding == "none"
+        assert spec.position_encoding == "rope"
         assert spec.ffn_type == "swiglu"
         assert spec.requires_bf16 is False
 
@@ -41,6 +39,11 @@ class TestRegistryBuild:
         model, config = registry.build("linear", scale)
         assert isinstance(model, ModernTransformer)
         assert isinstance(config, ModelConfig)
+
+    def test_build_config_has_projection_rank(self):
+        """build('linear', 'debug') produces config with projection_rank == 64."""
+        _, config = registry.build("linear", "debug")
+        assert config.projection_rank == 64
 
     def test_build_invalid_scale_raises(self):
         """build('linear', 'invalid') raises ValueError listing available scales."""
@@ -89,7 +92,8 @@ class TestYAMLConfig:
         assert model["variant"] == "linear"
         assert model["variant_id"] == "V5"
         assert model["norm_type"] == "rmsnorm"
-        assert model["position_encoding"] == "none"
+        assert model["position_encoding"] == "rope"
+        assert model["projection_rank"] == 64
         assert model["ffn_type"] == "swiglu"
         assert model["attention_type"] == "linear"
 

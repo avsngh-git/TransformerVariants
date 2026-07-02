@@ -5,7 +5,8 @@ model:
   variant: linear
   variant_id: V5
   norm_type: rmsnorm
-  position_encoding: none
+  position_encoding: rope
+  projection_rank: 64
   ffn_type: swiglu
   attention_type: linear
 

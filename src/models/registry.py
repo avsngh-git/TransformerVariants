@@ -18,7 +18,7 @@ from src.models.modern_attention import ModernAttention
 from src.models.flash_attention import FlashAttention
 from src.models.alibi_attention import ALiBiAttention
 from src.models.gqa_attention import GQAAttention
-from src.models.linear_attention import LinearAttention
+from src.models.linear_attention import LinformerAttention
 
 
 SCALES: dict[str, dict[str, int]] = {
@@ -116,10 +116,10 @@ VARIANTS: dict[str, VariantSpec] = {
         model_class=ModernTransformer,
         variant="linear",
         norm_type="rmsnorm",
-        position_encoding="none",
+        position_encoding="rope",
         ffn_type="swiglu",
         attention_type="linear",
-        attention_class=LinearAttention,
+        attention_class=LinformerAttention,
         default_activation="swiglu",
         requires_bf16=False,
     ),
@@ -207,6 +207,10 @@ def build(
     # Set n_kv_head for GQA variants (grouped-query attention needs fewer KV heads)
     if spec.attention_type == "flash_gqa":
         config.n_kv_head = dims["n_head"] // 4
+
+    # Set projection_rank for Linformer variants (linear attention needs projection rank)
+    if spec.attention_type == "linear":
+        config.projection_rank = 64
 
     # Build per-layer configs for swa_interleaved variant
     # Let the existing sliding_window block run first (it sets window_size and effective_backend),

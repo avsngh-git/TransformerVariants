@@ -1,70 +1,86 @@
-"""ELU-based causal linear attention module (V5).
+"""Linformer low-rank projection attention module (V5).
 
-Implements O(n·d²) causal attention using the feature map φ(x) = ELU(x) + 1.
-Instead of materialising a T×T attention matrix, this module maintains a running
-accumulator of outer products φ(K_j)^T ⊗ V_j, enabling sub-quadratic scaling.
+Implements sub-quadratic attention by projecting Key and Value sequences from
+length T down to a fixed rank r using learned projection matrices E and F,
+while retaining softmax attention and RoPE position encoding. This achieves
+O(T·r·d) complexity instead of the O(T²·d) of full attention.
 
-No RoPE is applied — position information comes solely from token embeddings.
-KV-cache generation is not supported (training-comparison variant only, per ADR 0002).
+The module interface matches the standard attention contract used by
+ModernTransformer: forward(x, kv_cache=None) -> (output, None).
+
+KV-cache generation is not supported — E/F projection matrices are tied to
+fixed seq_len (training-comparison variant only, per ADR 0003).
 """
 
 import torch
 import torch.nn as nn
 
 from src.models.config import ModelConfig
+from src.models.rope import apply_rope, precompute_rope_frequencies
 
 
-def feature_map(x: torch.Tensor) -> torch.Tensor:
-    """Apply the ELU+1 feature map element-wise.
+class LinformerAttention(nn.Module):
+    """Linformer attention with learned low-rank projection, RoPE, and softmax.
 
-    φ(x) = ELU(x) + 1. Always strictly positive (> 0), which guarantees
-    that the normalisation denominator is never exactly zero.
+    Projects Keys and Values from sequence length T to a fixed rank r using
+    learned projection matrices E and F. Applies RoPE to Q and K before
+    projection for position encoding parity with V1 (full attention).
 
-    Mathematically: φ(x) = x + 1 for x >= 0, exp(x) for x < 0.
-    We use torch.where instead of F.elu(x) + 1 to avoid float32 precision
-    loss where exp(x) - 1 + 1 rounds to 0 for very negative x.
-
-    Args:
-        x: Arbitrary-shaped tensor.
-
-    Returns:
-        Tensor of same shape with all elements > 0.
-    """
-    return torch.where(x >= 0, x + 1.0, torch.exp(x))
-
-
-class LinearAttention(nn.Module):
-    """Causal linear attention with ELU+1 feature map.
-
-    Replaces the O(n²) softmax attention kernel with an O(n·d²) recurrence.
-    At each position i, the output is computed as:
-
-        numerator_i   = φ(Q_i) @ S_i     where S_i = Σ_{j≤i} φ(K_j)^T ⊗ V_j
-        denominator_i = φ(Q_i) · z_i     where z_i = Σ_{j≤i} φ(K_j)
-        output_i      = numerator_i / clamp(denominator_i, min=ε)
-
-    This is strictly causal — no position attends to any future position.
+    Complexity: O(T·r·d) per head, where r << T.
 
     Args:
-        config: ModelConfig providing d_model, n_head, dropout, etc.
+        config: ModelConfig providing d_model, n_head, seq_len, projection_rank, dropout.
+
+    Raises:
+        ValueError: If projection_rank is None, <= 0, or > seq_len.
     """
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
         self.n_head = config.n_head
         self.d_head = config.d_head
         self.d_model = config.d_model
 
+        # Validate projection_rank
+        if config.projection_rank is None:
+            raise ValueError(
+                "projection_rank must be set for LinformerAttention (got None). "
+                "Set config.projection_rank to a positive integer <= seq_len."
+            )
+        if config.projection_rank <= 0:
+            raise ValueError(
+                f"projection_rank must be > 0, got {config.projection_rank}"
+            )
+        if config.projection_rank > config.seq_len:
+            raise ValueError(
+                f"projection_rank ({config.projection_rank}) must be <= seq_len ({config.seq_len})"
+            )
+
+        # Q, K, V, and output projections
         self.q_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         self.k_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         self.v_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
 
+        # Learned projection matrices E (for K) and F (for V)
+        # Shape: (seq_len, projection_rank)
+        self.E = nn.Parameter(torch.empty(config.seq_len, config.projection_rank))
+        self.F = nn.Parameter(torch.empty(config.seq_len, config.projection_rank))
+        nn.init.xavier_uniform_(self.E)
+        nn.init.xavier_uniform_(self.F)
+
+        # Precompute RoPE cos/sin buffers
+        cos, sin = precompute_rope_frequencies(config.d_head, config.seq_len)
+        self.register_buffer("rope_cos", cos, persistent=False)
+        self.register_buffer("rope_sin", sin, persistent=False)
+
+        # Dropout layers
+        self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x, kv_cache=None):
-        """Compute causal linear attention.
+    def forward(self, x: torch.Tensor, kv_cache=None) -> tuple[torch.Tensor, None]:
+        """Compute Linformer attention.
 
         Args:
             x: Input tensor of shape (B, T, d_model).
@@ -75,59 +91,45 @@ class LinearAttention(nn.Module):
 
         Raises:
             NotImplementedError: If kv_cache is not None.
+            AssertionError: If T > config.seq_len.
         """
         if kv_cache is not None:
             raise NotImplementedError(
-                "KV-cache generation is not supported for linear attention"
+                "KV-cache generation is not supported for Linformer attention "
+                "(E/F projection matrices are tied to fixed seq_len)"
             )
 
         B, T, C = x.shape
+        assert T <= self.config.seq_len, (
+            f"Input seq_len {T} exceeds config.seq_len {self.config.seq_len}"
+        )
 
-        # Project to Q, K, V and reshape to (B, n_head, T, d_head)
+        # Project Q, K, V and reshape to (B, H, T, d_head)
         q = self.q_proj(x).view(B, T, self.n_head, self.d_head).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_head, self.d_head).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_head, self.d_head).transpose(1, 2)
 
-        # Apply feature map: φ(x) = ELU(x) + 1
-        phi_q = feature_map(q)
-        phi_k = feature_map(k)
+        # Apply RoPE to Q and K (before low-rank projection)
+        q = apply_rope(q, self.rope_cos[:T], self.rope_sin[:T])
+        k = apply_rope(k, self.rope_cos[:T], self.rope_sin[:T])
 
-        # Causal linear attention via recurrence
-        # S: running outer-product accumulator (B, n_head, d_head, d_head)
-        # z: running normaliser accumulator   (B, n_head, d_head)
-        S = torch.zeros(
-            B, self.n_head, self.d_head, self.d_head, device=x.device, dtype=x.dtype
-        )
-        z = torch.zeros(B, self.n_head, self.d_head, device=x.device, dtype=x.dtype)
+        # Low-rank projection of K and V
+        E_t = self.E[:T, :].t()  # (r, T)
+        F_t = self.F[:T, :].t()  # (r, T)
+        k_proj = torch.einsum('rt,bhtd->bhrd', E_t, k)  # (B, H, r, d_head)
+        v_proj = torch.einsum('rt,bhtd->bhrd', F_t, v)  # (B, H, r, d_head)
 
-        outputs = []
-        for t in range(T):
-            k_t = phi_k[:, :, t, :]  # (B, n_head, d_head)
-            v_t = v[:, :, t, :]      # (B, n_head, d_head)
-            q_t = phi_q[:, :, t, :]  # (B, n_head, d_head)
+        # Scaled dot-product attention with softmax
+        scale = self.d_head ** -0.5
+        scores = torch.matmul(q, k_proj.transpose(-2, -1)) * scale  # (B, H, T, r)
+        weights = torch.softmax(scores, dim=-1)  # (B, H, T, r)
+        weights = self.attn_dropout(weights)
 
-            # Update accumulators: S += outer(k_t, v_t), z += k_t
-            S = S + torch.einsum('bhd,bhe->bhde', k_t, v_t)
-            z = z + k_t
+        # Weighted sum of projected values
+        output = torch.matmul(weights, v_proj)  # (B, H, T, d_head)
 
-            # Numerator: φ(Q_t) @ S → (B, n_head, d_head)
-            num = torch.einsum('bhd,bhde->bhe', q_t, S)
+        # Reshape and output projection
+        output = output.transpose(1, 2).contiguous().view(B, T, C)
+        output = self.resid_dropout(self.out_proj(output))
 
-            # Denominator: φ(Q_t) · z → (B, n_head) scalar per head
-            denom = torch.einsum('bhd,bhd->bh', q_t, z)
-
-            # ε-clamp to prevent division by zero
-            denom = denom.clamp(min=1e-6)
-
-            # Normalise: output_t = num / denom
-            out_t = num / denom.unsqueeze(-1)  # (B, n_head, d_head)
-            outputs.append(out_t)
-
-        # Stack: (B, n_head, T, d_head) → (B, T, d_model)
-        out = torch.stack(outputs, dim=2)
-        out = out.transpose(1, 2).contiguous().view(B, T, C)
-
-        # Output projection + residual dropout
-        out = self.resid_dropout(self.out_proj(out))
-
-        return out, None
+        return output, None
