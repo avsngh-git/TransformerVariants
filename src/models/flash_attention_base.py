@@ -217,6 +217,17 @@ class FlashAttentionBase(nn.Module, ABC):
         """
         return {}
 
+    def _extra_training_kwargs(self) -> dict[str, Any]:
+        """Return additional keyword arguments for flash_attn_func (training path).
+
+        Default delegates to _extra_attn_kwargs() for backward compatibility.
+        Override in subclasses that need training-only kernel parameters (e.g., window_size).
+
+        Returns:
+            Dict of keyword arguments for flash_attn_func during training.
+        """
+        return self._extra_attn_kwargs()
+
     def _project_qkv(
         self, x: torch.Tensor, B: int, T: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -279,8 +290,8 @@ class FlashAttentionBase(nn.Module, ABC):
         # Apply position encoding (offset=0 for training)
         q, k = self._apply_position(q, k, offset=0)
 
-        # Get any extra kernel kwargs from subclass
-        extra_kwargs = self._extra_attn_kwargs()
+        # Get any extra kernel kwargs from subclass (training-specific hook)
+        extra_kwargs = self._extra_training_kwargs()
 
         # Call flash_attn_func for full-sequence attention
         dropout_p = self.attn_dropout if self.training else 0.0

@@ -57,6 +57,17 @@ class ModelConfig:
     # Compute optimization fields
     attention_backend: str = "sdpa"
 
+    # Sliding Window Attention
+    window_size: int | None = None
+
+    def __post_init__(self):
+        if self.window_size is not None:
+            if self.window_size < 1 or self.window_size > self.seq_len:
+                raise ValueError(
+                    f"window_size must be between 1 and seq_len ({self.seq_len}) inclusive, "
+                    f"got {self.window_size}"
+                )
+
     @property
     def d_head(self) -> int:
         """Dimension of each attention head: d_model // n_head."""

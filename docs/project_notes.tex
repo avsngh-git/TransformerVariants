@@ -1928,6 +1928,21 @@ Tri Dao.
 \newblock FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning.
 \newblock \emph{ICLR}, 2024.
 
+\bibitem{katharopoulos2020linear}
+Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and Fran\c{c}ois Fleuret.
+\newblock Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention.
+\newblock \emph{ICML}, 2020.
+
+\bibitem{jiang2023mistral}
+Albert Q. Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, Devendra Singh Chaplot, Diego de Las Casas, Florian Bressand, Gianna Lengyel, Guillaume Lample, Lucile Saulnier, L\'{e}lio Renard Lavaud, Marie-Anne Lachaux, Pierre Stock, Teven Le Scao, Thibaut Lavril, Thomas Wang, Timoth\'{e}e Lacroix, and William El Sayed.
+\newblock Mistral 7B.
+\newblock arXiv:2310.06825, 2023.
+
+\bibitem{beltagy2020longformer}
+Iz Beltagy, Matthew E. Peters, and Arman Cohan.
+\newblock Longformer: The Long-Document Transformer.
+\newblock arXiv:2004.05150, 2020.
+
 \end{thebibliography}
 
 % =============================================================================
@@ -2039,6 +2054,237 @@ The following concepts have been implemented in the project but are not yet expl
     \end{enumerate}
     \item \textbf{Why explicit kernel matters for experiments:} With SDPA, different variants might dispatch to different kernels (Flash for V1, memory-efficient for V2 with an attn\_mask). Using the same explicit Flash kernel for all variants eliminates this confound from throughput comparisons.
     \item \textbf{Conceptual relationship:} Flash Attention is a compute optimization (same math, different execution). Flash Attention 2 is a better implementation of the same idea. Neither changes the statistical model — they change wall-clock time and memory usage. The notes should explain the online softmax recurrence (already present) and add: (a) the work-partitioning improvement in v2, and (b) how ALiBi slopes integrate into the tiled computation without breaking the O(T) memory property.
+\end{itemize}
+
+% --- Sliding Window Attention ---
+\item \textbf{Sliding Window Attention / SWA (V4)} \emph{(home: \cref{sec:attention-position})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Baseline role:} Full causal attention allows every query at position $i$ to attend to all positions $j \leq i$. This gives maximum expressiveness — any pattern of information retrieval is representable within the attention weight simplex.
+
+    \item \textbf{Limitation:} Full causal attention has two practical limitations as sequence length grows:
+    \begin{enumerate}[nosep]
+        \item Even with FlashAttention's tiling, the $O(T^2)$ arithmetic cost applies to every layer at every training step. For long sequences, much of this compute goes to attending to very distant tokens whose relevance may be small.
+        \item The KV-cache at inference scales as $O(\nlayer \cdot T \cdot \dmodel)$. In serving scenarios with long contexts, this dominates memory.
+    \end{enumerate}
+    Additionally, empirical evidence suggests that lower Transformer layers primarily capture local patterns (syntax, short phrases), while only upper layers benefit from long-range attention. Applying full attention uniformly at every layer may be over-parameterizing the attention pattern for lower layers.
+
+    \item \textbf{Design pressure:} Reduce training FLOPs for attention while preserving the model's ability to capture local patterns that dominate natural language structure. The hypothesis: restricting attention to a fixed local window during training is a useful inductive bias that encourages the model to encode information into the residual stream efficiently, rather than relying on attending to arbitrarily distant raw tokens.
+
+    \item \textbf{Replacement mechanism --- windowed causal attention:} Each query at position $i$ can attend only to positions in the window $[\max(0, i - W + 1), \; i]$, where $W$ is the window size. The causal mask is replaced by a banded causal mask:
+    \begin{equation}\label{eq:swa_mask}
+        A_{ij} = \begin{cases}
+            \vq_i^\top \vk_j / \sqrt{\dhead}, & \max(0, i - W + 1) \leq j \leq i,\\
+            -\infty, & \text{otherwise}.
+        \end{cases}
+    \end{equation}
+    After softmax, positions outside the window receive zero weight.
+
+    \item \textbf{Mathematical formulation:} The windowed attention output at position $i$ is:
+    \begin{equation}
+        \vo_i = \sum_{j=\max(0,\, i-W+1)}^{i} \alpha_{ij} \vv_j, \qquad
+        \alpha_{ij} = \frac{\exp(\vq_i^\top \vk_j / \sqrt{\dhead})}{\sum_{k=\max(0,\, i-W+1)}^{i} \exp(\vq_i^\top \vk_k / \sqrt{\dhead})}
+    \end{equation}
+    The normalisation denominator sums only over the window, not all past positions. Thus the attention weights $\alpha_{ij}$ still form a valid probability distribution (non-negative, sum to 1) over the restricted set.
+
+    \item \textbf{Window size as a fixed proportion:} In this project, $W = \lfloor T / 4 \rfloor$ where $T$ is the training sequence length:
+    \begin{center}
+    \begin{tabular}{lcccc}
+    \toprule
+    Scale & $T$ (seq\_len) & $W$ (window) & Ratio $W/T$ & Visible positions at $i = T$\\
+    \midrule
+    debug & 512 & 128 & 1/4 & 128\\
+    main & 1024 & 256 & 1/4 & 256\\
+    stretch & 1024 & 256 & 1/4 & 256\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+    A fixed proportion rather than a fixed absolute window means the receptive field scales with context length. Each layer sees a local window; stacking $\nlayer$ layers gives an effective receptive field that grows linearly with depth.
+
+    \item \textbf{Effective receptive field:} After $L$ layers of windowed attention, position $i$ can be influenced by information from positions as far back as $i - L \cdot W$. This is because each layer propagates information one window-width backward through the residual stream:
+    \begin{equation}
+        \text{effective receptive field} = \min(i,\; L \cdot W)
+    \end{equation}
+    At debug scale: $L = 4$ layers $\times$ $W = 128$ = 512 positions, which covers the full sequence. Thus even with windowed attention, the model can in principle propagate information across the entire context through multi-layer composition.
+
+    \item \textbf{Training vs.\ generation asymmetry:} A key design decision is that the window restriction applies only during training. At generation time, the full KV-cache is used without window restriction:
+    \begin{center}
+    \begin{tabular}{lll}
+    \toprule
+    Phase & Attention scope & Rationale\\
+    \midrule
+    Training & $[i - W + 1, \; i]$ & Inductive bias, reduced FLOPs\\
+    Generation & $[0, \; i]$ (full) & Maximum expressiveness at inference\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+    This asymmetry means the model is trained with a local inductive bias but evaluated with access to all context. The model learns to write useful information into the residual stream within each window, and at inference time can optionally use longer-range key-value pairs if they happen to be useful.
+
+    \item \textbf{Complexity analysis:}
+    \begin{center}
+    \begin{tabular}{lcc}
+    \toprule
+    & Full Causal Attention & Sliding Window ($W < T$)\\
+    \midrule
+    Time per layer & $O(T^2 \cdot \dhead)$ & $O(T \cdot W \cdot \dhead)$\\
+    Effective reduction & --- & factor of $T / W = 4$ in this project\\
+    KV-cache (generation) & $O(T \cdot \dhead)$ & $O(T \cdot \dhead)$ (same --- no window at inference)\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+    With the flash\_attn kernel, the window is implemented as a kernel parameter rather than a mask matrix. The kernel simply skips loading tiles outside the window, achieving the computational savings without materializing any mask.
+
+    \item \textbf{Connection to RoPE:} SWA uses RoPE identically to V1. Rotary position embeddings are applied to Q and K before the attention computation. Within the window, relative positions range from $0$ to $W - 1$. RoPE is defined for all integer offsets, so no modification is needed. The key insight is that even though the model only attends within a window during training, the RoPE frequencies encode positions beyond the window — this is what enables the full-context generation to work correctly at inference.
+
+    \item \textbf{Relationship to local attention literature:} SWA belongs to a family of sparse attention patterns:
+    \begin{center}
+    \begin{tabular}{ll}
+    \toprule
+    Pattern & Description\\
+    \midrule
+    Full causal & attend to all past positions\\
+    Sliding window (SWA) & attend to $W$ most recent positions\\
+    Dilated window & attend to every $d$-th position in a larger span\\
+    Global + local & some heads attend globally, others locally\\
+    Longformer-style & local window + global tokens\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+    SWA is the simplest member: a contiguous local window with no global tokens. Mistral-7B uses exactly this pattern (window size 4096 with 32k context). The simplicity is intentional for this project — it isolates the effect of local attention bias without confounding it with complex sparse patterns.
+
+    \item \textbf{New trade-off:}
+    \begin{enumerate}[nosep]
+        \item \textbf{Expressiveness loss in training:} Lower layers cannot directly attend to distant positions during training. If certain tasks require long-range attention in early layers (e.g., matching a bracket opened 500 tokens ago), the model must propagate that information through the residual stream layer by layer.
+        \item \textbf{Train/test distribution mismatch:} The model trains with restricted attention but generates with full attention. The attention weights at inference may not be well-calibrated for distant positions because those patterns were never trained.
+        \item \textbf{No KV-cache savings at inference:} Unlike some serving-optimized systems that evict old KV entries beyond the window, this implementation keeps the full cache. The benefit is purely in training FLOPs.
+        \item \textbf{Minimal implementation complexity:} Because SWA is a kernel parameter rather than a structural change, it adds zero parameters, zero new modules, and zero changes to the cache format. It is the lightest possible attention-pattern experiment.
+    \end{enumerate}
+
+    \item \textbf{Parameter count impact:} Zero. The window restriction changes the attention computation but not the model parameters. QKV projections, output projection, RoPE buffers, FFN weights, and normalization scales are all identical to V1. Formally: $|\vtheta_{\text{SWA}}| = |\vtheta_{\text{V1}}|$ at every scale.
+
+    \item \textbf{Connection to linear attention (V5):} SWA and linear attention address the same design pressure ($O(T^2)$ cost) from opposite directions. SWA keeps the softmax kernel but restricts the number of positions attended (reducing arithmetic by a constant factor). Linear attention changes the kernel itself to enable $O(T)$ recurrence but attends to all past positions (with implicit rank-limited weighting). Neither achieves both full-range attention and sub-quadratic complexity simultaneously.
+
+    \item \textbf{Correctness properties verified by tests:}
+    \begin{enumerate}[nosep]
+        \item Window size validation rejects out-of-range values ($W < 1$ or $W > T$)
+        \item Training kernel receives \texttt{window\_size=(W, W)} argument
+        \item Generation kernel does \emph{not} receive window\_size (full attention at inference)
+        \item Window is computed as $W = \lfloor T / 4 \rfloor$ for all scales
+        \item Parameter count is identical to V1 at every scale
+        \item Existing variants (V1, V2, V3) produce unchanged outputs after SWA addition
+    \end{enumerate}
+\end{itemize}
+
+% --- Linear Attention ---
+\item \textbf{Linear Attention: ELU-Based Causal Attention (V5)} \emph{(home: \cref{sec:attention-position})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Baseline role:} Standard softmax attention computes a weighted average over values using normalized exponential scores:
+    \begin{equation}
+        \mathrm{Attn}(\mQ,\mK,\mV)_i = \frac{\sum_{j \leq i} \exp(\vq_i^\top \vk_j / \sqrt{\dhead})\, \vv_j}{\sum_{j \leq i} \exp(\vq_i^\top \vk_j / \sqrt{\dhead})}
+    \end{equation}
+    This requires materializing (or tiling over) the $T \times T$ attention score matrix, giving $O(T^2 \dhead)$ time and $O(T^2)$ or $O(T)$ space depending on implementation strategy.
+
+    \item \textbf{Limitation:} Even with FlashAttention's tiling, the \emph{arithmetic cost} remains $O(T^2 \dhead)$. For very long sequences or research settings where wall-clock scaling matters, quadratic cost is fundamentally limiting. Additionally, the softmax normalization couples all positions — there is no closed-form incremental update rule that avoids revisiting past scores.
+
+    \item \textbf{Design pressure:} Achieve sub-quadratic \emph{time} complexity for causal attention while preserving: (1)~strict causal ordering (no future leakage), (2)~a proper normalization so outputs are bounded, and (3)~compatibility with the existing ModernTransformer shell (same interface, same parameter count). The target is $O(T \cdot \dhead^2)$ time and $O(\dhead^2)$ recurrence space.
+
+    \item \textbf{Replacement mechanism --- kernel linearization:} Replace softmax with a feature map $\varphi$ applied to Q and K separately. The key identity is:
+    \begin{equation}
+        \mathrm{Attn}(\mQ,\mK,\mV)_i \approx \frac{\sum_{j \leq i} \varphi(\vq_i)^\top \varphi(\vk_j) \cdot \vv_j}{\sum_{j \leq i} \varphi(\vq_i)^\top \varphi(\vk_j)}
+    \end{equation}
+    Because $\varphi(\vq_i)$ does not depend on $j$, it can be factored out of the sum:
+    \begin{equation}\label{eq:linear_attn_factored}
+        \vo_i = \frac{\varphi(\vq_i)^\top \mS_i}{\varphi(\vq_i)^\top \vz_i}
+    \end{equation}
+    where the accumulators are defined recursively:
+    \begin{align}
+        \mS_i &= \mS_{i-1} + \varphi(\vk_i) \vv_i^\top \in \reals^{\dhead \times \dhead} \label{eq:S_recurrence}\\
+        \vz_i &= \vz_{i-1} + \varphi(\vk_i) \in \reals^{\dhead} \label{eq:z_recurrence}
+    \end{align}
+    with $\mS_0 = \bm{0}$ and $\vz_0 = \bm{0}$. This recurrence is naturally causal (each step depends only on past) and costs $O(\dhead^2)$ per step for the outer product update.
+
+    \item \textbf{Feature map choice --- ELU+1:} The project uses:
+    \begin{equation}\label{eq:elu_feature_map}
+        \varphi(x) = \mathrm{ELU}(x) + 1 = \begin{cases} x + 1 & x \geq 0 \\ e^x & x < 0 \end{cases}
+    \end{equation}
+    applied element-wise. This satisfies the critical requirement $\varphi(x) > 0$ for all $x \in \reals$, which guarantees:
+    \begin{enumerate}[nosep]
+        \item The normalisation denominator $\varphi(\vq_i)^\top \vz_i > 0$ (both vectors have strictly positive entries after at least one key has been accumulated).
+        \item The ``attention weights'' (implicit in the factored form) are non-negative, preserving the interpretation of attention as a weighted average.
+    \end{enumerate}
+
+    \item \textbf{Mathematical properties of $\varphi$:}
+    \begin{itemize}[nosep]
+        \item \textbf{Positivity:} $\varphi(x) > 0$ for all $x \in \reals$. For $x \geq 0$: $\varphi(x) = x + 1 \geq 1 > 0$. For $x < 0$: $\varphi(x) = e^x \in (0, 1)$.
+        \item \textbf{Range partitioning:} For negative inputs, $\varphi$ maps $(-\infty, 0) \to (0, 1)$. For non-negative inputs, $\varphi$ maps $[0, \infty) \to [1, \infty)$. The function is continuous at $x = 0$ since both branches give $\varphi(0) = 1$.
+        \item \textbf{Monotonicity:} $\varphi'(x) = 1$ for $x \geq 0$ and $\varphi'(x) = e^x > 0$ for $x < 0$. Thus $\varphi$ is strictly monotone increasing everywhere.
+        \item \textbf{Derivative continuity:} $\varphi'(0^-) = e^0 = 1 = \varphi'(0^+)$. The function is $C^1$ everywhere (smooth gradient flow during backpropagation).
+    \end{itemize}
+
+    \item \textbf{Complexity analysis:}
+    \begin{center}
+    \begin{tabular}{lcc}
+    \toprule
+    & Softmax Attention & Linear Attention\\
+    \midrule
+    Time per layer & $O(T^2 \dhead)$ & $O(T \cdot \dhead^2)$\\
+    Space (working) & $O(T^2)$ or $O(T)$ (tiled) & $O(\dhead^2)$ (accumulator)\\
+    Output storage & $O(T \cdot \dhead)$ & $O(T \cdot \dhead)$\\
+    Crossover regime & favourable when $T < \dhead$ & favourable when $T > \dhead$\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+    At the project's debug scale ($T = 512$, $\dhead = 64$), $T \gg \dhead$, so linear attention is in its favourable regime arithmetically. However, the Python-loop implementation has constant overhead per step that dominates at small $T$.
+
+    \item \textbf{Why no position encoding:} RoPE works because it exploits the \emph{multiplicative structure of softmax}: $\exp(\widetilde{\vq}_m^\top \widetilde{\vk}_n) = \exp(\vq_m^\top \mR_{n-m} \vk_n)$, so the rotation decomposes into a relative offset inside the exponential. In linear attention, the kernel is $\varphi(\vq)^\top \varphi(\vk)$, which is a dot product of two independently transformed vectors. Rotating Q and K before applying $\varphi$ does not produce a clean relative-offset decomposition because $\varphi$ is not multiplicatively compatible with rotations:
+    \begin{equation}
+        \varphi(\mR_m \vq)^\top \varphi(\mR_n \vk) \neq f(n - m, \vq, \vk) \quad \text{in general}
+    \end{equation}
+    Position information must therefore come from elsewhere (token embeddings in the residual stream, or future work on position-aware feature maps).
+
+    \item \textbf{Numerical stability --- $\varepsilon$-clamping:} The normalisation denominator can become very small when $\varphi(\vq_i)$ is nearly orthogonal to the accumulated $\vz_i$. To prevent division by zero or numerically unstable outputs:
+    \begin{equation}
+        \hat{d}_i = \max\left(\varphi(\vq_i)^\top \vz_i,\; \varepsilon\right), \qquad \varepsilon = 10^{-6}
+    \end{equation}
+    This clamping introduces a small bias at affected positions (outputs are slightly smaller than the true normalised value) but ensures finite gradients everywhere.
+
+    \item \textbf{Causal correctness guarantee:} The recurrence structure in \cref{eq:S_recurrence,eq:z_recurrence} ensures causality by construction. At step $i$, the accumulator $\mS_i$ contains information only from positions $1, \ldots, i$. No future position $j > i$ can influence $\mS_i$ or $\vz_i$ because the loop processes positions left-to-right. This is formally equivalent to a lower-triangular implicit attention matrix where entry $(i, j) = 0$ for $j > i$.
+
+    \item \textbf{Relationship to kernel methods:} Linear attention can be viewed through the lens of kernel approximation. Standard softmax attention with the exponential kernel $\kappa(\vq, \vk) = \exp(\vq^\top \vk / \sqrt{\dhead})$ can be approximated by $\kappa(\vq, \vk) \approx \varphi(\vq)^\top \varphi(\vk)$ for appropriate $\varphi$. The ELU+1 map is not derived from approximating the softmax kernel specifically --- it is a simpler positive map that enables the recurrence factorization. More sophisticated feature maps (random Fourier features, positive orthogonal features) can approximate softmax more closely but add complexity.
+
+    \item \textbf{Connection to state-space models and RNNs:} The accumulator recurrence $\mS_i = \mS_{i-1} + \varphi(\vk_i)\vv_i^\top$ is structurally similar to a linear recurrent neural network with additive state updates. The ``state'' is $\mS \in \reals^{\dhead \times \dhead}$, updated at each step by a rank-1 outer product. This connection places linear attention on the spectrum between:
+    \begin{center}
+    \begin{tabular}{lll}
+    \toprule
+    Architecture & State size & Attention pattern\\
+    \midrule
+    RNN (e.g., LSTM) & $O(\dhead)$ & implicit, via hidden state\\
+    Linear Attention & $O(\dhead^2)$ & explicit rank-1 updates\\
+    Full Attention & $O(T \cdot \dhead)$ & explicit $T \times T$ matrix\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+    Linear attention trades off between expressiveness (smaller state than full attention) and recurrence efficiency (constant-time update per step, unlike full attention's growing context).
+
+    \item \textbf{New trade-off:}
+    \begin{enumerate}[nosep]
+        \item \textbf{Expressiveness vs.\ efficiency:} Softmax attention can represent arbitrary attention patterns (any row-stochastic matrix for given Q, K). Linear attention's implicit weights are constrained by the rank of the outer-product accumulator --- it cannot represent patterns that require more than $\dhead$ ``basis'' attention columns.
+        \item \textbf{No KV-cache generation:} The recurrence is efficient for training (process all $T$ positions in one pass) but autoregressive generation would require maintaining and querying the $\mS, \vz$ state. This is feasible but not implemented per ADR 0002 (training-comparison-only variant).
+        \item \textbf{Python loop overhead:} The sequential recurrence requires $T$ iterations. Without a fused CUDA kernel or \texttt{torch.compiler} scan primitive, the Python loop adds significant per-step overhead. At $T = 512$, this makes V5 slower in wall-clock than FlashAttention-based V1, despite lower arithmetic complexity.
+        \item \textbf{No learned position:} Without RoPE or ALiBi, the model relies entirely on token order information propagated through the residual stream across layers. Early layers have no explicit position signal; position awareness emerges only through the sequential processing pattern.
+    \end{enumerate}
+
+    \item \textbf{Parameter count impact:} Linear attention uses the same $4\dmodel^2$ parameters per layer as standard MHA (three QKV projections + one output projection, all of shape $\dmodel \times \dmodel$). No RoPE buffers (non-learnable). The total parameter count is within $\pm 0\%$ of V1, well within the $\pm 5\%$ parity requirement for fair comparisons.
+
+    \item \textbf{Correctness properties verified by property-based tests:}
+    \begin{enumerate}[nosep]
+        \item $\varphi(x) > 0$ for all $x \in [-100, 100]$ (strict positivity of feature map)
+        \item For $x < 0$: $\varphi(x) \in (0, 1)$ (range characterization)
+        \item Causal independence: modifying input at position $t$ does not change output at positions $< t$
+        \item Finite outputs for all inputs in $[-10, 10]$ (numerical stability)
+        \item Output shape $(B, T, \dmodel)$ and second return element is \texttt{None} (interface contract)
+    \end{enumerate}
 \end{itemize}
 
 \end{enumerate}

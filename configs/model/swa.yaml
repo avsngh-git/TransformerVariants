@@ -1,0 +1,41 @@
+# V4: Sliding Window Attention (SWA)
+# Fixed-proportion window (seq_len // 4). Training uses windowed attention,
+# generation uses full KV-cache without restriction.
+
+model:
+  variant: swa
+  variant_id: V4
+  norm_type: rmsnorm
+  position_encoding: rope
+  ffn_type: swiglu
+  attention_type: sliding_window
+
+  # Compute optimization
+  attention_backend: flash_attn
+
+  vocab_size: 50257
+  ffn_multiplier: 4
+  dropout: 0.0
+  bias: false
+  tie_embeddings: true
+
+  debug:
+    n_layer: 4
+    d_model: 256
+    n_head: 4
+    seq_len: 512
+    window_size: 128
+
+  main:
+    n_layer: 8
+    d_model: 512
+    n_head: 8
+    seq_len: 1024
+    window_size: 256
+
+  stretch:
+    n_layer: 12
+    d_model: 768
+    n_head: 12
+    seq_len: 1024
+    window_size: 256

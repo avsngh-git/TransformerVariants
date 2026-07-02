@@ -89,12 +89,16 @@ class ModernTransformer(nn.Module):
             Must accept `config` as its sole constructor argument and implement
             `forward(x, kv_cache=None) -> (output, new_kv_cache)`.
             Defaults to ModernAttention.
+        per_layer_configs: Optional list of ModelConfig objects, one per layer.
+            When provided, each block is constructed with its own config (e.g.
+            to vary window_size per layer). When None, all blocks use `config`.
     """
 
     def __init__(
         self,
         config: ModelConfig,
         attention_class: Type[nn.Module] = ModernAttention,
+        per_layer_configs: list[ModelConfig] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -105,11 +109,22 @@ class ModernTransformer(nn.Module):
         # Dropout after embedding
         self.drop = nn.Dropout(config.dropout)
 
-        # Stack of modern Transformer blocks
-        self.blocks = nn.ModuleList([
-            ModernTransformerBlock(config, attention_class=attention_class)
-            for _ in range(config.n_layer)
-        ])
+        # Validate per_layer_configs length
+        if per_layer_configs is not None:
+            if len(per_layer_configs) != config.n_layer:
+                raise ValueError(
+                    f"per_layer_configs length ({len(per_layer_configs)}) must equal "
+                    f"n_layer ({config.n_layer})"
+                )
+            self.blocks = nn.ModuleList([
+                ModernTransformerBlock(per_layer_configs[i], attention_class=attention_class)
+                for i in range(config.n_layer)
+            ])
+        else:
+            self.blocks = nn.ModuleList([
+                ModernTransformerBlock(config, attention_class=attention_class)
+                for _ in range(config.n_layer)
+            ])
 
         # Final RMSNorm
         self.ln_f = RMSNorm(config.d_model)

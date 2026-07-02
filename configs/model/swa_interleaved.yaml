@@ -1,0 +1,39 @@
+# V4-interleaved: Sliding Window Attention with Interleaved Full Attention
+# Even layers use full causal attention, odd layers use SWA (window = seq_len // 4).
+# Research question: Does periodic full-context access recover information lost by windowing?
+
+model:
+  variant: swa_interleaved
+  variant_id: V4-interleaved
+  norm_type: rmsnorm
+  position_encoding: rope
+  ffn_type: swiglu
+  attention_type: sliding_window
+  attention_backend: flash_attn
+
+  vocab_size: 50257
+  ffn_multiplier: 4
+  dropout: 0.0
+  bias: false
+  tie_embeddings: true
+
+  debug:
+    n_layer: 4
+    d_model: 256
+    n_head: 4
+    seq_len: 512
+    window_sizes: [null, 128, null, 128]
+
+  main:
+    n_layer: 8
+    d_model: 512
+    n_head: 8
+    seq_len: 1024
+    window_sizes: [null, 256, null, 256, null, 256, null, 256]
+
+  stretch:
+    n_layer: 12
+    d_model: 768
+    n_head: 12
+    seq_len: 1024
+    window_sizes: [null, 256, null, 256, null, 256, null, 256, null, 256, null, 256]

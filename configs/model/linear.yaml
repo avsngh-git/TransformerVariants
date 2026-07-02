@@ -1,0 +1,33 @@
+# V5: Linear Attention (ELU-based causal)
+# No RoPE, RMSNorm, SwiGLU, O(n) attention
+
+model:
+  variant: linear
+  variant_id: V5
+  norm_type: rmsnorm
+  position_encoding: none
+  ffn_type: swiglu
+  attention_type: linear
+
+  vocab_size: 50257
+  dropout: 0.0
+  bias: false
+  tie_embeddings: true
+
+  debug:
+    n_layer: 4
+    d_model: 256
+    n_head: 4
+    seq_len: 512
+
+  main:
+    n_layer: 8
+    d_model: 512
+    n_head: 8
+    seq_len: 1024
+
+  stretch:
+    n_layer: 12
+    d_model: 768
+    n_head: 12
+    seq_len: 1024

@@ -4,7 +4,7 @@ Central place for all variant definitions and scale dimensions.
 Adding a new variant means adding one entry to the VARIANTS dict.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Type
 
 import torch
@@ -18,6 +18,7 @@ from src.models.modern_attention import ModernAttention
 from src.models.flash_attention import FlashAttention
 from src.models.alibi_attention import ALiBiAttention
 from src.models.gqa_attention import GQAAttention
+from src.models.linear_attention import LinearAttention
 
 
 SCALES: dict[str, dict[str, int]] = {
@@ -89,6 +90,39 @@ VARIANTS: dict[str, VariantSpec] = {
         default_activation="swiglu",
         requires_bf16=True,
     ),
+    "swa": VariantSpec(
+        model_class=ModernTransformer,
+        variant="swa",
+        norm_type="rmsnorm",
+        position_encoding="rope",
+        ffn_type="swiglu",
+        attention_type="sliding_window",
+        attention_class=FlashAttention,
+        default_activation="swiglu",
+        requires_bf16=True,
+    ),
+    "swa_interleaved": VariantSpec(
+        model_class=ModernTransformer,
+        variant="swa_interleaved",
+        norm_type="rmsnorm",
+        position_encoding="rope",
+        ffn_type="swiglu",
+        attention_type="sliding_window",
+        attention_class=FlashAttention,
+        default_activation="swiglu",
+        requires_bf16=True,
+    ),
+    "linear": VariantSpec(
+        model_class=ModernTransformer,
+        variant="linear",
+        norm_type="rmsnorm",
+        position_encoding="none",
+        ffn_type="swiglu",
+        attention_type="linear",
+        attention_class=LinearAttention,
+        default_activation="swiglu",
+        requires_bf16=False,
+    ),
 }
 
 
@@ -156,9 +190,37 @@ def build(
         activation=effective_activation,
     )
 
+    # Compute window_size for SWA variants (sliding_window attention_type)
+    if spec.attention_type == "sliding_window":
+        window_size = dims["seq_len"] // 4
+        if window_size < 1:
+            raise ValueError(
+                f"seq_len ({dims['seq_len']}) is too small for sliding window attention. "
+                f"Minimum seq_len is 4 (window_size = seq_len // 4 must be >= 1)."
+            )
+        config.window_size = window_size
+        # SWA requires flash_attn kernel — set backend in config if not explicitly overridden
+        if attention_backend is None:
+            config.attention_backend = "flash_attn"
+            effective_backend = "flash_attn"
+
     # Set n_kv_head for GQA variants (grouped-query attention needs fewer KV heads)
     if spec.attention_type == "flash_gqa":
         config.n_kv_head = dims["n_head"] // 4
+
+    # Build per-layer configs for swa_interleaved variant
+    # Let the existing sliding_window block run first (it sets window_size and effective_backend),
+    # then override with per-layer logic for the interleaved pattern.
+    per_layer_configs = None
+
+    if variant_name == "swa_interleaved":
+        window_size = dims["seq_len"] // 4
+        per_layer_configs = [
+            replace(config, window_size=None if i % 2 == 0 else window_size)
+            for i in range(dims["n_layer"])
+        ]
+        # Base config should NOT have window_size set — model-wide components don't need it
+        config.window_size = None
 
     # Select attention class: override with FlashAttention when backend is "flash_attn"
     # Only override if the variant uses the default ModernAttention — specialized
@@ -168,7 +230,10 @@ def build(
     else:
         attention_class = spec.attention_class
 
-    model = spec.model_class(config, attention_class=attention_class)
+    if per_layer_configs is not None:
+        model = spec.model_class(config, attention_class=attention_class, per_layer_configs=per_layer_configs)
+    else:
+        model = spec.model_class(config, attention_class=attention_class)
 
     # bf16/fp16 casting: apply when variant requires it or flash_attn backend is used,
     # AND the requested dtype is bfloat16 or float16

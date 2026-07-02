@@ -22,12 +22,15 @@ A variant is NOT defined by which "slots" it fills — it may introduce entirely
 | V1 | Modern Baseline | LLaMA recipe | — |
 | V2 | ALiBi | Swap RoPE → ALiBi (linear position biases) | V1 |
 | V3 | GQA | Swap independent heads → grouped-query attention | V1 |
-| V4 | Sparse local/global | Sliding window + global tokens | V1 |
-| V5 | Linformer or Performer | Linear-complexity attention | V1 |
+| V4 | SWA (Sliding Window Attention) | Fixed-proportion sliding window, no global tokens | V1 |
+| V5 | Linear (Linformer) | Low-rank K/V projection, O(n) attention complexity | V1 |
 
 ### Sub-variant
 
 A single component swap within a variant's recipe, with everything else unchanged. Example: V0-GELU is a sub-variant of V0 where only the activation function changes (ReLU → GELU).
+
+Known sub-variants:
+- **V4-interleaved** — alternates local (SWA) and global (full attention) layers, Gemma2-style. Even layers attend to the full sequence; odd layers use window_size=W. Isolates the question: "does periodic full-context access recover information lost by windowing?"
 
 ### Architectural Component
 
@@ -37,7 +40,7 @@ Known component types:
 - **Position encoding** — how position information enters the model (Learned, Sinusoidal, RoPE, ALiBi)
 - **Normalization** — how activations are scaled (LayerNorm, RMSNorm)
 - **FFN activation** — the nonlinearity in the feed-forward block (ReLU, GELU, SwiGLU)
-- **Attention pattern** — which tokens can attend to which (full causal, sliding window, sparse, linear approximation)
+- **Attention pattern** — which tokens can attend to which (full causal, sliding window, linear approximation)
 - **Attention structure** — how heads share parameters (independent heads, grouped-query, multi-query)
 
 ### Compute Optimization
@@ -78,6 +81,22 @@ A single execution of the training script. Produces one checkpoint directory, on
 ### Experiment
 
 A controlled comparison: multiple runs across variants and/or seeds under the same protocol (same data, token budget, optimizer, batch size, precision). Governed by the experiment contract.
+
+### Sliding Window Attention (SWA)
+
+An attention pattern where each query token attends only to the W tokens immediately preceding it (plus itself), rather than the full sequence. W is the window size. In this project, W is a fixed proportion of seq_len (W = seq_len // 4), constant across all layers. SWA applies during training only — generation uses the full KV cache.
+
+The flash_attn kernel supports SWA natively via its `window_size` parameter. No custom masks or block-sparse patterns are needed.
+
+SWA isolates the variable "attention span" while keeping all other components (RoPE, projections, FFN, normalization) identical to V1.
+
+### Linear Attention (Linformer)
+
+An attention mechanism that approximates full self-attention by projecting the Key and Value matrices from length T down to a fixed rank r=64, giving O(n·r) complexity instead of O(n²). Each transformer layer has two shared projection matrices E and F of shape `(seq_len, r)` — shared across all heads in that layer.
+
+RoPE is applied to Q and K before the low-rank projection. The attention computation is: `softmax(Q · (EK)^T / sqrt(d_head)) · (FV)`.
+
+V5 uses `ModernTransformer` as its model shell (RMSNorm, SwiGLU) and a standalone `LinearAttention(nn.Module)` class. Because the E and F projection matrices are tied to a fixed `seq_len`, autoregressive KV-cache generation is not supported — V5 is a training-comparison-only variant.
 
 ### Shard
 
@@ -126,3 +145,4 @@ Simulating a larger effective batch size by accumulating gradients over multiple
 
 - Evaluation framework: what the primary comparison axis is (fixed compute vs fixed data vs Pareto) — to be decided after all variants are implemented.
 - ALiBi extrapolation experiment: train-short/infer-long capability. Deferred until after the controlled comparison at fixed seq_len is complete.
+- KV-Cache unification: ModernAttention (SDPA) uses a concat-based 2-tuple cache; FlashAttentionBase uses a pre-allocated 3-tuple cache. These are incompatible seam contracts but `generate.py` currently works by passing cache opaquely. Unifying into a single `KVCache` abstraction is deferred until all variants (V4, V5) are implemented — it's a design smell, not a blocking bug today.

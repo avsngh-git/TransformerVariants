@@ -44,6 +44,8 @@ class FlashAttention(FlashAttentionBase):
         else:
             self.alibi_slopes = None
 
+        self._window_size = config.window_size
+
     def _apply_position(
         self, q: torch.Tensor, k: torch.Tensor, offset: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -70,6 +72,13 @@ class FlashAttention(FlashAttentionBase):
         k = k.transpose(1, 2)
 
         return q, k
+
+    def _extra_training_kwargs(self) -> dict[str, Any]:
+        """Return training-path kwargs: alibi_slopes + window_size when configured."""
+        kwargs = self._extra_attn_kwargs()  # gets alibi_slopes if present
+        if self._window_size is not None:
+            kwargs["window_size"] = (self._window_size, self._window_size)
+        return kwargs
 
     def _extra_attn_kwargs(self) -> dict[str, Any]:
         """Return alibi_slopes if configured, otherwise empty dict."""
