@@ -9,45 +9,55 @@
 
 ## Project Summary
 
-Single-GPU benchmark framework comparing decoder-only Transformer variants on an L4-24Q. Six variants (V0–V5) are planned, each isolated to a single architectural change against a baseline.
+Single-GPU benchmark framework comparing decoder-only Transformer variants on an L4-24Q (24GB VRAM). Six variants (V0–V5) plus one sub-variant are planned, each isolating a single architectural change.
 
 | Variant | Status |
 |---------|--------|
-| V0 — Vanilla (GPT-2) | ✅ Implemented + trained |
-| V1 — Modern (LLaMA) | ✅ Implemented + trained |
-| V2 — ALiBi | ✅ Implemented (not yet trained) |
-| V3 — GQA | ✅ Implemented (not yet trained) |
-| V4 — SWA | Spec exists, not implemented |
-| V5 — Linformer | Spec exists, not implemented |
+| V0 — Vanilla (GPT-2) | ✅ Implemented + trained (main + stretch) |
+| V1 — Modern (LLaMA) | ✅ Implemented + trained (main + stretch) |
+| V2 — ALiBi | ✅ Implemented + debug trained |
+| V3 — GQA | ✅ Implemented + debug trained |
+| V4 — SWA | ✅ Implemented (FlashAttention + window_size) |
+| V4-interleaved — SWA alternating layers | ✅ Implemented (per-layer config) |
+| V5 — Linear (ELU+1 causal) | ✅ Implemented (LinearAttention module) |
+
+All variants are registered in `src/models/registry.py`, have YAML configs in `configs/model/`, and have test coverage.
 
 ---
 
 ## What Was Done This Session
 
-Nothing substantive — the session was used solely to produce this handoff document. No code changes were made.
+Nothing substantive — the session produced this handoff document only. No code changes were made.
 
 ---
 
-## Recent Work (Last 3 Commits)
+## Implementation Details Worth Knowing
 
-See `git log --oneline -3` for details. Key changes:
-- ALiBi (V2) and GQA (V3) attention modules implemented with `flash_attn` backend
-- `FlashAttentionBase` — shared base module for all flash-based variants
-- Variant registry refactored for dependency-injected model construction
-- `RunConfigBuilder` extracted from trainer to separate config assembly from training loop
-- Training script (`scripts/train.py`) simplified; shell helpers added (`scripts/train_v2_v3.sh`)
+- **V4 (SWA):** Uses `FlashAttention` (inherits `FlashAttentionBase`) with `window_size = seq_len // 4` passed to `flash_attn_func`. No custom masks. Registered as `"swa"`.
+- **V4-interleaved:** Same `FlashAttention` class but `registry.build()` creates per-layer configs — even layers get `window_size=None` (full attention), odd layers get `window_size=W`. Registered as `"swa_interleaved"`.
+- **V5 (Linear):** Standalone `LinearAttention` module using ELU+1 feature map with causal recurrence (O(n·d²)). No RoPE, no KV-cache. Training-comparison only per ADR 0002.
+- **Attention backend:** `FlashAttentionBase` dispatches to `flash_attn` library. Supports SWA natively via kernel `window_size` param.
 
 ---
 
-## What the Next Session Should Focus On
+## What Has NOT Been Done
 
-No specific focus was provided. The natural next steps (from `docs/STATUS.md` and the project roadmap) are:
+- **No main/stretch training runs** for V2 (ALiBi), V3 (GQA), V4 (SWA), V4-interleaved, or V5 (Linear). Only debug-scale checkpoint exists for V2/V3.
+- **Phase 8: Evaluation framework** — no spec, no code.
+- **Phase 9: Visualization dashboard** — no code.
+- **Phase 10: Large-scale data pipeline** — not started.
+- **Phase 11: Fault-tolerant training** — basic checkpoint resume works, no fault injection.
+- **Phase 12: Main benchmarks** — blocked on Phase 8.
+- **Phase 13: Packaging** — final report, not started.
 
-1. **Train V2 (ALiBi) and V3 (GQA)** at main scale — code exists, runs haven't happened yet.
-2. **Implement V4 (SWA)** — spec exists at `.kiro/specs/swa-attention/`, ADR at `docs/adr/0001-swa-parameterizes-flash-attention.md`. SWA reuses `FlashAttentionBase` with `window_size` param.
-3. **Implement V5 (Linformer)** — spec exists at `.kiro/specs/linear-attention/`, ADR at `docs/adr/0002-linformer-no-kvcache-generation.md`. Standalone `LinearAttention(nn.Module)`.
-4. **Implement V4-interleaved sub-variant** — spec at `.kiro/specs/swa-interleaved/`.
-5. **Build evaluation framework** — Phase 8; no spec yet.
+---
+
+## Natural Next Steps
+
+1. **Run V2–V5 at main scale** — all code exists, just launch training runs via `scripts/train.py --variant <name> --scale main --compile`.
+2. **Build evaluation framework** (Phase 8) — standardized comparison metrics, plotting, statistical significance.
+3. **Run controlled experiments** at main + stretch scale across all variants with 3+ seeds.
+4. **Visualization dashboard** (Phase 9) — Streamlit + Plotly (deps already in pyproject.toml).
 
 ---
 
@@ -56,33 +66,31 @@ No specific focus was provided. The natural next steps (from `docs/STATUS.md` an
 | Artifact | Path |
 |----------|------|
 | Domain glossary | `CONTEXT.md` |
-| Project status | `docs/STATUS.md` |
+| Project status & training results | `docs/STATUS.md` |
 | Phase index | `docs/PHASE_INDEX.md` |
 | ALiBi/GQA PRD | `docs/prd-alibi-gqa-variants.md` |
 | Flash Attention PRD | `docs/prd-flash-attention-backend.md` |
 | ADR: SWA parameterizes flash | `docs/adr/0001-swa-parameterizes-flash-attention.md` |
 | ADR: Linformer no KV-cache | `docs/adr/0002-linformer-no-kvcache-generation.md` |
-| SWA spec | `.kiro/specs/swa-attention/` |
-| Linear attention spec | `.kiro/specs/linear-attention/` |
-| SWA-interleaved spec | `.kiro/specs/swa-interleaved/` |
-| All specs index | `.kiro/specs/` (15 specs total) |
+| All Kiro specs (15 total) | `.kiro/specs/` |
+| Variant registry (all build logic) | `src/models/registry.py` |
+| Flash attention base class | `src/models/flash_attention_base.py` |
 | Training script | `scripts/train.py` |
-| Flash base module | `src/models/flash_attention_base.py` |
-| Variant registry | `src/models/registry.py` |
+| Training shell helper | `scripts/train_v2_v3.sh` |
 
 ---
 
 ## Conventions & Gotchas
 
-- **Run tests:** `conda run -n transformer_lab python -m pytest tests/ -v`
+- **Run tests:** `conda run -n transformer_lab python -m pytest tests/ -v` (130+ tests)
 - **Lint:** `ruff check src/ tests/ scripts/`
 - **Install editable:** `pip install -e ".[dev]"`
-- **flash-attn** is a separate optional dep (`pip install flash-attn`) — needed for V1–V5 training but not for V0.
-- `torch.compile` is used during training (pass `--compile`). Models must avoid graph breaks.
-- All controlled comparisons must share: same data, same token budget, same optimizer config, same precision (bf16).
+- **flash-attn** is a separate optional dep — needed for V1–V5 training.
+- `torch.compile` is used during training (`--compile`). Models must avoid graph breaks.
+- All controlled comparisons must share: same data, same token budget, same optimizer, same precision (bf16).
 - Parameter tolerance: ±5% between compared variants.
-- Config YAML files live in `configs/model/` — one per variant, with per-scale overrides.
-- The `FlashAttentionBase` module handles KV-cache allocation and backend dispatch. New flash-based variants inherit from it.
+- Config YAML files: `configs/model/<variant>.yaml` with per-scale overrides.
+- V5 (Linear) uses a sequential loop over timesteps — it will be slow. This is expected.
 
 ---
 
@@ -90,11 +98,11 @@ No specific focus was provided. The natural next steps (from `docs/STATUS.md` an
 
 | Skill | When to Use |
 |-------|-------------|
-| `tdd` | When implementing V4/V5 — build test-first, use property-based testing with Hypothesis (already in the project). |
-| `codebase-design` | When designing the evaluation framework or refining the `FlashAttentionBase` → SWA inheritance. The deep-module vocabulary will help keep seams clean. |
-| `domain-modeling` | If new terms arise (e.g., evaluation metrics, Pareto frontier concepts). Keep `CONTEXT.md` canonical. |
-| `diagnosing-bugs` | If training runs diverge or flash_attn produces incorrect outputs — use the diagnosis loop. |
-| `grilling` | Before committing to the evaluation framework design — stress-test the comparison methodology. |
+| `tdd` | When building the evaluation framework — property-based testing with Hypothesis is already established in this project. |
+| `codebase-design` | When designing the evaluation framework or dashboard. Use deep-module vocabulary to keep interfaces clean. |
+| `domain-modeling` | If new terms arise (evaluation metrics, Pareto concepts). Keep `CONTEXT.md` canonical. |
+| `diagnosing-bugs` | If training runs diverge, produce NaN, or flash_attn gives incorrect outputs. |
+| `grilling` | Before committing to the evaluation framework design — stress-test the comparison methodology and metric choices. |
 
 ---
 
@@ -102,4 +110,5 @@ No specific focus was provided. The natural next steps (from `docs/STATUS.md` an
 
 - Evaluation framework primary axis: fixed compute vs fixed data vs Pareto?
 - ALiBi extrapolation experiment (train-short / infer-long) — after controlled comparison.
-- KV-Cache unification (concat-based 2-tuple vs pre-allocated 3-tuple) — after all variants are implemented.
+- KV-Cache unification (concat-based 2-tuple vs pre-allocated 3-tuple) — design smell, not blocking.
+- V5 performance: sequential recurrence is very slow; consider chunked-parallel version if needed for practical training at main scale.

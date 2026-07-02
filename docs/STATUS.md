@@ -93,6 +93,33 @@ Operational state of the project. Read this to understand what's built, what's r
 - torch.compile stable (no recompilation per step)
 - Checkpoint resume works with compiled models (fixed prefix mismatch)
 
+### Phase 6: ALiBi (V2) & GQA (V3) ✅
+- `src/models/flash_attention_base.py` — Shared base class for all flash_attn-backed variants (KV-cache allocation, training/generation dispatch)
+- `src/models/flash_attention.py` — `FlashAttention` (extends FlashAttentionBase with RoPE + optional ALiBi slopes + optional window_size)
+- `src/models/alibi_attention.py` — `ALiBiAttention` (extends FlashAttentionBase with ALiBi slope computation, no RoPE)
+- `src/models/gqa_attention.py` — `GQAAttention` (extends FlashAttentionBase with grouped-query KV heads, n_kv_head = n_head // 4)
+- `src/models/registry.py` — Variant registry with dependency-injected model construction
+- `src/training/run_config_builder.py` — Extracted run configuration builder
+- `configs/model/alibi.yaml`, `configs/model/gqa.yaml` — Variant configs
+- `scripts/train_v2_v3.sh` — Training shell helper for V2/V3 runs
+- Tests: `test_flash_attention.py`, `test_gqa_e2e_training.py`, `test_attention_backend.py`
+
+**Architecture:**
+- V2 (ALiBi): Replaces RoPE with linear position biases injected via `alibi_slopes` kwarg to flash_attn kernel. No learned/rotary position encoding.
+- V3 (GQA): Groups query heads to share KV heads (4 query heads per KV head). Reduces KV memory proportionally.
+
+### Phase 7: SWA (V4) & Linear Attention (V5) ✅
+- `src/models/flash_attention.py` — SWA via `window_size` parameter passed to flash_attn kernel (no custom masks)
+- `src/models/linear_attention.py` — Standalone `LinearAttention` module with ELU+1 feature map, causal recurrence O(n·d²)
+- `configs/model/swa.yaml`, `configs/model/swa_interleaved.yaml`, `configs/model/linear.yaml`
+- Tests: `test_swa_variant.py`, `test_swa_interleaved_unit.py`, `test_linear_attention.py`, `test_linear_properties.py`, `test_linear_registry.py`
+- ADRs: `docs/adr/0001-swa-parameterizes-flash-attention.md`, `docs/adr/0002-linformer-no-kvcache-generation.md`
+
+**Architecture:**
+- V4 (SWA): Each query attends only to `window_size = seq_len // 4` preceding tokens. Uses `FlashAttention` with `window_size` kwarg — flash_attn kernel handles windowing natively.
+- V4-interleaved: Even layers use full attention (window_size=None), odd layers use SWA. Per-layer configs built by registry.
+- V5 (Linear): ELU+1 feature map with running accumulator. No RoPE, no KV-cache (training-comparison only). Position info from token embeddings only.
+
 ---
 
 ## Training Runs Completed
@@ -128,12 +155,21 @@ Operational state of the project. Read this to understand what's built, what's r
 
 ## Test Suite
 
-130 tests total, all passing:
+217 tests collected:
 - `tests/test_model.py` — shapes, causal mask, generation, KV-cache, weight init
 - `tests/test_modern_model.py` — V1 components (RMSNorm, RoPE, SwiGLU, ModernAttention, ModernTransformer)
+- `tests/test_flash_attention.py` — FlashAttentionBase, FlashAttention, ALiBi, GQA
+- `tests/test_gqa_e2e_training.py` — GQA end-to-end training integration
+- `tests/test_attention_backend.py` — Backend dispatch tests
+- `tests/test_swa_variant.py` — SWA variant construction and forward pass
+- `tests/test_swa_interleaved_unit.py` — Interleaved per-layer window config
+- `tests/test_linear_attention.py` — Linear attention forward, causality
+- `tests/test_linear_properties.py` — Property-based tests (Hypothesis) for linear attention
+- `tests/test_linear_registry.py` — Registry build for linear variant
+- `tests/test_trainer_injection.py` — Trainer dependency injection
 - `tests/test_training.py` — scheduler, dataloader, V0 and V1 training integration
 - `tests/test_data_pipeline.py` — tokenizer, sharding, manifest
-- `tests/test_seed.py`, `test_run_dir.py`, `test_params.py` — utilities
+- `tests/test_seed.py`, `test_run_dir.py`, `test_params.py`, `test_config.py`, `test_device.py`, `test_logging.py`, `test_run_logger.py` — utilities
 
 Run all tests: `conda run -n transformer_lab python -m pytest tests/ -v`
 
@@ -156,6 +192,12 @@ Run all tests: `conda run -n transformer_lab python -m pytest tests/ -v`
 - `configs/data/debug.yaml` — Data pipeline config (dataset, tokenizer, shard size)
 - `configs/model/vanilla.yaml` — V0 vanilla (ReLU, all 3 scales)
 - `configs/model/vanilla_gpt2.yaml` — V0 with GELU activation
+- `configs/model/modern.yaml` — V1 modern (LLaMA-style)
+- `configs/model/alibi.yaml` — V2 ALiBi
+- `configs/model/gqa.yaml` — V3 GQA
+- `configs/model/swa.yaml` — V4 Sliding Window Attention
+- `configs/model/swa_interleaved.yaml` — V4-interleaved (alternating local/global layers)
+- `configs/model/linear.yaml` — V5 Linear Attention (ELU-based causal)
 
 ---
 
@@ -183,9 +225,13 @@ Install: `pip install -e ".[data]"`
 
 ## What's Next
 
-- Phase 6: ALiBi (V2), GQA/MQA (V3)
-- Phase 7: Sparse attention (V4), Linformer/Performer (V5)
-- Phase 8: Evaluation framework
+- Train V2 (ALiBi), V3 (GQA), V4 (SWA), V4-interleaved, V5 (Linear) at main + stretch scale
+- Phase 8: Evaluation framework (standardized metrics, plotting, statistical significance)
+- Phase 9: Visualization dashboard (Streamlit + Plotly)
+- Phase 10: Large-scale data pipeline
+- Phase 11: Fault-tolerant training (fault injection tests)
+- Phase 12: Main controlled benchmarks (3+ seeds per variant)
+- Phase 13: Final report and packaging
 
 ---
 
@@ -195,14 +241,21 @@ Install: `pip install -e ".[data]"`
 src/
 ├── models/
 │   ├── config.py              # ModelConfig dataclass
+│   ├── registry.py            # Variant registry — build(variant, scale) → (model, config)
 │   ├── attention.py           # V0: CausalSelfAttention + KV-cache
 │   ├── ffn.py                 # V0: FeedForward (relu/gelu)
 │   ├── vanilla_transformer.py # V0: TransformerBlock + VanillaTransformer
-│   ├── modern_attention.py    # V1: RoPE + Flash Attention
-│   ├── modern_transformer.py  # V1: ModernTransformer (LLaMA-style)
+│   ├── modern_attention.py    # V1: RoPE + SDPA attention
+│   ├── modern_transformer.py  # V1: ModernTransformer (LLaMA-style shell)
 │   ├── rmsnorm.py             # V1: RMSNorm
 │   ├── rope.py                # V1: Rotary Position Embeddings
-│   └── swiglu_ffn.py          # V1: SwiGLU feed-forward
+│   ├── swiglu_ffn.py          # V1: SwiGLU feed-forward
+│   ├── flash_attention_base.py# Shared base for all flash_attn-backed variants
+│   ├── flash_attention.py     # V1/V4: FlashAttention (RoPE + optional window_size)
+│   ├── alibi_attention.py     # V2: ALiBi slopes via flash_attn
+│   ├── gqa_attention.py       # V3: Grouped-query attention
+│   ├── linear_attention.py    # V5: ELU+1 causal linear attention
+│   └── generate.py            # Autoregressive generation utilities
 ├── data/
 │   ├── tokenizer.py           # GPT-2 tokenizer wrapper
 │   ├── prepare.py             # Data pipeline (HF → shards)
@@ -210,22 +263,43 @@ src/
 ├── training/
 │   ├── scheduler.py           # Cosine LR with warmup
 │   ├── trainer.py             # Training loop + checkpointing
-│   └── run_logger.py          # Run logging utilities
+│   ├── run_config_builder.py  # Config assembly (variant → training params)
+│   ├── run_logger.py          # Run logging utilities
+│   ├── protocols.py           # Training protocol interfaces
+│   └── synthetic_loader.py    # Synthetic data for tests
 └── utils/
     ├── config.py              # YAML config loading
     ├── seed.py                # Reproducibility
-    ├── run_dir.py             # Run directory management
     ├── device.py              # Device detection
     ├── logging.py             # Logging utilities
     └── params.py              # Parameter counting
 
 scripts/
 ├── prepare_data.py            # CLI: data preparation
-└── train.py                   # CLI: training
+├── train.py                   # CLI: training (all variants)
+└── train_v2_v3.sh             # Shell helper for V2/V3 training runs
+
+configs/model/
+├── vanilla.yaml               # V0
+├── vanilla_gpt2.yaml          # V0 (GELU sub-variant)
+├── modern.yaml                # V1
+├── alibi.yaml                 # V2
+├── gqa.yaml                   # V3
+├── swa.yaml                   # V4
+├── swa_interleaved.yaml       # V4-interleaved
+└── linear.yaml                # V5
 
 tests/
-├── test_model.py              # Model + generation + KV-cache tests
-├── test_training.py           # Training loop tests
-├── test_data_pipeline.py      # Data pipeline tests
+├── test_model.py              # V0 model + generation + KV-cache
+├── test_modern_model.py       # V1 components
+├── test_flash_attention.py    # FlashAttentionBase + variants
+├── test_gqa_e2e_training.py   # GQA training integration
+├── test_swa_variant.py        # SWA construction and forward
+├── test_swa_interleaved_unit.py # Interleaved per-layer config
+├── test_linear_attention.py   # Linear attention module
+├── test_linear_properties.py  # Hypothesis property-based tests
+├── test_linear_registry.py    # Linear variant registry build
+├── test_training.py           # Training loop integration
+├── test_data_pipeline.py      # Data pipeline
 └── ...                        # Utility tests
 ```
