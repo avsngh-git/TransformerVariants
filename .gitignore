@@ -235,3 +235,4 @@ docs/phase_*.md
 .kiro/
 .scratch/
 skills-lock.json
+HANDOFF.md
