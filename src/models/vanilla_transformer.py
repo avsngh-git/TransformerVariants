@@ -14,7 +14,7 @@ The architecture matches GPT-2:
 """
 
 import math
-from typing import Type
+from typing import TYPE_CHECKING, Type
 
 import torch
 import torch.nn as nn
@@ -23,6 +23,9 @@ import torch.nn.functional as F
 from src.models.config import ModelConfig
 from src.models.attention import CausalSelfAttention
 from src.models.ffn import FeedForward
+
+if TYPE_CHECKING:
+    from src.models.attention_protocol import AttentionModule
 
 
 class TransformerBlock(nn.Module):
@@ -38,12 +41,14 @@ class TransformerBlock(nn.Module):
 
     Args:
         config: ModelConfig with all hyperparameters.
+        attention_class: The attention module class to use. Must satisfy the
+            AttentionModule protocol (see src/models/attention_protocol.py).
     """
 
     def __init__(
         self,
         config: ModelConfig,
-        attention_class: Type[nn.Module] = CausalSelfAttention,
+        attention_class: "Type[AttentionModule]" = CausalSelfAttention,  # type: ignore[assignment]
     ) -> None:
         super().__init__()
 

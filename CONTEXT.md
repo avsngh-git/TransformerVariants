@@ -186,7 +186,23 @@ A plot of achieved performance (TFLOPS/s) vs arithmetic intensity (FLOPs/byte). 
 
 ---
 
+## Infrastructure Concepts
+
+### Evaluation Pipeline
+
+The single-interface module (`src/evaluation/pipeline.py`) that orchestrates the full post-hoc evaluation workflow: load checkpoints → compute FLOPs → run probes → slice comparisons → aggregate seeds → generate visualizations → write reports. Callers (CLI, tests, notebooks, future dashboard) share one interface: `EvaluationPipeline.run(checkpoints, output_dir) → ReportResult`.
+
+### ProbeTarget
+
+A structural protocol (`src/evaluation/probe_target.py`) that decouples diagnostic probes from model internals. Probes program against `ProbeTarget` rather than reaching into `model.blocks` or registering hooks directly. Two methods: `forward(x) → logits` (lightweight, for MQAR) and `forward_with_internals(x) → ProbeInternals` (heavy, for stable rank / CKA / entropy). The `ModelProbeAdapter` wraps real models to satisfy this protocol.
+
+### AttentionModule
+
+A structural protocol (`src/models/attention_protocol.py`) formalizing the informal contract all attention variants already satisfy: `forward(x, kv_cache=None) → (output, new_kv_cache)`. Purely documentary — does not enforce cache shape compatibility. Used as a type annotation in `TransformerBlock` and `ModernTransformerBlock`.
+
+---
+
 ## Open Questions
 
 - ALiBi extrapolation experiment: train-short/infer-long capability. Deferred until after the controlled comparison at fixed seq_len is complete.
-- KV-Cache unification: ModernAttention (SDPA) uses a concat-based 2-tuple cache; FlashAttentionBase uses a pre-allocated 3-tuple cache. These are incompatible seam contracts but `generate.py` currently works by passing cache opaquely. Unifying into a single `KVCache` abstraction is deferred until all variants (V4, V5) are implemented — it's a design smell, not a blocking bug today.
+- KV-Cache unification: ModernAttention (SDPA) uses a concat-based 2-tuple cache; FlashAttentionBase uses a pre-allocated 3-tuple cache. These are incompatible seam contracts but `generate.py` currently works by passing cache opaquely. Unifying into a single `KVCache` abstraction is deferred — all variants exist now, but the formal `AttentionModule` Protocol deliberately uses `Any` for cache type to respect this deferral.

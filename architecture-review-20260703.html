@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Architecture Review — Transformer Variant Lab</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .seam { stroke-dasharray: 4 4; }
+      .leak { stroke: #dc2626; }
+      .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #f8fafc; }
+      .mass-bar { transition: height 0.3s; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans">
+    <main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+
+      <!-- Header -->
+      <header class="space-y-3">
+        <h1 class="text-3xl font-serif font-bold text-slate-800">Architecture Review</h1>
+        <p class="text-sm text-slate-500">Transformer Variant Lab · 2026-07-03</p>
+        <div class="flex gap-4 text-xs text-slate-500 border-t border-slate-200 pt-3 mt-3">
+          <span class="flex items-center gap-1"><span class="inline-block w-4 h-4 border-2 border-slate-400 rounded-sm"></span> Module</span>
+          <span class="flex items-center gap-1"><span class="inline-block w-4 h-0 border-t-2 border-dashed border-slate-400"></span> Seam</span>
+          <span class="flex items-center gap-1"><span class="inline-block w-4 h-0 border-t-2 border-red-500"></span> Leakage</span>
+          <span class="flex items-center gap-1"><span class="inline-block w-4 h-4 deep rounded-sm"></span> Deep module</span>
+        </div>
+      </header>
+
+      <!-- Candidates -->
+      <section id="candidates" class="space-y-10">
+
+        <!-- ═══════ Candidate 1: Evaluation Pipeline ═══════ -->
+        <article id="candidate-1" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+          <div class="flex items-center justify-between">
+            <h2 class="text-xl font-serif font-semibold">Deepen the Evaluation Pipeline into a single-interface module</h2>
+            <span class="px-3 py-1 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800 uppercase tracking-wider">Strong</span>
+          </div>
+
+          <!-- Files -->
+          <div class="font-mono text-sm text-slate-600 space-y-0.5">
+            <p>scripts/evaluate.py (main — 400 lines of orchestration)</p>
+            <p>src/evaluation/comparison.py</p>
+            <p>src/evaluation/metrics.py</p>
+            <p>src/evaluation/probes.py</p>
+            <p>src/evaluation/visualizations.py</p>
+            <p>src/evaluation/flops.py</p>
+          </div>
+
+          <!-- Before / After Diagram -->
+          <div class="grid grid-cols-2 gap-6">
+            <!-- BEFORE -->
+            <div class="space-y-2">
+              <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold">Before</p>
+              <div class="relative border border-slate-200 rounded-lg bg-slate-50 p-4 min-h-[320px]">
+                <!-- The script knows everything -->
+                <div class="border-2 border-red-300 rounded p-2 mb-2 bg-red-50">
+                  <p class="text-xs uppercase tracking-wider text-red-600 font-semibold">scripts/evaluate.py::main()</p>
+                  <p class="text-[10px] text-red-500 mt-1">400 lines · knows probe order, seed grouping, plot list, error policy, file layout</p>
+                </div>
+                <!-- Arrows down to each module -->
+                <div class="grid grid-cols-5 gap-1 mt-2">
+                  <div class="border border-slate-300 rounded p-1 text-center">
+                    <p class="text-[9px] uppercase tracking-wider text-slate-500">flops</p>
+                  </div>
+                  <div class="border border-slate-300 rounded p-1 text-center">
+                    <p class="text-[9px] uppercase tracking-wider text-slate-500">metrics</p>
+                  </div>
+                  <div class="border border-slate-300 rounded p-1 text-center">
+                    <p class="text-[9px] uppercase tracking-wider text-slate-500">probes</p>
+                  </div>
+                  <div class="border border-slate-300 rounded p-1 text-center">
+                    <p class="text-[9px] uppercase tracking-wider text-slate-500">compare</p>
+                  </div>
+                  <div class="border border-slate-300 rounded p-1 text-center">
+                    <p class="text-[9px] uppercase tracking-wider text-slate-500">viz</p>
+                  </div>
+                </div>
+                <p class="text-[10px] text-slate-400 mt-3 italic">Script calls each module individually, handles errors, groups seeds, writes files. Interface ≈ implementation.</p>
+
+                <!-- Mass diagram -->
+                <div class="flex items-end gap-3 mt-4 justify-center">
+                  <div class="text-center">
+                    <div class="w-16 h-28 border-2 border-dashed border-slate-400 rounded flex items-center justify-center">
+                      <span class="text-[9px] text-slate-500 -rotate-90 whitespace-nowrap">Interface</span>
+                    </div>
+                    <p class="text-[9px] text-slate-400 mt-1">evaluate.py</p>
+                  </div>
+                  <div class="text-center">
+                    <div class="w-16 h-32 border-2 border-slate-400 rounded bg-slate-100 flex items-center justify-center">
+                      <span class="text-[9px] text-slate-500 -rotate-90 whitespace-nowrap">Implementation</span>
+                    </div>
+                    <p class="text-[9px] text-slate-400 mt-1">5 modules</p>
+                  </div>
+                </div>
+                <p class="text-center text-[10px] text-slate-400 mt-1">Shallow: interface nearly as tall as implementation</p>
+              </div>
+            </div>
+
+            <!-- AFTER -->
+            <div class="space-y-2">
+              <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold">After</p>
+              <div class="relative border border-slate-200 rounded-lg bg-slate-50 p-4 min-h-[320px]">
+                <!-- One deep module -->
+                <div class="deep rounded p-3 mb-3">
+                  <p class="text-xs uppercase tracking-wider text-emerald-300 font-semibold">EvaluationPipeline</p>
+                  <p class="text-[10px] text-slate-300 mt-1">run(checkpoints, output_dir, device, data_dir) → ReportResult</p>
+                  <div class="mt-2 border-t border-slate-600 pt-2 space-y-1 opacity-60">
+                    <p class="text-[9px] text-slate-400">├─ _compute_flops()</p>
+                    <p class="text-[9px] text-slate-400">├─ _run_probes()</p>
+                    <p class="text-[9px] text-slate-400">├─ _slice_comparisons()</p>
+                    <p class="text-[9px] text-slate-400">├─ _aggregate_seeds()</p>
+                    <p class="text-[9px] text-slate-400">├─ _generate_plots()</p>
+                    <p class="text-[9px] text-slate-400">└─ _write_report()</p>
+                  </div>
+                </div>
+                <!-- Script just calls it -->
+                <div class="border border-emerald-300 rounded p-2 bg-emerald-50">
+                  <p class="text-xs uppercase tracking-wider text-emerald-700 font-semibold">scripts/evaluate.py</p>
+                  <p class="text-[10px] text-emerald-600 mt-1">pipeline = EvaluationPipeline(); pipeline.run(...)</p>
+                </div>
+
+                <!-- Mass diagram -->
+                <div class="flex items-end gap-3 mt-4 justify-center">
+                  <div class="text-center">
+                    <div class="w-16 h-10 border-2 border-dashed border-emerald-400 rounded flex items-center justify-center">
+                      <span class="text-[9px] text-emerald-600">Interface</span>
+                    </div>
+                    <p class="text-[9px] text-slate-400 mt-1">run()</p>
+                  </div>
+                  <div class="text-center">
+                    <div class="w-16 h-40 deep rounded flex items-center justify-center">
+                      <span class="text-[9px] text-slate-300 -rotate-90 whitespace-nowrap">Implementation</span>
+                    </div>
+                    <p class="text-[9px] text-slate-400 mt-1">pipeline</p>
+                  </div>
+                </div>
+                <p class="text-center text-[10px] text-emerald-600 mt-1">Deep: small interface, large implementation</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Problem / Solution / Wins -->
+          <p class="text-sm"><strong class="text-slate-700">Problem:</strong> The evaluation pipeline's interface (its ~30 import dependencies, 400-line main orchestrating 9 steps) is nearly as complex as its implementation — a textbook shallow module.</p>
+          <p class="text-sm"><strong class="text-slate-700">Solution:</strong> Absorb orchestration into a single <code>EvaluationPipeline</code> module with one public method — <code>run(checkpoints, output_dir, device, data_dir)</code> — and internal methods for each phase.</p>
+          <ul class="text-sm space-y-1 list-disc list-inside text-slate-600">
+            <li><em>Leverage:</em> CLI, tests, and future dashboard share one interface</li>
+            <li><em>Locality:</em> Error handling, seed grouping, step ordering concentrate inside</li>
+            <li><em>Interface shrinks:</em> 1 method replaces 30 function calls + manual wiring</li>
+            <li><em>Testable:</em> Integration test becomes <code>pipeline.run(debug_checkpoints)</code></li>
+            <li><em>Deletion test:</em> Deleting the script reappears as wiring across every caller</li>
+          </ul>
+        </article>
+
+        <!-- ═══════ Candidate 2: Registry build() ═══════ -->
+        <article id="candidate-2" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+          <div class="flex items-center justify-between">
+            <h2 class="text-xl font-serif font-semibold">Push variant construction knowledge into VariantSpec</h2>
+            <span class="px-3 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-800 uppercase tracking-wider">Worth exploring</span>
+          </div>
+
+          <!-- Files -->
+          <div class="font-mono text-sm text-slate-600 space-y-0.5">
+            <p>src/models/registry.py (build function — 80 lines of conditionals)</p>
+            <p>src/models/config.py (ModelConfig dataclass)</p>
+          </div>
+
+          <!-- Before / After Diagram -->
+          <div class="grid grid-cols-2 gap-6">
+            <!-- BEFORE -->
+            <div class="space-y-2">
+              <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold">Before</p>
+              <div class="rounded-lg border border-slate-200 bg-white p-4">
+                <pre class="mermaid">
+flowchart TD
+    B["build()"] -->|"if sliding_window"| SW["set window_size\nset flash_attn backend"]
+    B -->|"if flash_gqa"| GQ["set n_kv_head = n_head//4"]
+    B -->|"if linear"| LIN["set projection_rank = 64"]
+    B -->|"if swa_interleaved"| INT["build per_layer_configs[]"]
+    B -->|"if flash_attn && ModernAttn"| OVR["swap attention_class"]
+    
+    style B fill:#fef2f2,stroke:#dc2626,stroke-width:2px
+    style SW fill:#fff7ed
+    style GQ fill:#fff7ed
+    style LIN fill:#fff7ed
+    style INT fill:#fff7ed
+    style OVR fill:#fff7ed
+                </pre>
+                <p class="text-[10px] text-slate-400 mt-2 italic">Every variant's special needs leak into the generic builder as conditionals.</p>
+              </div>
+            </div>
+
+            <!-- AFTER -->
+            <div class="space-y-2">
+              <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold">After</p>
+              <div class="rounded-lg border border-slate-200 bg-white p-4">
+                <pre class="mermaid">
+flowchart TD
+    B2["build()"] --> VS["spec.prepare_config(dims)"]
+    VS --> CF["returns complete ModelConfig"]
+    B2 --> MC["spec.model_class(config, spec.attention_class)"]
+    
+    style B2 fill:#ecfdf5,stroke:#059669,stroke-width:2px
+    style VS fill:#ecfdf5
+    style CF fill:#ecfdf5
+    style MC fill:#ecfdf5
+                </pre>
+                <p class="text-[10px] text-emerald-600 mt-2">Each VariantSpec knows how to configure itself. build() is a 10-line dispatcher.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Problem / Solution / Wins -->
+          <p class="text-sm"><strong class="text-slate-700">Problem:</strong> <code>build()</code> leaks knowledge of every variant's construction needs via <code>if attention_type == ...</code> chains — adding a variant means editing the generic builder.</p>
+          <p class="text-sm"><strong class="text-slate-700">Solution:</strong> Give <code>VariantSpec</code> a <code>prepare_config(dims: dict) → ModelConfig</code> method that each variant overrides to set its own <code>window_size</code>, <code>projection_rank</code>, <code>n_kv_head</code>, and <code>per_layer_configs</code>.</p>
+          <ul class="text-sm space-y-1 list-disc list-inside text-slate-600">
+            <li><em>Locality:</em> Variant-specific knowledge concentrates with its VariantSpec</li>
+            <li><em>Leverage:</em> <code>build()</code> shrinks to a generic 10-line dispatcher</li>
+            <li><em>Open/closed:</em> New variants require zero edits to <code>build()</code></li>
+            <li><em>Testable:</em> Each spec's <code>prepare_config</code> is independently testable</li>
+          </ul>
+        </article>
+
+        <!-- ═══════ Candidate 3: Probes model coupling ═══════ -->
+        <article id="candidate-3" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+          <div class="flex items-center justify-between">
+            <h2 class="text-xl font-serif font-semibold">Introduce a ProbeTarget seam to decouple probes from model internals</h2>
+            <span class="px-3 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-800 uppercase tracking-wider">Worth exploring</span>
+          </div>
+
+          <!-- Files -->
+          <div class="font-mono text-sm text-slate-600 space-y-0.5">
+            <p>src/evaluation/probes.py (stable_rank, CKA, attention_entropy)</p>
+            <p>src/models/vanilla_transformer.py</p>
+            <p>src/models/modern_transformer.py</p>
+          </div>
+
+          <!-- Before / After Diagram -->
+          <div class="grid grid-cols-2 gap-6">
+            <!-- BEFORE -->
+            <div class="space-y-2">
+              <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold">Before</p>
+              <div class="relative border border-slate-200 rounded-lg bg-slate-50 p-4 min-h-[280px]">
+                <!-- Cross-section layers -->
+                <div class="space-y-1">
+                  <div class="h-8 border-l-4 border-red-400 bg-red-50 rounded-r flex items-center px-3">
+                    <span class="text-[10px] text-red-700">probe calls model(x) to trigger hooks</span>
+                  </div>
+                  <div class="h-8 border-l-4 border-red-400 bg-red-50 rounded-r flex items-center px-3">
+                    <span class="text-[10px] text-red-700">assumes model.blocks exists (nn.ModuleList)</span>
+                  </div>
+                  <div class="h-8 border-l-4 border-red-400 bg-red-50 rounded-r flex items-center px-3">
+                    <span class="text-[10px] text-red-700">hooks on block.attn.attn_dropout for entropy</span>
+                  </div>
+                  <div class="h-8 border-l-4 border-red-400 bg-red-50 rounded-r flex items-center px-3">
+                    <span class="text-[10px] text-red-700">checks model.config.attention_type string</span>
+                  </div>
+                  <div class="h-8 border-l-4 border-red-400 bg-red-50 rounded-r flex items-center px-3">
+                    <span class="text-[10px] text-red-700">requires DataLoader protocol match</span>
+                  </div>
+                </div>
+                <p class="text-[10px] text-red-500 mt-3 italic">5 assumptions about model internals leaking across the probe seam</p>
+              </div>
+            </div>
+
+            <!-- AFTER -->
+            <div class="space-y-2">
+              <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold">After</p>
+              <div class="relative border border-slate-200 rounded-lg bg-slate-50 p-4 min-h-[280px]">
+                <div class="deep rounded p-3 mb-3">
+                  <p class="text-xs uppercase tracking-wider text-emerald-300 font-semibold">ProbeTarget (protocol)</p>
+                  <div class="mt-2 space-y-1">
+                    <p class="text-[10px] text-slate-300 font-mono">forward(x) → logits</p>
+                    <p class="text-[10px] text-slate-300 font-mono">get_layer_outputs(x) → list[Tensor]</p>
+                    <p class="text-[10px] text-slate-300 font-mono">get_attention_weights(x) → list[Tensor] | None</p>
+                    <p class="text-[10px] text-slate-300 font-mono">config: ModelConfig</p>
+                  </div>
+                </div>
+                <div class="border border-emerald-300 rounded p-2 bg-emerald-50 mb-2">
+                  <p class="text-[10px] text-emerald-700">Probes take ProbeTarget — no model.blocks, no hook registration</p>
+                </div>
+                <div class="border border-slate-300 rounded p-2 bg-slate-50">
+                  <p class="text-[10px] text-slate-600">Adapter on ModernTransformer / VanillaTransformer implements ProbeTarget</p>
+                </div>
+                <p class="text-[10px] text-emerald-600 mt-3">One seam. Two adapters (real model + test fake). Real variation justifies the seam.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Problem / Solution / Wins -->
+          <p class="text-sm"><strong class="text-slate-700">Problem:</strong> Probes reach into model internals (<code>.blocks</code>, <code>.attn.attn_dropout</code>, hook registration) — testing requires fully constructing every variant.</p>
+          <p class="text-sm"><strong class="text-slate-700">Solution:</strong> Define a <code>ProbeTarget</code> protocol with <code>get_layer_outputs()</code> and <code>get_attention_weights()</code>; adapters on each transformer class implement it, and a simple fake satisfies tests.</p>
+          <ul class="text-sm space-y-1 list-disc list-inside text-slate-600">
+            <li><em>Locality:</em> Hook registration logic concentrates in the adapter, not in every probe</li>
+            <li><em>Leverage:</em> New probes only need ProbeTarget, not model archaeology</li>
+            <li><em>Testable:</em> Fake ProbeTarget with canned tensors — no GPU, no model</li>
+            <li><em>Two adapters justify the seam:</em> real model adapter + test fake</li>
+          </ul>
+        </article>
+
+        <!-- ═══════ Candidate 4: Attention hierarchy ═══════ -->
+        <article id="candidate-4" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+          <div class="flex items-center justify-between">
+            <h2 class="text-xl font-serif font-semibold">Unify the attention interface across CausalSelfAttention and FlashAttentionBase</h2>
+            <span class="px-3 py-1 text-xs font-semibold rounded-full bg-slate-100 text-slate-700 uppercase tracking-wider">Speculative</span>
+          </div>
+
+          <!-- Files -->
+          <div class="font-mono text-sm text-slate-600 space-y-0.5">
+            <p>src/models/attention.py (CausalSelfAttention — V0)</p>
+            <p>src/models/modern_attention.py (ModernAttention — V1 SDPA path)</p>
+            <p>src/models/flash_attention_base.py (FlashAttentionBase — V1-V4 flash path)</p>
+            <p>src/models/linear_attention.py (LinformerAttention — V5)</p>
+          </div>
+
+          <!-- Before / After Diagram -->
+          <div class="grid grid-cols-2 gap-6">
+            <!-- BEFORE -->
+            <div class="space-y-2">
+              <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold">Before</p>
+              <div class="rounded-lg border border-slate-200 bg-white p-4">
+                <pre class="mermaid">
+flowchart TD
+    M["nn.Module"] --> CSA["CausalSelfAttention\n(manual matmul, learned pos)"]
+    M --> MA["ModernAttention\n(SDPA, RoPE)"]
+    M --> LA["LinformerAttention\n(low-rank, RoPE)"]
+    FAB["FlashAttentionBase\n(Template Method)"] --> FA["FlashAttention\n(RoPE)"]
+    FAB --> ALI["ALiBiAttention\n(no-op pos)"]
+    FAB --> GQA["GQAAttention\n(split Q/KV)"]
+    M --> FAB
+
+    style CSA fill:#fef2f2,stroke:#dc2626
+    style MA fill:#fef2f2,stroke:#dc2626
+    style LA fill:#fef2f2,stroke:#dc2626
+    style FAB fill:#eff6ff,stroke:#3b82f6
+                </pre>
+                <p class="text-[10px] text-slate-400 mt-2 italic">Three parallel roots. No shared interface — callers must handle each contract independently. KV-cache shapes differ.</p>
+              </div>
+            </div>
+
+            <!-- AFTER -->
+            <div class="space-y-2">
+              <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold">After</p>
+              <div class="rounded-lg border border-slate-200 bg-white p-4">
+                <pre class="mermaid">
+flowchart TD
+    AP["AttentionProtocol\nforward(x, kv_cache?) → (out, cache?)"] --> CSA2["CausalSelfAttention"]
+    AP --> MA2["ModernAttention"]
+    AP --> FAB2["FlashAttentionBase"]
+    AP --> LA2["LinformerAttention"]
+    FAB2 --> FA2["FlashAttention"]
+    FAB2 --> ALI2["ALiBiAttention"]
+    FAB2 --> GQA2["GQAAttention"]
+
+    style AP fill:#ecfdf5,stroke:#059669,stroke-width:2px
+                </pre>
+                <p class="text-[10px] text-emerald-600 mt-2">One protocol. All attention modules satisfy it. Cache is Optional[KVCache].</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Problem / Solution / Wins -->
+          <p class="text-sm"><strong class="text-slate-700">Problem:</strong> Understanding "attention" requires reading 6 files with 3 parallel inheritance roots and incompatible KV-cache contracts.</p>
+          <p class="text-sm"><strong class="text-slate-700">Solution:</strong> Formalize the existing informal contract — <code>forward(x, kv_cache=None) → (output, new_kv_cache)</code> — as a typed Protocol. Unify KV-cache into a single <code>KVCache</code> dataclass (or None for V5).</p>
+          <ul class="text-sm space-y-1 list-disc list-inside text-slate-600">
+            <li><em>Leverage:</em> TransformerBlock, probes, and generation code all program to one interface</li>
+            <li><em>Locality:</em> Cache semantics defined once, not rediscovered per variant</li>
+            <li><em>AI-navigable:</em> One protocol definition is the index into all attention variants</li>
+          </ul>
+
+          <!-- ADR callout -->
+          <div class="border-l-4 border-amber-400 bg-amber-50 rounded-r p-3 mt-3">
+            <p class="text-sm text-amber-800">
+              <strong>Open question in CONTEXT.md:</strong> "KV-Cache unification — deferred until all variants are implemented." All variants now exist. The friction is real — but ADR 0001 (SWA parameterizes FlashAttention) and ADR 0002 (V5 no KV-cache) should be respected. A protocol that allows <code>None</code> cache (V5) and variant-specific cache internals (tuple vs pre-allocated) satisfies both ADRs without contradicting them.
+            </p>
+          </div>
+        </article>
+
+      </section>
+
+      <!-- ═══════ Top Recommendation ═══════ -->
+      <section id="top-recommendation" class="rounded-xl border-2 border-emerald-300 bg-emerald-50 p-6 space-y-3">
+        <h2 class="text-xl font-serif font-semibold text-emerald-900">Top Recommendation</h2>
+        <p class="text-sm text-emerald-800">
+          <strong><a href="#candidate-1" class="underline">Candidate 1: Deepen the Evaluation Pipeline</a></strong> — the highest-leverage opportunity. Today, <code>scripts/evaluate.py</code> is a 400-line shallow orchestrator that any caller (tests, future dashboard, notebook) must replicate. Absorbing it into a deep <code>EvaluationPipeline</code> module gives one interface for all callers, concentrates error handling and step ordering inside, and immediately simplifies integration testing to a single <code>pipeline.run()</code> call. No ADR conflicts, no risk — pure deepening.
+        </p>
+      </section>
+
+    </main>
+  </body>
+</html>

@@ -17,7 +17,7 @@ Architecture:
 """
 
 import math
-from typing import Type
+from typing import TYPE_CHECKING, Type
 
 import torch
 import torch.nn as nn
@@ -28,6 +28,9 @@ from src.models.rmsnorm import RMSNorm
 from src.models.modern_attention import ModernAttention
 from src.models.swiglu_ffn import SwiGLUFeedForward
 
+if TYPE_CHECKING:
+    from src.models.attention_protocol import AttentionModule
+
 
 class ModernTransformerBlock(nn.Module):
     """A single Transformer block with modern components.
@@ -37,16 +40,16 @@ class ModernTransformerBlock(nn.Module):
 
     Args:
         config: ModelConfig with all hyperparameters.
-        attention_class: The attention module class to use. Must accept `config`
-            as its sole constructor argument and implement
-            `forward(x, kv_cache=None) -> (output, new_kv_cache)`.
+        attention_class: The attention module class to use. Must satisfy the
+            AttentionModule protocol: accept `config` as its sole constructor
+            argument and implement `forward(x, kv_cache=None) -> (output, new_kv_cache)`.
             Defaults to ModernAttention.
     """
 
     def __init__(
         self,
         config: ModelConfig,
-        attention_class: Type[nn.Module] = ModernAttention,
+        attention_class: "Type[AttentionModule]" = ModernAttention,  # type: ignore[assignment]
     ) -> None:
         super().__init__()
         self.ln1 = RMSNorm(config.d_model)

@@ -1,11 +1,12 @@
 """Variant registry — maps (variant_name, scale) to (model, config).
 
 Central place for all variant definitions and scale dimensions.
-Adding a new variant means adding one entry to the VARIANTS dict.
+Adding a new variant means adding one entry to the VARIANTS dict with its
+own config_overrides callable — no edits to build() required.
 """
 
 from dataclasses import dataclass, field, replace
-from typing import Type
+from typing import Callable, Type
 
 import torch
 import torch.nn as nn
@@ -28,9 +29,91 @@ SCALES: dict[str, dict[str, int]] = {
 }
 
 
+# --- Config override functions (variant-specific construction knowledge) ---
+
+
+def _identity_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
+    """Default: no overrides needed."""
+    return config
+
+
+def _swa_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
+    """SWA: set window_size and force flash_attn backend."""
+    window_size = dims["seq_len"] // 4
+    if window_size < 1:
+        raise ValueError(
+            f"seq_len ({dims['seq_len']}) is too small for sliding window attention. "
+            f"Minimum seq_len is 4 (window_size = seq_len // 4 must be >= 1)."
+        )
+    config.window_size = window_size
+    config.attention_backend = "flash_attn"
+    return config
+
+
+def _gqa_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
+    """GQA: set n_kv_head to n_head // 4."""
+    config.n_kv_head = dims["n_head"] // 4
+    return config
+
+
+def _linear_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
+    """Linformer: set projection_rank."""
+    config.projection_rank = 64
+    return config
+
+
+def _swa_interleaved_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
+    """SWA interleaved: set window_size and force flash_attn backend.
+
+    The per-layer configs are handled by per_layer_config_builder, but
+    the base config still needs the backend override for attention class selection.
+    Window size is NOT set on the base config (model-wide components don't need it).
+    """
+    config.attention_backend = "flash_attn"
+    return config
+
+
+# --- Per-layer config builders ---
+
+
+def _swa_interleaved_per_layer(config: ModelConfig, dims: dict) -> list[ModelConfig]:
+    """Build per-layer configs alternating full attention (even) and SWA (odd)."""
+    window_size = dims["seq_len"] // 4
+    return [
+        replace(config, window_size=None if i % 2 == 0 else window_size)
+        for i in range(dims["n_layer"])
+    ]
+
+
+# --- VariantSpec dataclass ---
+
+
 @dataclass(frozen=True)
 class VariantSpec:
-    """Everything needed to construct a variant beyond scale dimensions."""
+    """Everything needed to construct a variant beyond scale dimensions.
+
+    Each variant's construction knowledge lives in its config_overrides callable
+    rather than in conditional branches inside build(). Adding a new variant
+    means providing a VariantSpec with its own overrides — no edits to build().
+
+    Attributes:
+        model_class: The transformer model class to instantiate.
+        variant: Variant identifier string (e.g., "vanilla", "modern").
+        norm_type: Normalization type ("layernorm" or "rmsnorm").
+        position_encoding: Position encoding method ("learned", "rope", "alibi", "none").
+        ffn_type: FFN architecture ("standard" or "swiglu").
+        attention_type: Attention mechanism identifier.
+        attention_class: Default attention module class for this variant.
+        default_activation: Default FFN activation.
+        requires_bf16: Whether the variant requires bf16 casting.
+        default_steps: Default training steps per scale.
+        config_overrides: Callable that applies variant-specific config mutations.
+            Signature: (config: ModelConfig, dims: dict) -> ModelConfig.
+        per_layer_config_builder: Optional callable that produces per-layer configs.
+            Only needed for variants with heterogeneous layer configurations.
+            Signature: (config: ModelConfig, dims: dict) -> list[ModelConfig].
+    """
+
     model_class: Type[nn.Module]
     variant: str
     norm_type: str
@@ -43,6 +126,8 @@ class VariantSpec:
     default_steps: dict[str, int] = field(default_factory=lambda: {
         "debug": 2000, "main": 5000, "stretch": 5000
     })
+    config_overrides: Callable[[ModelConfig, dict], ModelConfig] = _identity_overrides
+    per_layer_config_builder: Callable[[ModelConfig, dict], list[ModelConfig]] | None = None
 
 
 VARIANTS: dict[str, VariantSpec] = {
@@ -89,6 +174,7 @@ VARIANTS: dict[str, VariantSpec] = {
         attention_class=GQAAttention,
         default_activation="swiglu",
         requires_bf16=True,
+        config_overrides=_gqa_overrides,
     ),
     "swa": VariantSpec(
         model_class=ModernTransformer,
@@ -100,6 +186,7 @@ VARIANTS: dict[str, VariantSpec] = {
         attention_class=FlashAttention,
         default_activation="swiglu",
         requires_bf16=True,
+        config_overrides=_swa_overrides,
     ),
     "swa_interleaved": VariantSpec(
         model_class=ModernTransformer,
@@ -111,6 +198,8 @@ VARIANTS: dict[str, VariantSpec] = {
         attention_class=FlashAttention,
         default_activation="swiglu",
         requires_bf16=True,
+        config_overrides=_swa_interleaved_overrides,
+        per_layer_config_builder=_swa_interleaved_per_layer,
     ),
     "linear": VariantSpec(
         model_class=ModernTransformer,
@@ -122,6 +211,7 @@ VARIANTS: dict[str, VariantSpec] = {
         attention_class=LinformerAttention,
         default_activation="swiglu",
         requires_bf16=False,
+        config_overrides=_linear_overrides,
     ),
 }
 
@@ -136,10 +226,9 @@ def build(
 ) -> tuple[nn.Module, ModelConfig]:
     """Construct a model and its config from variant name and scale tier.
 
-    Handles all model construction policy:
-    - Activation override (uses override if provided, else spec.default_activation)
-    - bf16/fp16 casting (when spec.requires_bf16 or flash_attn backend)
-    - torch.compile (when requested)
+    This is now a generic dispatcher. Variant-specific config logic lives in
+    each VariantSpec's config_overrides callable — adding a new variant requires
+    no edits here.
 
     Args:
         variant_name: One of the registered variant keys (e.g., "vanilla", "modern").
@@ -170,12 +259,11 @@ def build(
     spec = VARIANTS[variant_name]
     dims = SCALES[scale]
 
-    # Determine effective activation: use override if provided, else spec default
+    # Determine effective activation and backend
     effective_activation = activation if activation is not None else spec.default_activation
-
-    # Determine effective attention backend
     effective_backend = attention_backend if attention_backend is not None else "sdpa"
 
+    # Construct base config from scale dimensions and spec metadata
     config = ModelConfig(
         n_layer=dims["n_layer"],
         d_model=dims["d_model"],
@@ -190,57 +278,34 @@ def build(
         activation=effective_activation,
     )
 
-    # Compute window_size for SWA variants (sliding_window attention_type)
-    if spec.attention_type == "sliding_window":
-        window_size = dims["seq_len"] // 4
-        if window_size < 1:
-            raise ValueError(
-                f"seq_len ({dims['seq_len']}) is too small for sliding window attention. "
-                f"Minimum seq_len is 4 (window_size = seq_len // 4 must be >= 1)."
-            )
-        config.window_size = window_size
-        # SWA requires flash_attn kernel — set backend in config if not explicitly overridden
-        if attention_backend is None:
-            config.attention_backend = "flash_attn"
-            effective_backend = "flash_attn"
+    # Apply variant-specific config overrides
+    config = spec.config_overrides(config, dims)
 
-    # Set n_kv_head for GQA variants (grouped-query attention needs fewer KV heads)
-    if spec.attention_type == "flash_gqa":
-        config.n_kv_head = dims["n_head"] // 4
+    # Update effective_backend after overrides (SWA variants force flash_attn)
+    effective_backend = config.attention_backend
 
-    # Set projection_rank for Linformer variants (linear attention needs projection rank)
-    if spec.attention_type == "linear":
-        config.projection_rank = 64
-
-    # Build per-layer configs for swa_interleaved variant
-    # Let the existing sliding_window block run first (it sets window_size and effective_backend),
-    # then override with per-layer logic for the interleaved pattern.
+    # Build per-layer configs if the variant needs them
     per_layer_configs = None
-
-    if variant_name == "swa_interleaved":
-        window_size = dims["seq_len"] // 4
-        per_layer_configs = [
-            replace(config, window_size=None if i % 2 == 0 else window_size)
-            for i in range(dims["n_layer"])
-        ]
-        # Base config should NOT have window_size set — model-wide components don't need it
+    if spec.per_layer_config_builder is not None:
+        per_layer_configs = spec.per_layer_config_builder(config, dims)
+        # Base config should NOT have window_size set for interleaved variants
         config.window_size = None
 
-    # Select attention class: override with FlashAttention when backend is "flash_attn"
+    # Attention class selection: override with FlashAttention when backend is "flash_attn"
     # Only override if the variant uses the default ModernAttention — specialized
-    # attention classes (e.g., ALiBiAttention) should not be replaced.
+    # attention classes (e.g., ALiBiAttention, GQAAttention) should not be replaced.
     if effective_backend == "flash_attn" and spec.attention_class == ModernAttention:
         attention_class = FlashAttention
     else:
         attention_class = spec.attention_class
 
+    # Construct the model
     if per_layer_configs is not None:
         model = spec.model_class(config, attention_class=attention_class, per_layer_configs=per_layer_configs)
     else:
         model = spec.model_class(config, attention_class=attention_class)
 
-    # bf16/fp16 casting: apply when variant requires it or flash_attn backend is used,
-    # AND the requested dtype is bfloat16 or float16
+    # bf16/fp16 casting: apply when variant requires it or flash_attn backend is used
     if spec.requires_bf16 or effective_backend == "flash_attn":
         dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
         model_dtype = dtype_map.get(dtype, torch.bfloat16)

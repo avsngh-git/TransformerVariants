@@ -153,9 +153,35 @@ Operational state of the project. Read this to understand what's built, what's r
 
 ---
 
+### Phase 8: Evaluation Framework ✅
+- `src/evaluation/flops.py` — Component-level FLOP accounting, MFU, arithmetic intensity, roofline positioning
+- `src/evaluation/metrics.py` — Val loss extraction, per-position loss, ICL decay (α) power-law fitting
+- `src/evaluation/probes.py` — MQAR associative recall, stable rank (SVD), CKA (linear kernel alignment), attention entropy
+- `src/evaluation/comparison.py` — Multi-variant loading, fixed-data/wallclock/FLOPs slicing, Pareto analysis, parameter parity, seed aggregation
+- `src/evaluation/visualizations.py` — 10 plot types (learning curves, per-position loss, MQAR, stable rank, CKA heatmap/adjacent, FLOP breakdown, Pareto, roofline), summary.md generation
+- `src/evaluation/pipeline.py` — Deep pipeline module: `EvaluationPipeline.run(checkpoints, output_dir) → ReportResult`
+- `src/evaluation/probe_target.py` — `ProbeTarget` Protocol + `ModelProbeAdapter` (decouples probes from model internals)
+- `scripts/evaluate.py` — Thin CLI shell over EvaluationPipeline
+- Full test suite: 210 evaluation tests
+
+### Architecture Refactors ✅ (uncommitted)
+- **Registry deepening** — `src/models/registry.py` refactored: variant-specific knowledge now lives in `VariantSpec.config_overrides` callables. `build()` is a generic dispatcher. `per_layer_config_builder` for swa_interleaved.
+- **AttentionModule Protocol** — `src/models/attention_protocol.py` formalizes the informal attention contract. Type annotations updated in `TransformerBlock` and `ModernTransformerBlock`.
+- **CONTEXT.md** updated with Evaluation Pipeline, ProbeTarget, and AttentionModule terms.
+
+---
+
 ## Test Suite
 
-217 tests collected:
+430 tests collected:
+- `tests/test_evaluate_cli.py` — Pipeline seed detection, aggregation, metadata/raw data writing
+- `tests/test_flops.py` — FLOP computation correctness
+- `tests/test_metrics.py` — Metrics extraction, ICL fitting
+- `tests/test_probes.py` — MQAR, stable rank, CKA, entropy probes
+- `tests/test_comparison.py` — Comparison slicing, Pareto, parameter parity
+- `tests/test_visualizations.py` — Plot generation, colorblind palette, summary.md
+- `tests/test_evaluation_integration.py` — End-to-end pipeline integration
+- `tests/test_stable_rank.py` — Stable rank value bounds
 - `tests/test_model.py` — shapes, causal mask, generation, KV-cache, weight init
 - `tests/test_modern_model.py` — V1 components (RMSNorm, RoPE, SwiGLU, ModernAttention, ModernTransformer)
 - `tests/test_flash_attention.py` — FlashAttentionBase, FlashAttention, ALiBi, GQA
@@ -171,7 +197,7 @@ Operational state of the project. Read this to understand what's built, what's r
 - `tests/test_data_pipeline.py` — tokenizer, sharding, manifest
 - `tests/test_seed.py`, `test_run_dir.py`, `test_params.py`, `test_config.py`, `test_device.py`, `test_logging.py`, `test_run_logger.py` — utilities
 
-Run all tests: `conda run -n transformer_lab python -m pytest tests/ -v`
+Run all tests: `conda run -n transformer_lab python -m pytest tests/ -v` (430 tests, ~61s)
 
 ---
 
@@ -225,9 +251,10 @@ Install: `pip install -e ".[data]"`
 
 ## What's Next
 
+- **Commit architecture refactors** — 4 candidates implemented, all tests pass
 - Train V2 (ALiBi), V3 (GQA), V4 (SWA), V4-interleaved, V5 (Linear) at main + stretch scale
-- Phase 8: Evaluation framework (standardized metrics, plotting, statistical significance)
-- Phase 9: Visualization dashboard (Streamlit + Plotly)
+- Run evaluation pipeline on V0/V1 checkpoints to validate end-to-end
+- Phase 9: Visualization dashboard (Streamlit/Plotly or interactive HTML)
 - Phase 10: Large-scale data pipeline
 - Phase 11: Fault-tolerant training (fault injection tests)
 - Phase 12: Main controlled benchmarks (3+ seeds per variant)
@@ -242,6 +269,7 @@ src/
 ├── models/
 │   ├── config.py              # ModelConfig dataclass
 │   ├── registry.py            # Variant registry — build(variant, scale) → (model, config)
+│   ├── attention_protocol.py  # AttentionModule Protocol (formal contract)
 │   ├── attention.py           # V0: CausalSelfAttention + KV-cache
 │   ├── ffn.py                 # V0: FeedForward (relu/gelu)
 │   ├── vanilla_transformer.py # V0: TransformerBlock + VanillaTransformer
@@ -254,8 +282,16 @@ src/
 │   ├── flash_attention.py     # V1/V4: FlashAttention (RoPE + optional window_size)
 │   ├── alibi_attention.py     # V2: ALiBi slopes via flash_attn
 │   ├── gqa_attention.py       # V3: Grouped-query attention
-│   ├── linear_attention.py    # V5: ELU+1 causal linear attention
+│   ├── linear_attention.py    # V5: Linformer low-rank projection attention
 │   └── generate.py            # Autoregressive generation utilities
+├── evaluation/
+│   ├── pipeline.py            # EvaluationPipeline — deep orchestration module
+│   ├── probe_target.py        # ProbeTarget Protocol + ModelProbeAdapter
+│   ├── flops.py               # Component-level FLOP accounting
+│   ├── metrics.py             # Loss metrics, ICL decay fitting
+│   ├── probes.py              # MQAR, stable rank, CKA, entropy probes
+│   ├── comparison.py          # Multi-variant slicing, Pareto, parity
+│   └── visualizations.py      # 10 plot types + summary.md generation
 ├── data/
 │   ├── tokenizer.py           # GPT-2 tokenizer wrapper
 │   ├── prepare.py             # Data pipeline (HF → shards)
@@ -277,6 +313,7 @@ src/
 scripts/
 ├── prepare_data.py            # CLI: data preparation
 ├── train.py                   # CLI: training (all variants)
+├── evaluate.py                # CLI: evaluation pipeline (thin shell)
 └── train_v2_v3.sh             # Shell helper for V2/V3 training runs
 
 configs/model/

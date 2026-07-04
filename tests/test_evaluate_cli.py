@@ -1,4 +1,4 @@
-"""Tests for the evaluate.py CLI module — task 7.2 functionality.
+"""Tests for the evaluation pipeline module — task 7.2 functionality.
 
 Covers multi-seed detection, aggregation, metadata.json writing,
 and raw data (CSV/JSON) output.
@@ -14,15 +14,36 @@ import pytest
 
 from src.evaluation.comparison import ComparisonResult, VariantData
 from src.evaluation.flops import FLOPBreakdown
+from src.evaluation.pipeline import EvaluationPipeline
 from src.models.config import ModelConfig
 
-# Import the functions under test
-from scripts.evaluate import (
-    _aggregate_seed_metrics,
-    _detect_seed_groups,
-    _write_metadata,
-    _write_raw_data,
-)
+
+# ---------------------------------------------------------------------------
+# Helpers — thin wrappers exposing pipeline internals for testing
+# ---------------------------------------------------------------------------
+
+
+def _detect_seed_groups(variants):
+    """Expose the static method for test compatibility."""
+    return EvaluationPipeline._detect_seed_groups(variants)
+
+
+def _aggregate_seed_metrics(seed_groups):
+    """Run seed aggregation via the pipeline's internal logic."""
+    pipeline = EvaluationPipeline(device="cpu")
+    return pipeline._aggregate_seeds(seed_groups, [], [])
+
+
+def _write_metadata(output_dir, variants, device):
+    """Run metadata writing via the pipeline."""
+    pipeline = EvaluationPipeline(device=device)
+    return pipeline._write_metadata(output_dir, variants)
+
+
+def _write_raw_data(output_dir, variants, comparison, seed_aggregated):
+    """Run raw data writing via the pipeline."""
+    pipeline = EvaluationPipeline(device="cpu")
+    return pipeline._write_raw_data(output_dir, variants, comparison, seed_aggregated)
 
 
 # ---------------------------------------------------------------------------
