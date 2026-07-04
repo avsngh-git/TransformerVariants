@@ -19,9 +19,12 @@ The training loop follows the standard recipe:
         7. Periodically evaluate and checkpoint
 """
 
+from __future__ import annotations
+
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -29,6 +32,10 @@ import torch.nn as nn
 from src.training.protocols import DataLoader
 from src.training.scheduler import get_lr
 from src.training.run_logger import RunLogger
+
+if TYPE_CHECKING:
+    from src.training.checkpoint import AsyncCheckpointWriter
+    from src.training.health_monitor import Action, HealthMonitor
 
 
 @dataclass
@@ -87,6 +94,8 @@ class Trainer:
         val_loader: DataLoader,
         run_logger: RunLogger,
         device: str = "cuda",
+        checkpoint_manager: AsyncCheckpointWriter | None = None,
+        health_monitor: HealthMonitor | None = None,
     ) -> None:
         self.model = model.to(device)
         self.config = train_config
@@ -110,10 +119,15 @@ class Trainer:
         # Run logger (required — all logging delegated here)
         self.run_logger = run_logger
 
+        # Fault tolerance (optional)
+        self.checkpoint_manager = checkpoint_manager
+        self.health_monitor = health_monitor
+
         # Training state
         self.step = 0
         self.tokens_processed = 0
         self.best_val_loss = float("inf")
+        self._skipped_steps = 0
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create AdamW optimizer with proper weight decay grouping.
@@ -242,7 +256,7 @@ class Trainer:
         simulates a larger batch size without needing more GPU memory.
 
         Returns:
-            Dict with 'loss' and 'lr' for this step.
+            Dict with 'loss', 'lr', and 'grad_norm' for this step.
         """
         self.model.train()
         self.optimizer.zero_grad()
@@ -282,10 +296,31 @@ class Trainer:
         else:
             grad_norm = 0.0
 
+        avg_loss = total_loss / self.config.grad_accum_steps
+
+        # Health check: after backward/clip, before optimizer step
+        if self.health_monitor is not None:
+            from src.training.health_monitor import Action
+
+            action = self.health_monitor.check(self.step, avg_loss, grad_norm)
+
+            if action == Action.SKIP_STEP:
+                self.optimizer.zero_grad()
+                self._skipped_steps += 1
+                return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm}
+
+            if action == Action.ROLLBACK:
+                if self.checkpoint_manager is not None:
+                    self.checkpoint_manager.wait()
+                    rollback_path = self.checkpoint_manager.rollback()
+                    if rollback_path is not None:
+                        self.load_checkpoint(rollback_path)
+                self.health_monitor.reset()
+                return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm}
+
         # Optimizer step (update weights)
         self.optimizer.step()
 
-        avg_loss = total_loss / self.config.grad_accum_steps
         return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm}
 
     @torch.no_grad()
@@ -308,7 +343,25 @@ class Trainer:
         return total_loss / self.config.eval_steps
 
     def _save_checkpoint(self) -> None:
-        """Save model, optimizer, and training state."""
+        """Save model, optimizer, and training state.
+
+        If a checkpoint_manager (AsyncCheckpointWriter) is provided, delegates
+        to it for async, fault-tolerant saves. Otherwise uses the original
+        internal save logic.
+        """
+        if self.checkpoint_manager is not None:
+            self.checkpoint_manager.save(
+                step=self.step,
+                model=self.model,
+                optimizer=self.optimizer,
+                training_state={
+                    "tokens_processed": self.tokens_processed,
+                    "best_val_loss": self.best_val_loss,
+                },
+            )
+            print(f"  → Queued async checkpoint at step {self.step}")
+            return
+
         ckpt_dir = Path(self.config.checkpoint_dir)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 

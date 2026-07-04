@@ -206,6 +206,50 @@ A Streamlit multi-page application (`dashboard/`) that visualizes pre-computed e
 
 ---
 
+## Large-Scale Data Pipeline Concepts
+
+### Streaming Preparation
+
+A data ingestion pattern where documents are consumed from an iterator one at a time, tokenized immediately, and flushed to binary shards when a buffer fills. Memory usage is constant regardless of corpus size. The source iterator is never materialized in full — only one document is in memory at a time.
+
+### Document Filter
+
+A lightweight guard applied to each document during streaming preparation. Current filters: minimum token count (skip short docs), maximum token count (truncate overlong docs). Filters are defensive — the source corpus (FineWeb-Edu) is pre-curated, so these catch edge cases rather than performing primary quality selection.
+
+### Hash-Based Split
+
+A deterministic train/val routing decision made per-document using content hashing. SHA-256 of the first 256 bytes, modulo 100; values < 1 route to validation, ≥ 1 route to training. Produces a reproducible ~1% val split independent of stream ordering.
+
+### Resumption Checkpoint
+
+A small JSON file (`progress.json`) written alongside shards after each flush, recording how many documents have been consumed from the stream. If the pipeline is interrupted, it resumes by skipping that many documents on restart.
+
+---
+
+## Fault-Tolerance Concepts
+
+### Atomic Checkpoint Write
+
+A crash-safe persistence pattern: serialize to a temporary file, call `fsync` on the file descriptor, then `os.rename` to the final path. Because `rename` is atomic on POSIX filesystems, the checkpoint is either fully present or absent — never half-written. SHA-256 integrity hashes are stored alongside for post-crash validation.
+
+### Checkpoint Ring Buffer
+
+A rotation scheme that keeps the last N (default 3) verified checkpoints. A new checkpoint is only promoted to the ring after its integrity hash is validated. The oldest entry is deleted only after the new one is confirmed good. Prevents the failure mode where the only checkpoint is the one currently being overwritten.
+
+### Async Background Save
+
+A performance optimization where the training loop snapshots model and optimizer state_dicts to CPU memory (fast, blocks training briefly), then a background thread handles serialization and disk I/O. Training resumes immediately after the CPU snapshot. The background thread performs the atomic write protocol independently.
+
+### Health Monitor
+
+An injected dependency in the Trainer that inspects grad_norm and loss after each step. Maintains a rolling window (default 100 steps) and computes z-scores. Returns one of three actions: CONTINUE (normal), SKIP_STEP (discard the current gradient update, don't step the optimizer), or ROLLBACK (reload the most recent checkpoint from the ring buffer and resume from there).
+
+### Fault Injection Test
+
+A test that deliberately introduces a failure mode — corrupted checkpoint (bit-flip), process kill mid-write, NaN injection into gradients, loss spike beyond threshold — and asserts that the recovery mechanism handles it correctly. These tests prove the fault-tolerance system works, not just that it exists.
+
+---
+
 ## Open Questions
 
 - ALiBi extrapolation experiment: train-short/infer-long capability. Deferred until after the controlled comparison at fixed seq_len is complete.
