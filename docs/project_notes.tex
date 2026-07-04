@@ -2289,6 +2289,290 @@ The following concepts have been implemented in the project but are not yet expl
 
 \end{enumerate}
 
+% --- V4-interleaved ---
+\item \textbf{Interleaved SWA: Alternating Local and Global Layers (V4-interleaved)} \emph{(home: \cref{sec:attention-position})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Baseline role:} V4 (SWA) applies the same window restriction at every layer. All $\nlayer$ layers attend to only the $W$ most recent tokens. Long-range information can only propagate through multi-layer residual composition.
+    \item \textbf{Limitation:} Pure SWA relies entirely on the residual stream to relay long-range information layer by layer. If the model needs direct access to a distant token (e.g., matching a parenthesis opened far away), it must compress that information into the residual stream within the window at an earlier layer. This places a strong representational burden on lower layers and may degrade tasks requiring long-range retrieval.
+    \item \textbf{Design pressure:} Isolate the question: ``Does periodic full-context access recover the information lost by windowing?'' If alternating one full-attention layer between every SWA layer recovers most of the quality loss, it suggests that only a few global layers are needed and the remaining layers can be efficient local layers.
+    \item \textbf{Replacement mechanism:} Even-indexed layers ($\ell = 0, 2, 4, \ldots$) use full causal attention (no window restriction). Odd-indexed layers ($\ell = 1, 3, 5, \ldots$) use sliding window attention with $W = \lfloor T / 4 \rfloor$. Each layer uses the same \texttt{FlashAttention} module but with per-layer \texttt{window\_size} configuration:
+    \begin{equation}
+        W^{(\ell)} = \begin{cases}
+            \text{None (full attention)}, & \ell \mod 2 = 0,\\
+            \lfloor T/4 \rfloor, & \ell \mod 2 = 1.
+        \end{cases}
+    \end{equation}
+    This is inspired by Gemma-2-style layer interleaving. The registry constructs per-layer configs via a \texttt{per\_layer\_config\_builder} function.
+    \item \textbf{Complexity:} For $L$ layers with half global and half local:
+    \begin{equation}
+        \text{Time} = \frac{L}{2} \cdot O(T^2 \dhead) + \frac{L}{2} \cdot O(T \cdot W \cdot \dhead) = O\!\left(\frac{L}{2}(T^2 + TW)\dhead\right)
+    \end{equation}
+    Compared to full attention at every layer ($O(LT^2\dhead)$), this saves roughly $\frac{1}{2}(1 - W/T) = \frac{3}{8}$ of the attention FLOPs.
+    \item \textbf{New trade-off:} Gains some long-range access (every other layer is global) at the cost of recovering half of the full-attention compute. The experiment tests whether this 50/50 split is better than pure SWA or pure full attention on the same token budget. Additionally, the per-layer config adds implementation complexity (each block may have a different effective attention pattern).
+    \item \textbf{Parameter count impact:} Zero. All layers use the same projections. The only difference is which layers pass \texttt{window\_size} to the attention kernel.
+    \item \textbf{Connection to V4 (pure SWA):} V4-interleaved is a sub-variant of V4. If the interleaved variant matches V1's quality while V4 degrades, it demonstrates that the SWA quality loss is due to insufficient long-range access rather than some other artifact of the window mechanism.
+\end{itemize}
+
+% --- Evaluation Comparison Axes ---
+\item \textbf{Three-Axis Comparison Framework} \emph{(home: \cref{sec:training-eval})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Baseline role:} Comparing Transformer variants on final validation loss alone conflates quality improvements with compute-efficiency improvements. A variant with more FLOPs per step may reach better loss simply because it processes data differently, not because its architecture is better at a fixed cost.
+    \item \textbf{Limitation:} A single metric (e.g., val loss at fixed training steps) cannot distinguish whether a variant is better because it learns faster per token, because it processes tokens faster in wall-clock time, or because it extracts more learning from each FLOP.
+    \item \textbf{Design pressure:} Need simultaneous controlled perspectives that separate quality, time-efficiency, and compute-efficiency. All comparisons should use the same training runs (no additional experiments needed).
+    \item \textbf{Replacement mechanism --- three comparison axes applied post-hoc:}
+    \begin{center}
+    \begin{tabular}{lll}
+    \toprule
+    Axis & Control variable & Metric\\
+    \midrule
+    Fixed-data & Same token budget $B_{\text{tok}}$ & Val loss $\loss(B_{\text{tok}})$\\
+    Fixed-wallclock & Same elapsed time $t_{\max}$ & Val loss $\loss(t_{\max})$\\
+    Fixed-FLOPs & Same cumulative FLOPs $F_{\max}$ & Val loss $\loss(F_{\max})$\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+    The wall-clock and FLOP budgets are determined dynamically as $t_{\max} = \min_v t_v^{\text{total}}$ and $F_{\max} = \min_v F_v^{\text{total}}$ respectively. Loss values at intermediate budgets are interpolated from training logs.
+    \item \textbf{New trade-off:} Fixed-data comparisons favour architectures that learn more per token but may be slower. Fixed-wallclock comparisons favour architectures that are fast even if they learn less per token. Fixed-FLOPs comparisons favour architectures with lower per-step FLOP cost. Reporting all three prevents cherry-picking one axis that favours a particular variant.
+    \item \textbf{Mathematical formulation:} Given training logs $\{(s, \loss_s, t_s, F_s)\}$ where $s$ is the step, $t_s$ is cumulative wall-clock, and $F_s$ is cumulative FLOPs, define:
+    \begin{align}
+        \loss^{\text{data}}(B) &= \text{interpolate}(\{(\text{tokens}_s, \loss_s)\}, B)\\
+        \loss^{\text{time}}(\tau) &= \text{interpolate}(\{(t_s, \loss_s)\}, \tau)\\
+        \loss^{\text{flop}}(F) &= \text{interpolate}(\{(F_s, \loss_s)\}, F)
+    \end{align}
+\end{itemize}
+
+% --- Component-Level FLOP Accounting ---
+\item \textbf{Component-Level FLOP Accounting and MFU} \emph{(home: \cref{sec:training-eval})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Baseline:} The common approximation $6NT$ (where $N$ is parameter count, $T$ is tokens per step) gives a rough FLOP estimate but does not distinguish between variants with different attention costs. V4 (SWA) does less attention work than V1 for the same $N$ and $T$; the $6NT$ approximation cannot capture this.
+    \item \textbf{Design pressure:} Need per-step FLOP estimates that reflect actual computation at the component level, so fixed-FLOP comparisons are meaningful across variants with different attention mechanisms.
+    \item \textbf{Mechanism:} Sum FLOPs from each component class per layer:
+    \begin{align}
+        F_{\text{QKV}} &= 3 \cdot \nlayer \cdot 2 \cdot T \cdot \dmodel^2 \quad \text{(Q, K, V projections)}\\
+        F_{\text{attn}} &= \nlayer \cdot 2 \cdot T \cdot C_{\text{attn}} \cdot \dhead \cdot \nhead \quad \text{(attention scores)}\\
+        F_{\text{out}} &= \nlayer \cdot 2 \cdot T \cdot \dmodel^2 \quad \text{(output projection)}\\
+        F_{\text{FFN}} &= \nlayer \cdot 2 \cdot n_{\text{proj}} \cdot T \cdot \dmodel \cdot d_h \quad \text{(FFN projections)}
+    \end{align}
+    where $C_{\text{attn}}$ is the effective context length (variant-dependent):
+    \begin{equation}
+        C_{\text{attn}} = \begin{cases}
+            T & \text{full attention (V0, V1, V3)}\\
+            W & \text{SWA (V4)}\\
+            r & \text{Linformer (V5), projection rank}
+        \end{cases}
+    \end{equation}
+    A $3\times$ training multiplier accounts for forward + backward passes.
+    \item \textbf{Model FLOPs Utilization (MFU):} The ratio of achieved computation rate to hardware peak:
+    \begin{equation}
+        \mathrm{MFU} = \frac{F_{\text{step}} / t_{\text{step}}}{F_{\text{peak}}}
+    \end{equation}
+    where $F_{\text{peak}} = 242$ TFLOPS (L4 BF16 peak). MFU distinguishes compute-bound regimes (high MFU, close to hardware peak) from memory-bandwidth-bound regimes (low MFU, limited by data movement).
+    \item \textbf{Arithmetic intensity:} The ratio of FLOPs to bytes transferred:
+    \begin{equation}
+        I = \frac{F_{\text{step}}}{B_{\text{bytes}}}
+    \end{equation}
+    where $B_{\text{bytes}}$ estimates parameter reads plus activation traffic in BF16. The L4 ridge point is $I^* \approx 807$ FLOPs/byte. Variants with $I < I^*$ are memory-bound; variants with $I > I^*$ are compute-bound.
+\end{itemize}
+
+% --- Roofline Diagram ---
+\item \textbf{Roofline Diagram} \emph{(home: \cref{sec:training-eval})}
+
+\begin{itemize}[nosep]
+    \item \textbf{What it is:} A plot of achieved performance (TFLOPS/s) versus arithmetic intensity (FLOPs/byte). The hardware ceiling creates a characteristic ``roofline'' shape:
+    \begin{equation}
+        P_{\text{achievable}}(I) = \min\!\left(F_{\text{peak}},\; \mathrm{BW} \cdot I\right)
+    \end{equation}
+    where $\mathrm{BW} = 300$ GB/s (L4 memory bandwidth) and $F_{\text{peak}} = 242$ TFLOPS.
+    \item \textbf{Use in this project:} Each variant is plotted as a point on the roofline at its measured $(I, P)$ coordinates. Variants that sit on the diagonal (bandwidth-limited regime) benefit from reduced memory traffic. Variants on the flat ceiling (compute-limited regime) benefit from reduced arithmetic. This tells us whether a variant's wall-clock advantage comes from doing less math or from being more cache-friendly.
+    \item \textbf{Ridge point:} The crossover occurs at $I^* = F_{\text{peak}} / \mathrm{BW} = 242 \times 10^{12} / (300 \times 10^9) \approx 807$ FLOPs/byte.
+\end{itemize}
+
+% --- Stable Rank ---
+\item \textbf{Stable Rank: Representation Health Diagnostic} \emph{(home: \cref{sec:training-eval})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Definition:} For a hidden-state matrix $\mH \in \reals^{n \times d}$ (where $n$ is the number of tokens and $d = \dmodel$), the stable rank is:
+    \begin{equation}
+        \mathrm{srank}(\mH) = \frac{\|\mH\|_F^2}{\|\mH\|_2^2} = \frac{\sum_i \sigma_i^2}{\sigma_1^2}
+    \end{equation}
+    where $\sigma_1 \geq \sigma_2 \geq \ldots$ are singular values. The stable rank is bounded: $1 \leq \mathrm{srank}(\mH) \leq \min(n, d)$.
+    \item \textbf{Interpretation:} Stable rank measures the effective dimensionality of the representation. If $\mathrm{srank}(\mH) = 1$, all tokens lie on a single direction (representation collapse). If $\mathrm{srank}(\mH) \approx d$, the representation uses the full available space. A healthy model should maintain reasonable stable rank throughout its layers; a sharp drop in deep layers suggests the model is over-compressing information.
+    \item \textbf{Measurement protocol:} Computed at the final checkpoint, averaged over $\sim 100$ validation batches. Reported per-layer as a curve: $\mathrm{srank}^{(\ell)}$ for $\ell = 0, \ldots, \nlayer - 1$.
+    \item \textbf{Why it matters for variant comparison:} Different attention patterns (full, windowed, linear) create different representational dynamics. A variant that aggressively compresses context (e.g., V5 linear attention with its finite-rank accumulator) might show earlier stable-rank collapse than full attention. This provides evidence about whether a variant's loss difference is due to representational capacity limits or other factors.
+\end{itemize}
+
+% --- CKA ---
+\item \textbf{Centered Kernel Alignment (CKA)} \emph{(home: \cref{sec:training-eval})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Definition:} For representations $\mX \in \reals^{n \times p}$ and $\mY \in \reals^{n \times q}$ from two layers (same inputs), linear CKA is:
+    \begin{equation}
+        \mathrm{CKA}(\mX, \mY) = \frac{\|\mY^\top \mX\|_F^2}{\|\mX^\top \mX\|_F \cdot \|\mY^\top \mY\|_F}
+    \end{equation}
+    (after centering both matrices). CKA $\in [0, 1]$, with $\mathrm{CKA}(\mX, \mX) = 1$.
+    \item \textbf{Properties:}
+    \begin{itemize}[nosep]
+        \item Invariant to orthogonal transformations and isotropic scaling
+        \item Symmetric: $\mathrm{CKA}(\mX, \mY) = \mathrm{CKA}(\mY, \mX)$
+        \item Self-similarity: diagonal entries of the full $L \times L$ matrix equal 1
+    \end{itemize}
+    \item \textbf{Use:} High CKA between non-adjacent layers $(\ell, \ell + k)$ for $k > 1$ indicates that those layers perform redundant computation --- the representation did not change much. The primary presentation is an adjacent-layer curve $\mathrm{CKA}(\mX^{(\ell)}, \mX^{(\ell+1)})$ for $\ell = 0, \ldots, \nlayer - 2$. The full $L \times L$ heatmap is supplementary.
+    \item \textbf{Interpretation for variants:} If V4 (SWA) shows high adjacent-CKA in windowed layers but low CKA across global layers in V4-interleaved, it suggests that global layers introduce genuinely new information while windowed layers are more incremental.
+\end{itemize}
+
+% --- MQAR ---
+\item \textbf{Multi-Query Associative Recall (MQAR)} \emph{(home: \cref{sec:training-eval})}
+
+\begin{itemize}[nosep]
+    \item \textbf{What it tests:} Whether the model can bind key-value token pairs planted at known positions in a synthetic sequence and recall the correct value when prompted with the key later.
+    \item \textbf{Protocol:} Generate sequences containing $k$ key-value associations $(a_1 \to b_1, \ldots, a_k \to b_k)$ at controlled distances. After all pairs, present query tokens (the keys) and measure $P(\text{correct value} \mid \text{key query})$.
+    \item \textbf{Metric:} Overall accuracy and accuracy-by-distance (how recall degrades as the retrieval distance increases).
+    \item \textbf{Why it matters:} This probe isolates retrieval capacity. Variants with restricted attention (V4-SWA, V5-Linformer) should show measurable degradation at distances beyond their effective receptive field, while full-attention variants (V1, V2, V3) should be roughly constant. It provides a mechanistic explanation for any loss differences observed in the three-axis comparison.
+    \item \textbf{Mathematical formulation:} Let $d_j$ be the distance (in tokens) between the key-value binding and the query for association $j$. The per-distance accuracy is:
+    \begin{equation}
+        \text{acc}(d) = \frac{1}{|\{j : d_j = d\}|} \sum_{j : d_j = d} \ind[\argmax_w p_\vtheta(w \mid \text{context}_j) = b_j]
+    \end{equation}
+\end{itemize}
+
+% --- ICL Loss Decay ---
+\item \textbf{ICL Loss Decay Exponent ($\alpha$)} \emph{(home: \cref{sec:training-eval})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Definition:} The per-position validation loss $L(t)$ typically decays as a power law with sequence position $t$:
+    \begin{equation}
+        L(t) = A \cdot t^{-\alpha} + C
+    \end{equation}
+    where $A > 0$ is an amplitude, $\alpha > 0$ is the decay exponent, and $C \geq 0$ is the irreducible loss floor.
+    \item \textbf{Interpretation:} A steep $\alpha$ (large negative power) means the model effectively uses context --- each additional token of context significantly reduces prediction uncertainty. A small $\alpha$ indicates the model hits diminishing returns from context early. $C$ represents the information-theoretic limit that cannot be reduced by additional context.
+    \item \textbf{Fitting procedure:} Non-linear least squares (\texttt{scipy.optimize.curve\_fit}) on the per-position loss curve measured over validation data. Report $\alpha$, $C$, and goodness-of-fit $R^2$.
+    \item \textbf{Variant comparison:} V4 (SWA) may show a flatter $\alpha$ because window-restricted layers cannot directly leverage distant context. V5 (linear attention) may show early flattening due to the finite-rank accumulator losing information about distant positions.
+\end{itemize}
+
+% --- Attention Entropy ---
+\item \textbf{Attention Entropy} \emph{(home: \cref{sec:attention-position})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Definition:} For attention weights $\bm{\alpha}_i \in \Delta^T$ (probability simplex) at query position $i$, head $h$, layer $\ell$:
+    \begin{equation}
+        H^{(\ell,h)}_i = -\sum_{j=1}^{i} \alpha_{ij} \log \alpha_{ij}
+    \end{equation}
+    Averaged over positions and batches to give per-layer and per-head entropy statistics.
+    \item \textbf{Interpretation:} High entropy means the head attends broadly (uniform-like). Low entropy means the head focuses sharply on few positions. Entropy $= 0$ means the head attends to exactly one position. Maximum entropy $= \log(i)$ at position $i$ means uniform attention.
+    \item \textbf{Applicability:} Only computable for variants where attention weights are materialized (V0, V5). Flash-attention-based variants (V1--V4) do not produce the explicit attention matrix, so attention entropy returns None for these variants. This is a known limitation, not a bug.
+    \item \textbf{Use:} Identifies degenerate attention patterns (all entropy near zero suggests the model collapses to trivial routing; all entropy near maximum suggests the model fails to discriminate).
+\end{itemize}
+
+% --- Pareto Front Analysis ---
+\item \textbf{Pareto Front Analysis} \emph{(home: \cref{sec:training-eval})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Definition:} A variant $v$ is Pareto-optimal on the $(x, y)$ objective pair if no other variant achieves both lower $x$ and lower $y$. Formally, $v$ is non-dominated if:
+    \begin{equation}
+        \nexists\, v' \neq v : x_{v'} \leq x_v \;\wedge\; y_{v'} \leq y_v \;\wedge\; (x_{v'} < x_v \;\vee\; y_{v'} < y_v)
+    \end{equation}
+    \item \textbf{Objective pairs reported:}
+    \begin{center}
+    \begin{tabular}{lll}
+    \toprule
+    $x$ (cost) & $y$ (quality) & What it reveals\\
+    \midrule
+    Cumulative FLOPs & Val loss & Compute-efficiency frontier\\
+    Wall-clock time & Val loss & Time-efficiency frontier\\
+    Peak GPU memory & Val loss & Memory-efficiency frontier\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+    \item \textbf{Interpretation:} Variants on the Pareto front represent the best achievable trade-offs --- no other variant dominates them on both axes. A variant behind the front is strictly inferior: another variant exists that is both cheaper and better (or equal on one axis and strictly better on the other).
+\end{itemize}
+
+% --- Seed Aggregation ---
+\item \textbf{Statistical Reporting: Seed Aggregation} \emph{(home: \cref{sec:training-eval})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Protocol:} All results are reported as mean $\pm$ standard deviation over 3+ random seeds. Let $\{m_1, \ldots, m_S\}$ be metric values from $S$ seeds:
+    \begin{equation}
+        \bar{m} = \frac{1}{S}\sum_{s=1}^S m_s, \qquad \sigma_m = \sqrt{\frac{1}{S-1}\sum_{s=1}^S (m_s - \bar{m})^2}
+    \end{equation}
+    \item \textbf{Reporting format:} ``$\bar{m} \pm \sigma_m$'' in all comparison tables and visualizations.
+    \item \textbf{Confidence threshold:} If $S < 3$, results are flagged as lacking confidence and additional seeds may be added selectively for variant pairs with overlapping intervals.
+    \item \textbf{Why seeds matter:} Training involves stochastic elements (initialization, data order, dropout if used). Reporting single-seed results can lead to false conclusions --- one variant may appear better due to a lucky seed. Multiple seeds give statistical evidence of true architectural advantages.
+\end{itemize}
+
+% --- Parameter Parity Validation ---
+\item \textbf{Parameter Parity Validation} \emph{(home: \cref{sec:training-eval})}
+
+\begin{itemize}[nosep]
+    \item \textbf{Rule:} All compared variants must have parameter counts within $\pm 5\%$ of their mean. If variant $v$ has $N_v$ trainable parameters:
+    \begin{equation}
+        \frac{|N_v - \bar{N}|}{\bar{N}} \leq 0.05 \quad \forall v, \qquad \bar{N} = \frac{1}{|V|}\sum_{v \in V} N_v
+    \end{equation}
+    \item \textbf{Exception:} Variants whose mechanism \emph{inherently} reduces parameters (e.g., GQA removes KV projection parameters) may exceed this tolerance. The difference is noted in results rather than compensated (e.g., by widening the FFN).
+    \item \textbf{Purpose:} Ensures that quality differences are attributable to architectural mechanisms rather than raw capacity differences. A model with 20\% more parameters might win simply due to more capacity, not a better inductive bias.
+\end{itemize}
+
+% --- ProbeTarget Protocol ---
+\item \textbf{ProbeTarget Protocol (Software Architecture)} \emph{(home: \cref{sec:infrastructure})}
+
+\begin{itemize}[nosep]
+    \item \textbf{What it is:} A structural protocol that decouples evaluation probes from model internals. Probes program against \texttt{ProbeTarget} rather than reaching into \texttt{model.blocks} or registering hooks directly.
+    \item \textbf{Two methods:}
+    \begin{enumerate}[nosep]
+        \item \texttt{forward(x) $\to$ logits} --- lightweight, sufficient for MQAR (only needs output logits)
+        \item \texttt{forward\_with\_internals(x) $\to$ ProbeInternals} --- returns per-layer hidden states for stable rank, CKA, and entropy probes
+    \end{enumerate}
+    \item \textbf{Design rationale:} Separating these two methods avoids OOM on large models when only logits are needed. The heavy path (capturing all layer outputs) is opt-in.
+    \item \textbf{Adapter pattern:} \texttt{ModelProbeAdapter} wraps real models (V0--V5) to satisfy the \texttt{ProbeTarget} protocol. Probes never import model-specific classes.
+    \item \textbf{Connection to testing:} Test fakes satisfy \texttt{ProbeTarget} without inheritance (structural typing via Python's \texttt{Protocol}). This allows evaluation tests to run without GPU or real model weights.
+\end{itemize}
+
+% --- AttentionModule Protocol ---
+\item \textbf{AttentionModule Protocol (Software Architecture)} \emph{(home: \cref{sec:attention-position})}
+
+\begin{itemize}[nosep]
+    \item \textbf{What it is:} A structural protocol formalizing the contract that all attention variants (V0 CausalSelfAttention, V1 ModernAttention, V2 ALiBiAttention, V3 GQAAttention, V4 FlashAttention with window, V5 LinearAttention) already satisfy informally:
+    \begin{equation}
+        \texttt{forward}(\vx, \texttt{kv\_cache}) \to (\texttt{output}, \texttt{new\_kv\_cache})
+    \end{equation}
+    \item \textbf{Purpose:} Documentary, not enforcement. Makes the shared interface discoverable without requiring all variants to inherit from a common base class. Type annotations in \texttt{TransformerBlock} and \texttt{ModernTransformerBlock} use this protocol.
+    \item \textbf{Cache type:} Deliberately uses \texttt{Any} for the cache type because V0/V1 (concat-based 2-tuple) and V1--V4 (pre-allocated 3-tuple via flash\_attn) use incompatible cache shapes. Unifying cache types is deferred.
+    \item \textbf{Connection to GQA:} GQA's cache shape is $(B, n_{\mathrm{kv}}, T, \dhead)$ rather than $(B, \nhead, T, \dhead)$. The protocol's \texttt{Any} cache type accommodates this without specialization.
+\end{itemize}
+
+% --- Evaluation Pipeline ---
+\item \textbf{Evaluation Pipeline (Software Architecture)} \emph{(home: \cref{sec:infrastructure})}
+
+\begin{itemize}[nosep]
+    \item \textbf{What it is:} A single-interface module that orchestrates the full post-hoc evaluation workflow:
+    \begin{equation}
+        \text{checkpoints} \xrightarrow{\text{pipeline}} \text{ReportResult (structured data + files)}
+    \end{equation}
+    The pipeline loads checkpoints, computes FLOPs, runs probes, slices comparisons across three axes, aggregates seeds, generates visualizations, and writes reports.
+    \item \textbf{Interface:} \texttt{EvaluationPipeline.run(checkpoints, output\_dir) $\to$ ReportResult}. Callers (CLI, tests, notebooks, future dashboard) share this one entry point.
+    \item \textbf{Design decisions:}
+    \begin{itemize}[nosep]
+        \item Class (not function) because configuration is captured once (device, data\_dir) and methods are extensible
+        \item Returns \texttt{ReportResult} alongside file writes so tests and dashboards get structured data without re-parsing files
+        \item Lenient error handling: pipeline always produces a partial report with a warnings list; callers inspect warnings to decide severity
+    \end{itemize}
+    \item \textbf{Output structure:} A self-contained report directory:
+    \begin{center}
+    \begin{tabular}{ll}
+    \toprule
+    Path & Contents\\
+    \midrule
+    \texttt{plots/*.png} & All visualizations (10 plot types)\\
+    \texttt{raw/metrics.csv} & Tabular computed data\\
+    \texttt{raw/metrics.json} & Structured computed data\\
+    \texttt{summary.md} & Human-readable report with embedded image links\\
+    \texttt{metadata.json} & Timestamp, software versions, hardware ID, evaluated checkpoints\\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+\end{itemize}
+
 \begin{motivationbox}[Integration instructions for future writing pass]
 Each item above should be expanded into a full subsection within its designated home section, following the design-log template: baseline role $\to$ limitation $\to$ design pressure $\to$ replacement mechanism $\to$ new trade-off. Include mathematical definitions, TikZ figures where helpful, worked examples, and intuition boxes. Cross-reference related items (e.g., ALiBi cross-references the KV-cache section; GQA cross-references the KV-cache memory formula). Do not duplicate explanations already present in other sections. Do not include implementation code or API details --- focus on the mathematical and conceptual content.
 \end{motivationbox}

@@ -1,0 +1,64 @@
+{
+  "variants": {
+    "vanilla": [
+      {
+        "seed_index": 0,
+        "checkpoint_dir": "reports/checkpoints/vanilla/seed_0",
+        "val_loss": 3.456,
+        "perplexity": 31.67,
+        "flop_breakdown": {
+          "qkv_proj": 1234567890,
+          "attention_score": 987654321,
+          "attention_output": 876543210,
+          "ffn": 2345678901,
+          "total": 5444444322
+        },
+        "metrics": {
+          "val_loss": 3.456,
+          "perplexity": 31.67,
+          "icl_exponent": 0.42,
+          "icl_fit_params": {"A": 1.2, "alpha": 0.42, "C": 2.8, "r_squared": 0.95},
+          "per_position_loss": [5.2, 4.8, 4.5, 4.2, 3.9, 3.7, 3.5, 3.4, 3.3, 3.2]
+        },
+        "log_entries": [
+          {"step": 100, "tokens_seen": 51200, "wallclock": 12.5, "cumulative_flops": 1.2e9, "val_loss": 5.1},
+          {"step": 200, "tokens_seen": 102400, "wallclock": 25.0, "cumulative_flops": 2.4e9, "val_loss": 4.5},
+          {"step": 300, "tokens_seen": 153600, "wallclock": 37.5, "cumulative_flops": 3.6e9, "val_loss": 4.0},
+          {"step": 400, "tokens_seen": 204800, "wallclock": 50.0, "cumulative_flops": 4.8e9, "val_loss": 3.7},
+          {"step": 500, "tokens_seen": 256000, "wallclock": 62.5, "cumulative_flops": 6.0e9, "val_loss": 3.456}
+        ],
+        "efficiency": {
+          "tflops": 45.2,
+          "arithmetic_intensity": 120.5,
+          "mfu": 18.7
+        }
+      }
+    ]
+  },
+  "aggregated": {
+    "vanilla": {
+      "val_loss": {"mean": 3.456, "std": null},
+      "perplexity": {"mean": 31.67, "std": null},
+      "step_flops": {"mean": 5444444322, "std": null},
+      "icl_alpha": {"mean": 0.42, "std": null},
+      "throughput": {"mean": 12500.0, "std": null},
+      "peak_memory_gb": {"mean": 8.2, "std": null}
+    }
+  },
+  "comparison": {
+    "fixed_data": {
+      "vanilla": 3.456
+    },
+    "fixed_wallclock": {
+      "vanilla": {"0.5": 4.5, "1.0": 3.456}
+    },
+    "fixed_flops": {
+      "vanilla": 3.52
+    },
+    "pareto_front": ["vanilla"],
+    "parameter_counts": {
+      "vanilla": 12345678
+    },
+    "parameter_parity_valid": true
+  }
+}

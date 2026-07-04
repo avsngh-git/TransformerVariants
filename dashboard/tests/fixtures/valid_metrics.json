@@ -1,0 +1,402 @@
+{
+  "variants": {
+    "vanilla": [
+      {
+        "seed_index": 0,
+        "checkpoint_dir": "reports/checkpoints/vanilla/seed_0",
+        "val_loss": 3.456,
+        "perplexity": 31.67,
+        "flop_breakdown": {
+          "qkv_proj": 1234567890,
+          "attention_score": 987654321,
+          "attention_output": 876543210,
+          "ffn": 2345678901,
+          "total": 5444444322
+        },
+        "metrics": {
+          "val_loss": 3.456,
+          "perplexity": 31.67,
+          "icl_exponent": 0.42,
+          "icl_fit_params": {"A": 1.2, "alpha": 0.42, "C": 2.8, "r_squared": 0.95},
+          "per_position_loss": [5.2, 4.8, 4.5, 4.2, 3.9, 3.7, 3.5, 3.4, 3.3, 3.2, 3.15, 3.1, 3.05, 3.0, 2.95, 2.9]
+        },
+        "log_entries": [
+          {"step": 100, "tokens_seen": 51200, "wallclock": 12.5, "cumulative_flops": 1.2e9, "val_loss": 5.1},
+          {"step": 200, "tokens_seen": 102400, "wallclock": 25.0, "cumulative_flops": 2.4e9, "val_loss": 4.5},
+          {"step": 300, "tokens_seen": 153600, "wallclock": 37.5, "cumulative_flops": 3.6e9, "val_loss": 4.0},
+          {"step": 400, "tokens_seen": 204800, "wallclock": 50.0, "cumulative_flops": 4.8e9, "val_loss": 3.7},
+          {"step": 500, "tokens_seen": 256000, "wallclock": 62.5, "cumulative_flops": 6.0e9, "val_loss": 3.456}
+        ],
+        "mqar": {
+          "distances": [1, 2, 3, 4, 5],
+          "accuracies": [0.95, 0.92, 0.88, 0.82, 0.75],
+          "overall_accuracy": 0.864
+        },
+        "stable_rank": {
+          "per_layer": [5.2, 4.8, 4.5, 4.2, 3.9, 3.7],
+          "mean": 4.38,
+          "std": 0.55
+        },
+        "cka": {
+          "adjacent_similarities": [0.92, 0.88, 0.85, 0.82, 0.79],
+          "full_matrix": [
+            [1.0, 0.92, 0.85, 0.78, 0.72, 0.68],
+            [0.92, 1.0, 0.88, 0.82, 0.76, 0.71],
+            [0.85, 0.88, 1.0, 0.85, 0.80, 0.75],
+            [0.78, 0.82, 0.85, 1.0, 0.82, 0.78],
+            [0.72, 0.76, 0.80, 0.82, 1.0, 0.79],
+            [0.68, 0.71, 0.75, 0.78, 0.79, 1.0]
+          ]
+        },
+        "attention_entropy": {
+          "per_layer": [2.1, 2.3, 2.5, 2.4, 2.2, 2.0],
+          "mean": 2.25
+        },
+        "efficiency": {
+          "tflops": 45.2,
+          "arithmetic_intensity": 120.5,
+          "mfu": 18.7
+        }
+      },
+      {
+        "seed_index": 1,
+        "checkpoint_dir": "reports/checkpoints/vanilla/seed_1",
+        "val_loss": 3.478,
+        "perplexity": 32.38,
+        "flop_breakdown": {
+          "qkv_proj": 1234567890,
+          "attention_score": 987654321,
+          "attention_output": 876543210,
+          "ffn": 2345678901,
+          "total": 5444444322
+        },
+        "metrics": {
+          "val_loss": 3.478,
+          "perplexity": 32.38,
+          "icl_exponent": 0.40,
+          "icl_fit_params": {"A": 1.15, "alpha": 0.40, "C": 2.85, "r_squared": 0.93},
+          "per_position_loss": [5.3, 4.9, 4.6, 4.3, 4.0, 3.8, 3.6, 3.45, 3.35, 3.25, 3.2, 3.15, 3.1, 3.05, 3.0, 2.95]
+        },
+        "log_entries": [
+          {"step": 100, "tokens_seen": 51200, "wallclock": 12.8, "cumulative_flops": 1.2e9, "val_loss": 5.2},
+          {"step": 200, "tokens_seen": 102400, "wallclock": 25.6, "cumulative_flops": 2.4e9, "val_loss": 4.6},
+          {"step": 300, "tokens_seen": 153600, "wallclock": 38.4, "cumulative_flops": 3.6e9, "val_loss": 4.1},
+          {"step": 400, "tokens_seen": 204800, "wallclock": 51.2, "cumulative_flops": 4.8e9, "val_loss": 3.8},
+          {"step": 500, "tokens_seen": 256000, "wallclock": 64.0, "cumulative_flops": 6.0e9, "val_loss": 3.478}
+        ],
+        "mqar": {
+          "distances": [1, 2, 3, 4, 5],
+          "accuracies": [0.94, 0.91, 0.87, 0.81, 0.74],
+          "overall_accuracy": 0.854
+        },
+        "stable_rank": {
+          "per_layer": [5.1, 4.7, 4.4, 4.1, 3.8, 3.6],
+          "mean": 4.28,
+          "std": 0.54
+        },
+        "cka": {
+          "adjacent_similarities": [0.91, 0.87, 0.84, 0.81, 0.78],
+          "full_matrix": [
+            [1.0, 0.91, 0.84, 0.77, 0.71, 0.67],
+            [0.91, 1.0, 0.87, 0.81, 0.75, 0.70],
+            [0.84, 0.87, 1.0, 0.84, 0.79, 0.74],
+            [0.77, 0.81, 0.84, 1.0, 0.81, 0.77],
+            [0.71, 0.75, 0.79, 0.81, 1.0, 0.78],
+            [0.67, 0.70, 0.74, 0.77, 0.78, 1.0]
+          ]
+        },
+        "attention_entropy": {
+          "per_layer": [2.0, 2.2, 2.4, 2.3, 2.1, 1.9],
+          "mean": 2.15
+        },
+        "efficiency": {
+          "tflops": 44.8,
+          "arithmetic_intensity": 119.8,
+          "mfu": 18.5
+        }
+      }
+    ],
+    "modern": [
+      {
+        "seed_index": 0,
+        "checkpoint_dir": "reports/checkpoints/modern/seed_0",
+        "val_loss": 3.201,
+        "perplexity": 24.56,
+        "flop_breakdown": {
+          "qkv_proj": 1345678901,
+          "attention_score": 1087654321,
+          "attention_output": 976543210,
+          "ffn": 2545678901,
+          "total": 5955555333
+        },
+        "metrics": {
+          "val_loss": 3.201,
+          "perplexity": 24.56,
+          "icl_exponent": 0.58,
+          "icl_fit_params": {"A": 1.5, "alpha": 0.58, "C": 2.4, "r_squared": 0.97},
+          "per_position_loss": [4.8, 4.3, 3.9, 3.6, 3.4, 3.2, 3.1, 3.0, 2.9, 2.85, 2.8, 2.75, 2.7, 2.65, 2.6, 2.55]
+        },
+        "log_entries": [
+          {"step": 100, "tokens_seen": 51200, "wallclock": 14.0, "cumulative_flops": 1.4e9, "val_loss": 4.8},
+          {"step": 200, "tokens_seen": 102400, "wallclock": 28.0, "cumulative_flops": 2.8e9, "val_loss": 4.1},
+          {"step": 300, "tokens_seen": 153600, "wallclock": 42.0, "cumulative_flops": 4.2e9, "val_loss": 3.6},
+          {"step": 400, "tokens_seen": 204800, "wallclock": 56.0, "cumulative_flops": 5.6e9, "val_loss": 3.3},
+          {"step": 500, "tokens_seen": 256000, "wallclock": 70.0, "cumulative_flops": 7.0e9, "val_loss": 3.201}
+        ],
+        "mqar": {
+          "distances": [1, 2, 3, 4, 5],
+          "accuracies": [0.97, 0.95, 0.92, 0.88, 0.83],
+          "overall_accuracy": 0.91
+        },
+        "stable_rank": {
+          "per_layer": [6.1, 5.8, 5.5, 5.2, 4.9, 4.6],
+          "mean": 5.35,
+          "std": 0.55
+        },
+        "cka": {
+          "adjacent_similarities": [0.95, 0.92, 0.89, 0.86, 0.83],
+          "full_matrix": [
+            [1.0, 0.95, 0.89, 0.83, 0.77, 0.72],
+            [0.95, 1.0, 0.92, 0.86, 0.80, 0.75],
+            [0.89, 0.92, 1.0, 0.89, 0.83, 0.78],
+            [0.83, 0.86, 0.89, 1.0, 0.86, 0.81],
+            [0.77, 0.80, 0.83, 0.86, 1.0, 0.83],
+            [0.72, 0.75, 0.78, 0.81, 0.83, 1.0]
+          ]
+        },
+        "attention_entropy": {
+          "per_layer": [1.8, 2.0, 2.2, 2.1, 1.9, 1.7],
+          "mean": 1.95
+        },
+        "efficiency": {
+          "tflops": 52.1,
+          "arithmetic_intensity": 135.2,
+          "mfu": 21.5
+        }
+      },
+      {
+        "seed_index": 1,
+        "checkpoint_dir": "reports/checkpoints/modern/seed_1",
+        "val_loss": 3.225,
+        "perplexity": 25.18,
+        "flop_breakdown": {
+          "qkv_proj": 1345678901,
+          "attention_score": 1087654321,
+          "attention_output": 976543210,
+          "ffn": 2545678901,
+          "total": 5955555333
+        },
+        "metrics": {
+          "val_loss": 3.225,
+          "perplexity": 25.18,
+          "icl_exponent": 0.55,
+          "icl_fit_params": {"A": 1.45, "alpha": 0.55, "C": 2.45, "r_squared": 0.96},
+          "per_position_loss": [4.9, 4.4, 4.0, 3.7, 3.45, 3.25, 3.15, 3.05, 2.95, 2.9, 2.85, 2.8, 2.75, 2.7, 2.65, 2.6]
+        },
+        "log_entries": [
+          {"step": 100, "tokens_seen": 51200, "wallclock": 14.2, "cumulative_flops": 1.4e9, "val_loss": 4.9},
+          {"step": 200, "tokens_seen": 102400, "wallclock": 28.4, "cumulative_flops": 2.8e9, "val_loss": 4.2},
+          {"step": 300, "tokens_seen": 153600, "wallclock": 42.6, "cumulative_flops": 4.2e9, "val_loss": 3.7},
+          {"step": 400, "tokens_seen": 204800, "wallclock": 56.8, "cumulative_flops": 5.6e9, "val_loss": 3.4},
+          {"step": 500, "tokens_seen": 256000, "wallclock": 71.0, "cumulative_flops": 7.0e9, "val_loss": 3.225}
+        ],
+        "mqar": {
+          "distances": [1, 2, 3, 4, 5],
+          "accuracies": [0.96, 0.94, 0.91, 0.87, 0.82],
+          "overall_accuracy": 0.90
+        },
+        "stable_rank": {
+          "per_layer": [6.0, 5.7, 5.4, 5.1, 4.8, 4.5],
+          "mean": 5.25,
+          "std": 0.54
+        },
+        "cka": {
+          "adjacent_similarities": [0.94, 0.91, 0.88, 0.85, 0.82],
+          "full_matrix": [
+            [1.0, 0.94, 0.88, 0.82, 0.76, 0.71],
+            [0.94, 1.0, 0.91, 0.85, 0.79, 0.74],
+            [0.88, 0.91, 1.0, 0.88, 0.82, 0.77],
+            [0.82, 0.85, 0.88, 1.0, 0.85, 0.80],
+            [0.76, 0.79, 0.82, 0.85, 1.0, 0.82],
+            [0.71, 0.74, 0.77, 0.80, 0.82, 1.0]
+          ]
+        },
+        "attention_entropy": {
+          "per_layer": [1.85, 2.05, 2.25, 2.15, 1.95, 1.75],
+          "mean": 2.0
+        },
+        "efficiency": {
+          "tflops": 51.5,
+          "arithmetic_intensity": 134.0,
+          "mfu": 21.3
+        }
+      }
+    ],
+    "swa": [
+      {
+        "seed_index": 0,
+        "checkpoint_dir": "reports/checkpoints/swa/seed_0",
+        "val_loss": 3.312,
+        "perplexity": 27.44,
+        "flop_breakdown": {
+          "qkv_proj": 1134567890,
+          "attention_score": 887654321,
+          "attention_output": 776543210,
+          "ffn": 2445678901,
+          "total": 5244444322
+        },
+        "metrics": {
+          "val_loss": 3.312,
+          "perplexity": 27.44,
+          "icl_exponent": 0.48,
+          "icl_fit_params": {"A": 1.35, "alpha": 0.48, "C": 2.6, "r_squared": 0.91},
+          "per_position_loss": [5.0, 4.5, 4.2, 3.9, 3.6, 3.4, 3.25, 3.15, 3.05, 2.95, 2.9, 2.85, 2.8, 2.75, 2.7, 2.65]
+        },
+        "log_entries": [
+          {"step": 100, "tokens_seen": 51200, "wallclock": 11.0, "cumulative_flops": 1.1e9, "val_loss": 4.9},
+          {"step": 200, "tokens_seen": 102400, "wallclock": 22.0, "cumulative_flops": 2.2e9, "val_loss": 4.3},
+          {"step": 300, "tokens_seen": 153600, "wallclock": 33.0, "cumulative_flops": 3.3e9, "val_loss": 3.8},
+          {"step": 400, "tokens_seen": 204800, "wallclock": 44.0, "cumulative_flops": 4.4e9, "val_loss": 3.5},
+          {"step": 500, "tokens_seen": 256000, "wallclock": 55.0, "cumulative_flops": 5.5e9, "val_loss": 3.312}
+        ],
+        "mqar": {
+          "distances": [1, 2, 3, 4, 5],
+          "accuracies": [0.93, 0.90, 0.86, 0.80, 0.73],
+          "overall_accuracy": 0.844
+        },
+        "stable_rank": {
+          "per_layer": [4.8, 4.5, 4.2, 3.9, 3.6, 3.4],
+          "mean": 4.07,
+          "std": 0.52
+        },
+        "cka": {
+          "adjacent_similarities": [0.90, 0.86, 0.83, 0.80, 0.77],
+          "full_matrix": [
+            [1.0, 0.90, 0.83, 0.76, 0.70, 0.65],
+            [0.90, 1.0, 0.86, 0.80, 0.74, 0.69],
+            [0.83, 0.86, 1.0, 0.83, 0.77, 0.72],
+            [0.76, 0.80, 0.83, 1.0, 0.80, 0.75],
+            [0.70, 0.74, 0.77, 0.80, 1.0, 0.77],
+            [0.65, 0.69, 0.72, 0.75, 0.77, 1.0]
+          ]
+        },
+        "attention_entropy": {
+          "per_layer": [2.3, 2.5, 2.7, 2.6, 2.4, 2.2],
+          "mean": 2.45
+        },
+        "efficiency": {
+          "tflops": 58.3,
+          "arithmetic_intensity": 142.8,
+          "mfu": 24.1
+        }
+      },
+      {
+        "seed_index": 1,
+        "checkpoint_dir": "reports/checkpoints/swa/seed_1",
+        "val_loss": 3.298,
+        "perplexity": 27.08,
+        "flop_breakdown": {
+          "qkv_proj": 1134567890,
+          "attention_score": 887654321,
+          "attention_output": 776543210,
+          "ffn": 2445678901,
+          "total": 5244444322
+        },
+        "metrics": {
+          "val_loss": 3.298,
+          "perplexity": 27.08,
+          "icl_exponent": 0.50,
+          "icl_fit_params": {"A": 1.38, "alpha": 0.50, "C": 2.55, "r_squared": 0.92},
+          "per_position_loss": [4.9, 4.4, 4.1, 3.85, 3.55, 3.35, 3.2, 3.1, 3.0, 2.92, 2.87, 2.82, 2.77, 2.72, 2.67, 2.62]
+        },
+        "log_entries": [
+          {"step": 100, "tokens_seen": 51200, "wallclock": 11.2, "cumulative_flops": 1.1e9, "val_loss": 4.85},
+          {"step": 200, "tokens_seen": 102400, "wallclock": 22.4, "cumulative_flops": 2.2e9, "val_loss": 4.25},
+          {"step": 300, "tokens_seen": 153600, "wallclock": 33.6, "cumulative_flops": 3.3e9, "val_loss": 3.75},
+          {"step": 400, "tokens_seen": 204800, "wallclock": 44.8, "cumulative_flops": 4.4e9, "val_loss": 3.45},
+          {"step": 500, "tokens_seen": 256000, "wallclock": 56.0, "cumulative_flops": 5.5e9, "val_loss": 3.298}
+        ],
+        "mqar": {
+          "distances": [1, 2, 3, 4, 5],
+          "accuracies": [0.94, 0.91, 0.87, 0.81, 0.74],
+          "overall_accuracy": 0.854
+        },
+        "stable_rank": {
+          "per_layer": [4.9, 4.6, 4.3, 4.0, 3.7, 3.5],
+          "mean": 4.17,
+          "std": 0.51
+        },
+        "cka": {
+          "adjacent_similarities": [0.91, 0.87, 0.84, 0.81, 0.78],
+          "full_matrix": [
+            [1.0, 0.91, 0.84, 0.77, 0.71, 0.66],
+            [0.91, 1.0, 0.87, 0.81, 0.75, 0.70],
+            [0.84, 0.87, 1.0, 0.84, 0.78, 0.73],
+            [0.77, 0.81, 0.84, 1.0, 0.81, 0.76],
+            [0.71, 0.75, 0.78, 0.81, 1.0, 0.78],
+            [0.66, 0.70, 0.73, 0.76, 0.78, 1.0]
+          ]
+        },
+        "attention_entropy": {
+          "per_layer": [2.25, 2.45, 2.65, 2.55, 2.35, 2.15],
+          "mean": 2.4
+        },
+        "efficiency": {
+          "tflops": 57.8,
+          "arithmetic_intensity": 141.5,
+          "mfu": 23.9
+        }
+      }
+    ]
+  },
+  "aggregated": {
+    "vanilla": {
+      "val_loss": {"mean": 3.467, "std": 0.011},
+      "perplexity": {"mean": 32.025, "std": 0.355},
+      "step_flops": {"mean": 5444444322, "std": null},
+      "icl_alpha": {"mean": 0.41, "std": 0.01},
+      "throughput": {"mean": 12500.0, "std": 150.0},
+      "peak_memory_gb": {"mean": 8.2, "std": 0.1}
+    },
+    "modern": {
+      "val_loss": {"mean": 3.213, "std": 0.012},
+      "perplexity": {"mean": 24.87, "std": 0.31},
+      "step_flops": {"mean": 5955555333, "std": null},
+      "icl_alpha": {"mean": 0.565, "std": 0.015},
+      "throughput": {"mean": 11800.0, "std": 120.0},
+      "peak_memory_gb": {"mean": 9.1, "std": 0.1}
+    },
+    "swa": {
+      "val_loss": {"mean": 3.305, "std": 0.007},
+      "perplexity": {"mean": 27.26, "std": 0.18},
+      "step_flops": {"mean": 5244444322, "std": null},
+      "icl_alpha": {"mean": 0.49, "std": 0.01},
+      "throughput": {"mean": 13200.0, "std": 180.0},
+      "peak_memory_gb": {"mean": 7.8, "std": 0.1}
+    }
+  },
+  "comparison": {
+    "fixed_data": {
+      "vanilla": 3.467,
+      "modern": 3.213,
+      "swa": 3.305
+    },
+    "fixed_wallclock": {
+      "vanilla": {"0.5": 4.5, "1.0": 3.467},
+      "modern": {"0.5": 4.2, "1.0": 3.213},
+      "swa": {"0.5": 4.3, "1.0": 3.305}
+    },
+    "fixed_flops": {
+      "vanilla": 3.52,
+      "modern": 3.28,
+      "swa": 3.35
+    },
+    "pareto_front": ["modern", "swa"],
+    "parameter_counts": {
+      "vanilla": 12345678,
+      "modern": 12400000,
+      "swa": 12380000
+    },
+    "parameter_parity_valid": true
+  }
+}

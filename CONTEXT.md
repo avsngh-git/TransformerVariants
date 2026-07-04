@@ -200,6 +200,10 @@ A structural protocol (`src/evaluation/probe_target.py`) that decouples diagnost
 
 A structural protocol (`src/models/attention_protocol.py`) formalizing the informal contract all attention variants already satisfy: `forward(x, kv_cache=None) → (output, new_kv_cache)`. Purely documentary — does not enforce cache shape compatibility. Used as a type annotation in `TransformerBlock` and `ModernTransformerBlock`.
 
+### Dashboard
+
+A Streamlit multi-page application (`dashboard/`) that visualizes pre-computed evaluation pipeline output. Consumes `raw/metrics.json` from a report directory — no model loading, no GPU, no dependency on `src/`. Pages: Overview, Learning Curves, Comparison Axes, Probes, Efficiency, Per-Position Loss. Uses Plotly for interactive charts. Completely decoupled from the evaluation pipeline code; communicates via the JSON file format contract.
+
 ---
 
 ## Open Questions

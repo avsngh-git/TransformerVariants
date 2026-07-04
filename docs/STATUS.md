@@ -258,7 +258,7 @@ Install: `pip install -e ".[data]"`
 - Phase 10: Large-scale data pipeline
 - Phase 11: Fault-tolerant training (fault injection tests)
 - Phase 12: Main controlled benchmarks (3+ seeds per variant)
-- Phase 13: Final report and packaging
+- Phase 13: Final report and packaging (includes live inference demo page for dashboard — type a prompt, see attention patterns)
 
 ---
 
