@@ -274,6 +274,7 @@ class Trainer:
 
         # Accumulate gradients over multiple micro-batches
         total_loss = 0.0
+        total_aux_loss = 0.0
         for micro_step in range(self.config.grad_accum_steps):
             x, y = self.train_loader.next_batch()
 
@@ -281,11 +282,21 @@ class Trainer:
             with torch.autocast(device_type=self.device, dtype=self.dtype, enabled=self.use_amp):
                 logits, loss, _ = self.model(x, y)
 
+            # Get aux loss (zero for dense models, non-zero for MoE)
+            if hasattr(self.model, 'get_aux_loss'):
+                aux_loss = self.model.get_aux_loss()
+            else:
+                aux_loss = torch.tensor(0.0, device=self.device)
+
+            # Combine cross-entropy loss with auxiliary loss
+            combined_loss = loss + aux_loss
+
             # Scale loss by accumulation steps (so gradients average correctly)
-            scaled_loss = loss / self.config.grad_accum_steps
+            scaled_loss = combined_loss / self.config.grad_accum_steps
             scaled_loss.backward()
 
             total_loss += loss.item()
+            total_aux_loss += aux_loss.item() if torch.is_tensor(aux_loss) else aux_loss
             self.tokens_processed += x.numel()
 
         # Gradient clipping (prevents exploding gradients)
@@ -297,6 +308,7 @@ class Trainer:
             grad_norm = 0.0
 
         avg_loss = total_loss / self.config.grad_accum_steps
+        avg_aux = total_aux_loss / self.config.grad_accum_steps
 
         # Health check: after backward/clip, before optimizer step
         if self.health_monitor is not None:
@@ -307,7 +319,7 @@ class Trainer:
             if action == Action.SKIP_STEP:
                 self.optimizer.zero_grad()
                 self._skipped_steps += 1
-                return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm}
+                return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm, "aux_loss": avg_aux}
 
             if action == Action.ROLLBACK:
                 if self.checkpoint_manager is not None:
@@ -316,12 +328,12 @@ class Trainer:
                     if rollback_path is not None:
                         self.load_checkpoint(rollback_path)
                 self.health_monitor.reset()
-                return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm}
+                return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm, "aux_loss": avg_aux}
 
         # Optimizer step (update weights)
         self.optimizer.step()
 
-        return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm}
+        return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm, "aux_loss": avg_aux}
 
     @torch.no_grad()
     def _evaluate(self) -> float:

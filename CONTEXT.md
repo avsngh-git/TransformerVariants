@@ -24,6 +24,7 @@ A variant is NOT defined by which "slots" it fills — it may introduce entirely
 | V3 | GQA | Swap independent heads → grouped-query attention | V1 |
 | V4 | SWA (Sliding Window Attention) | Fixed-proportion sliding window, no global tokens | V1 |
 | V5 | Linear (Linformer) | Low-rank K/V projection, O(n) attention complexity | V1 |
+| V6 | MoE (Mixture of Experts) | Mixtral-style top-2 routing, 8 SwiGLU experts per MoE layer | V1 |
 
 ### Sub-variant
 
@@ -31,6 +32,8 @@ A single component swap within a variant's recipe, with everything else unchange
 
 Known sub-variants:
 - **V4-interleaved** — alternates local (SWA) and global (full attention) layers, Gemma2-style. Even layers attend to the full sequence; odd layers use window_size=W. Isolates the question: "does periodic full-context access recover information lost by windowing?"
+- **V6-interleaved** — alternates dense FFN (even layers) and MoE (odd layers). Reduces total parameters while retaining expert specialization in half the layers. Isolates: "do you need experts at every layer, or can periodic dense layers maintain quality?"
+- **V6-deep** — first half of layers use dense FFN, second half use MoE. Tests the hypothesis that early layers learn general representations (don't need specialization) while deeper layers benefit from expert routing.
 
 ### Architectural Component
 
@@ -247,6 +250,38 @@ An injected dependency in the Trainer that inspects grad_norm and loss after eac
 ### Fault Injection Test
 
 A test that deliberately introduces a failure mode — corrupted checkpoint (bit-flip), process kill mid-write, NaN injection into gradients, loss spike beyond threshold — and asserts that the recovery mechanism handles it correctly. These tests prove the fault-tolerance system works, not just that it exists.
+
+---
+
+## Mixture of Experts (MoE) Concepts
+
+### Mixture of Experts (MoE)
+
+A conditional computation architecture where each transformer block's FFN is replaced by N parallel expert FFNs and a learned router. Each token is processed by only the top-k experts (k << N), meaning total parameters are much larger than per-token active parameters. This project uses Mixtral-style MoE: 8 SwiGLU experts per MoE layer, top-2 routing per token.
+
+### Router
+
+A small linear projection `nn.Linear(d_model, num_experts, bias=False)` that produces per-token expert affinity scores. The softmax over these scores determines which experts process each token and with what weight. The router is the only component that "decides" — experts themselves are standard SwiGLU FFNs.
+
+### Active Parameters
+
+The number of parameters used to process a single token. In MoE, this is: shared parameters (embeddings, attention, norms) + top-k expert FFNs. For fair comparison with dense models, active parameters must match — not total parameters.
+
+### Load-Balancing Auxiliary Loss
+
+A regularization term `α * Σ(f_i * P_i)` added to the training loss to prevent expert collapse (all tokens routing to the same few experts). `f_i` = fraction of tokens assigned to expert i in a batch, `P_i` = mean router probability for expert i. Coefficient α is typically 0.01.
+
+### Z-Loss
+
+A stabilization term `β * mean(log(Σ exp(router_logits))²)` that prevents router logits from growing unboundedly large, which could cause numerical instability. Coefficient β is typically 0.001.
+
+### Expert Collapse
+
+A failure mode where the router converges to sending all/most tokens to 1-2 experts, leaving the rest untrained. Load-balancing aux loss prevents this. Detectable via the expert utilization histogram: healthy routing shows near-uniform distribution.
+
+### Routing Data
+
+Per-token routing decisions captured during evaluation: which experts were selected, with what weights, at each layer. Stored in an internal buffer when `record_routing=True` is set, then exposed via `model.get_routing_data()` for post-hoc analysis by MoE-specific probes.
 
 ---
 

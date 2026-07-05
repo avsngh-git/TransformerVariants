@@ -1,0 +1,44 @@
+# V6-deep: Mixture of Experts (second half MoE)
+# Mixtral-style 8 experts with top-2 routing per token.
+# Layers with index >= n_layer // 2 use MoE, first half uses dense SwiGLU.
+# Research question: Does concentrating MoE in deeper layers improve specialization?
+
+model:
+  variant: moe_deep
+  variant_id: V6-deep
+  norm_type: rmsnorm
+  position_encoding: rope
+  ffn_type: swiglu
+  attention_type: flash_sdpa
+  attention_backend: sdpa
+
+  num_experts: 8
+  moe_top_k: 2
+  aux_loss_alpha: 0.01
+  z_loss_beta: 0.001
+
+  vocab_size: 50257
+  dropout: 0.0
+  bias: false
+  tie_embeddings: true
+
+  # Per-layer MoE placement: second half of layers
+  moe_layers: deep
+
+  debug:
+    n_layer: 4
+    d_model: 256
+    n_head: 4
+    seq_len: 512
+
+  main:
+    n_layer: 8
+    d_model: 512
+    n_head: 8
+    seq_len: 1024
+
+  stretch:
+    n_layer: 12
+    d_model: 768
+    n_head: 12
+    seq_len: 1024

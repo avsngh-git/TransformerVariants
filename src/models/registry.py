@@ -73,6 +73,15 @@ def _swa_interleaved_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
     return config
 
 
+def _moe_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
+    """MoE: set num_experts and routing hyperparameters on base config."""
+    config.num_experts = 8
+    config.moe_top_k = 2
+    config.aux_loss_alpha = 0.01
+    config.z_loss_beta = 0.001
+    return config
+
+
 # --- Per-layer config builders ---
 
 
@@ -81,6 +90,26 @@ def _swa_interleaved_per_layer(config: ModelConfig, dims: dict) -> list[ModelCon
     window_size = dims["seq_len"] // 4
     return [
         replace(config, window_size=None if i % 2 == 0 else window_size)
+        for i in range(dims["n_layer"])
+    ]
+
+
+def _moe_interleaved_per_layer(config: ModelConfig, dims: dict) -> list[ModelConfig]:
+    """Odd layers get MoE, even layers stay dense."""
+    return [
+        replace(config, num_experts=8 if i % 2 == 1 else None)
+        for i in range(dims["n_layer"])
+    ]
+
+
+def _moe_deep_per_layer(config: ModelConfig, dims: dict) -> list[ModelConfig]:
+    """Second half of layers get MoE, first half dense.
+
+    If n_layer is odd, the extra middle layer goes to the dense half.
+    """
+    split = dims["n_layer"] // 2  # dense layers: [0, split), MoE: [split, n_layer)
+    return [
+        replace(config, num_experts=8 if i >= split else None)
         for i in range(dims["n_layer"])
     ]
 
@@ -213,6 +242,44 @@ VARIANTS: dict[str, VariantSpec] = {
         requires_bf16=False,
         config_overrides=_linear_overrides,
     ),
+    "moe": VariantSpec(
+        model_class=ModernTransformer,
+        variant="moe",
+        norm_type="rmsnorm",
+        position_encoding="rope",
+        ffn_type="swiglu",
+        attention_type="flash_sdpa",
+        attention_class=ModernAttention,
+        default_activation="swiglu",
+        requires_bf16=False,
+        config_overrides=_moe_overrides,
+    ),
+    "moe_interleaved": VariantSpec(
+        model_class=ModernTransformer,
+        variant="moe_interleaved",
+        norm_type="rmsnorm",
+        position_encoding="rope",
+        ffn_type="swiglu",
+        attention_type="flash_sdpa",
+        attention_class=ModernAttention,
+        default_activation="swiglu",
+        requires_bf16=False,
+        config_overrides=_moe_overrides,
+        per_layer_config_builder=_moe_interleaved_per_layer,
+    ),
+    "moe_deep": VariantSpec(
+        model_class=ModernTransformer,
+        variant="moe_deep",
+        norm_type="rmsnorm",
+        position_encoding="rope",
+        ffn_type="swiglu",
+        attention_type="flash_sdpa",
+        attention_class=ModernAttention,
+        default_activation="swiglu",
+        requires_bf16=False,
+        config_overrides=_moe_overrides,
+        per_layer_config_builder=_moe_deep_per_layer,
+    ),
 }
 
 
@@ -314,6 +381,10 @@ def build(
 
     # torch.compile for kernel fusion and speedup
     if compile_model:
-        model = torch.compile(model)
+        moe_variants = {"moe", "moe_interleaved", "moe_deep"}
+        if variant_name in moe_variants:
+            pass  # Skip compile for MoE (dynamic routing conflicts with tracing)
+        else:
+            model = torch.compile(model)
 
     return model, config

@@ -55,7 +55,13 @@ class ModernTransformerBlock(nn.Module):
         self.ln1 = RMSNorm(config.d_model)
         self.attn = attention_class(config)
         self.ln2 = RMSNorm(config.d_model)
-        self.ffn = SwiGLUFeedForward(config)
+
+        # Config-driven FFN selection
+        if config.num_experts is not None:
+            from src.models.moe_ffn import MoEFeedForward
+            self.ffn = MoEFeedForward(config)
+        else:
+            self.ffn = SwiGLUFeedForward(config)
 
     def forward(
         self,
@@ -159,6 +165,35 @@ class ModernTransformer(nn.Module):
                 nn.init.normal_(module.weight, mean=0.0, std=init_std)
             elif isinstance(module, RMSNorm):
                 nn.init.ones_(module.weight)
+
+    def get_aux_loss(self) -> torch.Tensor:
+        """Sum auxiliary losses across all MoE layers and clear buffers.
+
+        Returns:
+            Scalar tensor on model device. Zero for dense models.
+        """
+        total = torch.tensor(0.0, device=self.tok_emb.weight.device)
+        for block in self.blocks:
+            if hasattr(block.ffn, 'get_aux_loss'):
+                layer_loss = block.ffn.get_aux_loss()
+                if layer_loss is not None:
+                    total = total + layer_loss
+        return total
+
+    def get_routing_data(self) -> dict[int, list[tuple[torch.Tensor, torch.Tensor]]]:
+        """Retrieve and clear routing data from all MoE layers.
+
+        Returns:
+            Dict mapping layer index to list of (expert_indices, expert_weights).
+            Empty dict if no MoE layers or no data recorded.
+        """
+        data = {}
+        for i, block in enumerate(self.blocks):
+            if hasattr(block.ffn, 'get_routing_data'):
+                layer_data = block.ffn.get_routing_data()
+                if layer_data:
+                    data[i] = layer_data
+        return data
 
     def forward(
         self,

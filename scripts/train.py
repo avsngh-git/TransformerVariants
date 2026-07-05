@@ -57,6 +57,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint_dir", type=str, default=None,
                         help="Override checkpoint dir. Default auto-generates from variant+scale.")
 
+    # Seed
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility (default: 42)")
+
     # Resume
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume from")
@@ -66,6 +70,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    # Set random seed for reproducibility
+    from src.utils.seed import set_seed
+    set_seed(args.seed)
 
     # Build model (registry handles activation override, dtype casting, compile)
     model, model_config = registry_build(
