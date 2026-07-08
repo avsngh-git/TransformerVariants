@@ -104,6 +104,21 @@ for variant in $ALL_VARIANTS; do
     echo "    Checkpoint: $CKPT_DIR"
     echo "    Started: $(date)"
 
+    # Check if this run already completed (final checkpoint exists at max_steps)
+    FINAL_CKPT="$CKPT_DIR/checkpoint_step_$(printf '%06d' $MAX_STEPS).pt"
+    if [ -f "$FINAL_CKPT" ]; then
+      echo "    SKIPPING: Already completed ($FINAL_CKPT found)"
+      echo ""
+      continue
+    fi
+
+    # Check if we can resume from a partial run
+    RESUME_FLAG=""
+    if [ -f "$CKPT_DIR/checkpoint_latest.pt" ]; then
+      echo "    RESUMING from $CKPT_DIR/checkpoint_latest.pt"
+      RESUME_FLAG="--resume $CKPT_DIR/checkpoint_latest.pt"
+    fi
+
     conda run -n $CONDA_ENV python $TRAIN_SCRIPT \
       --variant $variant \
       --scale main \
@@ -120,7 +135,8 @@ for variant in $ALL_VARIANTS; do
       --log_interval $LOG_INTERVAL \
       --checkpoint_dir $CKPT_DIR \
       $COMPILE_FLAG \
-      $ACTIVATION_FLAG
+      $ACTIVATION_FLAG \
+      $RESUME_FLAG
 
     echo "    Finished: $(date)"
     echo ""

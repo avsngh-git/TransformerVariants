@@ -1343,6 +1343,88 @@ out = self.w_down(hidden)       # write update back to residual stream
 ReLU is a hard one-path feature detector; GELU and SiLU are smoother one-path gates; SwiGLU is a two-path gated FFN that separates candidate content from context-dependent permission, at the cost of another projection and more activation memory.
 \end{connectionbox}
 
+\subsection{Mixture of Experts: conditional computation via sparse routing}
+\label{sec:moe}
+
+\subsubsection{Baseline role: single dense FFN}
+
+In V0 and V1, every token passes through the same FFN in each layer. The FFN's total parameter count equals its per-token active parameter count: all weights participate in processing every token.
+
+\subsubsection{Limitation and design pressure}
+
+Scaling model capacity by widening the FFN is expensive: doubling $d_h$ doubles per-token FLOPs. The constraint is: increase representational capacity (total parameters) without proportionally increasing per-token compute (active parameters). This is the conditional computation hypothesis: not all tokens need the same features, so different subsets of parameters can specialize.
+
+\subsubsection{Replacement mechanism: top-$k$ expert routing}
+
+A Mixture of Experts (MoE) layer replaces the single dense FFN with $N$ parallel expert FFNs and a learned router. Each token is processed by only the top-$k$ experts (with $k \ll N$):
+
+\begin{definition}[MoE Feed-Forward Layer]
+Given input $\vx \in \reals^{\dmodel}$, define:
+\begin{align}
+    \text{Router scores: } & \bm{p} = \softmax(\mW_r \vx), \quad \mW_r \in \reals^{N \times \dmodel}, \label{eq:moe_router} \\
+    \text{Expert selection: } & \mathcal{T} = \mathrm{top\text{-}k}(\bm{p}), \quad |\mathcal{T}| = k, \label{eq:moe_topk} \\
+    \text{Renormalized weights: } & \tilde{p}_i = \frac{p_i}{\sum_{j \in \mathcal{T}} p_j}, \quad i \in \mathcal{T}, \label{eq:moe_renorm} \\
+    \text{MoE output: } & \mathrm{MoE}(\vx) = \sum_{i \in \mathcal{T}} \tilde{p}_i \cdot \mathrm{Expert}_i(\vx). \label{eq:moe_output}
+\end{align}
+Each $\mathrm{Expert}_i$ is an independent SwiGLU FFN with its own parameters $(\mW^{(i)}_{\mathrm{gate}}, \mW^{(i)}_{\mathrm{up}}, \mW^{(i)}_{\mathrm{down}})$.
+\end{definition}
+
+In this project (V6), $N=8$ experts with $k=2$ (Mixtral-style). The attention, normalization, embeddings, and output head remain identical to V1.
+
+\subsubsection{Load-balancing auxiliary loss}
+
+Without regularization, the router can collapse to sending all tokens to one or two experts (expert collapse). A load-balancing loss penalizes uneven routing:
+\begin{equation}\label{eq:aux_loss}
+    \loss_{\mathrm{aux}} = \alpha \cdot N \cdot \sum_{i=1}^{N} f_i \cdot P_i,
+\end{equation}
+where $f_i$ is the fraction of tokens routed to expert $i$ in a batch and $P_i = \frac{1}{BT}\sum_{b,t} p_{b,t,i}$ is the mean router probability for expert $i$. When routing is uniform, $f_i = P_i = 1/N$, and the loss equals $\alpha$.
+
+A z-loss stabilizes router logit magnitudes:
+\begin{equation}\label{eq:z_loss}
+    \loss_z = \beta \cdot \frac{1}{BT}\sum_{b,t}\left(\log\sum_{i=1}^{N}\exp(z_{b,t,i})\right)^2,
+\end{equation}
+where $z_{b,t,i}$ are the raw router logits before softmax. The total training loss is $\loss_{\mathrm{CE}} + \loss_{\mathrm{aux}} + \loss_z$.
+
+\begin{intuitionbox}[Why the product $f_i \cdot P_i$]
+The product couples two quantities: $f_i$ reflects where tokens actually went (a non-differentiable hard assignment), and $P_i$ reflects what the router \emph{wanted} to do (a differentiable soft probability). The gradient of $\loss_{\mathrm{aux}}$ flows through $P_i$, nudging the router to spread probability mass toward underused experts. The multiplicative form penalizes the joint event ``expert $i$ already gets many tokens \emph{and} the router keeps assigning high probability to it.''
+\end{intuitionbox}
+
+\subsubsection{Active versus total parameters}
+
+\begin{definition}[Active Parameters]
+The parameters that participate in processing a single token:
+\begin{equation}
+    \text{Active} = \underbrace{\text{embed} + \text{attention} + \text{norms} + \text{head}}_{\text{shared}} + k \cdot (\text{params per expert}) \cdot L_{\mathrm{MoE}} + (\text{dense FFN params}) \cdot L_{\mathrm{dense}},
+\end{equation}
+where $L_{\mathrm{MoE}}$ is the number of MoE layers and $L_{\mathrm{dense}}$ is the number of dense layers.
+\end{definition}
+
+For fair comparison with V1, V6 matches active parameters ($\approx 51$M at main scale). Total parameters are $\approx 170$M because all $N$ experts are materialized. The ratio $\text{Total}/\text{Active} \approx N/k$ when the FFN dominates parameter count.
+
+\subsubsection{Sub-variants: where to place MoE layers}
+
+Three layer placement strategies explore different MoE density:
+\begin{itemize}[nosep]
+    \item \textbf{V6-full}: all $\nlayer$ layers use MoE. Total params $\approx N/k$ times V1.
+    \item \textbf{V6-interleaved}: odd-indexed layers use MoE, even-indexed layers use dense SwiGLU. Half the expert parameters of V6-full.
+    \item \textbf{V6-deep}: layers with index $\geq \nlayer/2$ use MoE, earlier layers use dense. Tests the hypothesis that early layers learn general representations while deeper layers benefit from specialization.
+\end{itemize}
+
+\subsubsection{New trade-off}
+
+\begin{tradeoffbox}[MoE costs]
+\begin{enumerate}[nosep]
+    \item \textbf{Memory:} all $N$ expert weights reside in memory even though only $k$ are active per token.
+    \item \textbf{Load imbalance:} requires auxiliary loss tuning ($\alpha, \beta$). Too much regularization degrades quality; too little leads to expert collapse.
+    \item \textbf{Expert redundancy risk:} with limited data, experts may converge to similar functions, negating the capacity benefit.
+    \item \textbf{Non-uniform computation:} different tokens activate different parameters, complicating FLOP accounting and hardware utilization analysis.
+\end{enumerate}
+\end{tradeoffbox}
+
+\begin{motivationbox}[Why MoE is in the project]
+MoE demonstrates a fundamentally different scaling strategy: increase capacity without increasing per-token compute. The comparison answers: ``For a fixed per-token FLOP budget, does conditional expert routing improve next-token prediction over a single dense FFN?'' This is orthogonal to the attention-mechanism comparisons (V2--V5).
+\end{motivationbox}
+
 
 % =============================================================================
 \section{Autoregressive Generation and Decoding}
@@ -1897,6 +1979,21 @@ Ilya Loshchilov and Frank Hutter.
 Ofir Press and Lior Wolf.
 \newblock Using the Output Embedding to Improve Language Models.
 \newblock \emph{EACL}, 2017.
+
+\bibitem{fedus2022switch}
+William Fedus, Barret Zoph, and Noam Shazeer.
+\newblock Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity.
+\newblock \emph{JMLR}, 2022.
+
+\bibitem{jiang2024mixtral}
+Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, et al.
+\newblock Mixtral of Experts.
+\newblock arXiv:2401.04088, 2024.
+
+\bibitem{zoph2022stmoe}
+Barret Zoph, Irwan Bello, Sameer Kumar, Nan Du, Yanping Huang, Jeff Dean, Noam Shazeer, and William Fedus.
+\newblock ST-MoE: Designing Stable and Transferable Sparse Expert Models.
+\newblock arXiv:2202.08906, 2022.
 
 \bibitem{holtzman2019nucleus}
 Ari Holtzman, Jan Buys, Li Du, Maxwell Forbes, and Yejin Choi.
