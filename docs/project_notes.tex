@@ -1020,7 +1020,7 @@ Depending on hardware, dtype, tensor layout, and PyTorch version, this dispatche
 
 \subsection{What the FFN does inside a Transformer block}
 
-Attention answers a routing question: which earlier tokens should the current token read from? The feed-forward network answers a different question: after attention has gathered context, which new nonlinear features should be written back into the current token representation?
+Attention answers a routing question: which earlier tokens should the current token read from? The feed-forward network answers a different question: after attention has gathered context, what kind of non-linear transformed update is needed to and get us closer to the real function that we are approximating?
 
 For a batch of hidden states $\mX\in\reals^{B\times T\times \dmodel}$, the FFN is applied independently at every position:
 \begin{equation}
