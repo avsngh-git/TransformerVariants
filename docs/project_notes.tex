@@ -131,6 +131,8 @@
 \newcommand{\mV}{\bm{V}}
 \newcommand{\mA}{\bm{A}}
 \newcommand{\mR}{\bm{R}}
+\newcommand{\mS}{\bm{S}}
+\newcommand{\mC}{\bm{C}}
 \newcommand{\mI}{\bm{I}}
 \newcommand{\mM}{\bm{M}}
 \newcommand{\mX}{\bm{X}}
@@ -159,6 +161,7 @@
 \DeclareMathOperator{\ReLU}{ReLU}
 \DeclareMathOperator{\GELU}{GELU}
 \DeclareMathOperator{\SiLU}{SiLU}
+\DeclareMathOperator{\ELU}{ELU}
 \DeclareMathOperator{\RMS}{RMS}
 \DeclareMathOperator{\diag}{diag}
 \DeclareMathOperator{\KL}{KL}
@@ -186,8 +189,8 @@
 % -----------------------------------------------------------------------------
 % Title
 % -----------------------------------------------------------------------------
-\title{\textbf{Transformer Variant Lab: Explained, Motivation-First, and Deduplicated Notes}\\[0.5em]
-\large Decoder-Only Transformers from GPT-2 Style V0 to LLaMA-Style V1: Examples, Motivations, and Future-Variant Slots}
+\title{\textbf{Transformer Variant Lab: Detailed Learning Notes}\\[0.5em]
+\large Mathematical, Statistical, and Systems Concepts Across Decoder-Only Variants V0--V6}
 \author{Project Notes -- Mathematical Statistics and Machine Learning Level}
 \date{\today}
 
@@ -200,10 +203,15 @@
 \section{Introduction and Organization}
 % =============================================================================
 
-This document explains two decoder-only Transformer variants implemented in the project. It keeps the important topics from the original notes, but each topic has one home section: definitions, motivations, examples, implementation notes, and trade-offs are placed together rather than repeated in multiple places:
+This document explains the mathematical, statistical, and computational concepts used across the decoder-only Transformer variants implemented in the project. It deliberately avoids code-level and API-level detail. Each concept has one home section containing its definition, motivation, mechanism, worked intuition, equations, and trade-offs:
 \begin{itemize}
-    \item \textbf{V0 (Vanilla):} a GPT-2-style decoder-only Transformer with learned absolute position embeddings, LayerNorm, standard multi-head self-attention, and a ReLU or GELU feed-forward network.
-    \item \textbf{V1 (Modern):} a LLaMA-style decoder-only Transformer using Rotary Position Embeddings (RoPE), RMSNorm, SwiGLU feed-forward layers, and FlashAttention-style scaled dot-product attention kernels.
+    \item \textbf{V0 (Vanilla):} GPT-2-style decoder with learned absolute positions, LayerNorm, multi-head attention, and a ReLU/GELU FFN.
+    \item \textbf{V1 (Modern):} RoPE, RMSNorm, SwiGLU, and memory-efficient exact attention.
+    \item \textbf{V2 (ALiBi):} replaces rotary position geometry with head-specific linear distance biases.
+    \item \textbf{V3 (GQA):} reduces the number of key/value heads while retaining many query heads.
+    \item \textbf{V4 (SWA):} restricts selected attention layers to a local causal window; an interleaved sub-variant alternates local and global layers.
+    \item \textbf{V5 (Linear attention):} replaces the softmax similarity kernel with a positive feature map that admits a recurrent prefix summary.
+    \item \textbf{V6 (MoE):} replaces dense FFNs with sparsely routed expert FFNs so total capacity can grow faster than per-token computation.
 \end{itemize}
 
 The goal is to explain the \emph{reasoning chain} behind the architectural shifts, not merely to list them. The notes therefore use the same pattern inside each component family:
@@ -225,11 +233,11 @@ A previous draft repeated the same explanations in a component-shift section, a 
     \item residual stream and block equations: \cref{sec:block-residual};
     \item statistical objective: \cref{sec:statistical-objective};
     \item normalization and residual stability: \cref{sec:normalization};
-    \item attention, positions, RoPE, and FlashAttention: \cref{sec:attention-position};
-    \item ReLU/GELU/SiLU and SwiGLU: \cref{sec:ffn};
+    \item attention, GQA, RoPE, ALiBi, FlashAttention, sliding windows, linear attention, and attention entropy: \cref{sec:attention-position};
+    \item ReLU/GELU/SiLU, SwiGLU, and sparse mixture-of-experts layers: \cref{sec:ffn};
     \item KV-cache and decoding: \cref{sec:generation};
     \item bias, dropout, and weight tying: \cref{sec:simplifications};
-    \item optimization, precision, and evaluation: \cref{sec:training-eval}.
+    \item optimization, precision, fair comparison, hardware efficiency, and representation diagnostics: \cref{sec:training-eval}.
 \end{itemize}
 Later sections may refer back to these topics, but they do not re-explain them.
 \end{motivationbox}
@@ -239,9 +247,10 @@ Later sections may refer back to these topics, but they do not re-explain them.
 Throughout, we use the following conventions:
 \begin{itemize}[nosep]
     \item $B$ is batch size, $T$ is sequence length, and $\dmodel$ is the residual-stream width.
-    \item $\nhead$ is the number of attention heads, and $\dhead=\dmodel/\nhead$ is the dimension per head.
-    \item $\dff$ is the standard FFN hidden dimension, and $d_h$ is the SwiGLU hidden dimension.
-    \item $\nlayer$ is the number of Transformer blocks.
+    \item $\nhead$ is the number of query heads, $\dhead=\dmodel/\nhead$ is the dimension per head, and $n_{\mathrm{kv}}$ is the number of key/value heads in GQA.
+    \item $\dff$ is the standard FFN hidden dimension, and $d_h$ is the SwiGLU or expert hidden dimension.
+    \item $\nlayer$ is the number of Transformer blocks, $W$ is a sliding-window length, and $r$ denotes a linear-attention feature dimension when it differs from $\dhead$.
+    \item $N_{\mathrm{exp}}$ is the number of MoE experts and $k$ is the number selected for one token.
     \item $\mathcal{V}$ is the vocabulary, and $\vocab$ is its size.
     \item Bold lowercase symbols such as $\vx,\vq,\vk$ denote vectors. Bold uppercase symbols such as $\mW,\mQ,\mK$ denote matrices or tensors.
     \item $\odot$ denotes element-wise multiplication, and $\sigma(x)=(1+e^{-x})^{-1}$ is the logistic sigmoid.
@@ -823,6 +832,107 @@ Multiple heads let the model learn different retrieval patterns in parallel. The
 \label{fig:multihead}
 \end{figure}
 
+\subsection{Grouped-query attention: many queries, fewer key/value memories}
+\label{sec:gqa}
+
+\subsubsection{Baseline role and design pressure}
+
+In standard multi-head attention (MHA), each of the $\nhead$ heads has its own query, key, and value representation. This gives every head maximum freedom, but it also stores $\nhead$ key vectors and $\nhead$ value vectors for every cached token. During long-context generation, those K/V tensors can dominate memory traffic and limit the number of sequences that fit on the GPU.
+
+The design pressure is asymmetric: query heads benefit from diversity because they represent different questions asked about the context, while key and value representations can often be shared by several query heads. Grouped-query attention (GQA) keeps $\nhead$ query heads but uses only $n_{\mathrm{kv}}$ key/value heads, where
+\begin{equation}
+    1 \leq n_{\mathrm{kv}} \leq \nhead,
+    \qquad
+    g=\frac{\nhead}{n_{\mathrm{kv}}}
+\end{equation}
+when the heads divide evenly. Here $g$ is the number of query heads served by one K/V head \cite{ainslie2023gqa}.
+
+\subsubsection{Mechanism and tensor shapes}
+
+The projections have shapes
+\begin{align}
+    \mQ &\in \reals^{B\times\nhead\times T\times\dhead},\\
+    \mK,\mV &\in \reals^{B\times n_{\mathrm{kv}}\times T\times\dhead}.
+\end{align}
+For query head $h\in\{0,\ldots,\nhead-1\}$, define its K/V group
+\begin{equation}
+    c(h)=\left\lfloor\frac{h}{g}\right\rfloor.
+\end{equation}
+Then
+\begin{equation}\label{eq:gqa-head}
+    \mathrm{head}_h
+    =\softmax\!\left(
+      \frac{\mQ^{(h)}(\mK^{(c(h))})^\top}{\sqrt{\dhead}}
+    \right)\mV^{(c(h))}.
+\end{equation}
+The symbols have the following roles: $h$ identifies a query head, $c(h)$ identifies the shared K/V head used by that query, and $g$ is the number of query heads in each group.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 8mm]
+    \node[smallblock] (q1) {query 1};
+    \node[smallblock, below=of q1] (q2) {query 2};
+    \node[smallblock, below=of q2] (q3) {query 3};
+    \node[smallblock, below=of q3] (q4) {query 4};
+    \node[block, right=20mm of q2, yshift=-3mm, fill=green!8] (kv1) {shared K/V\\head 1};
+    \node[smallblock, right=35mm of q1] (q5) {query 5};
+    \node[smallblock, below=of q5] (q6) {query 6};
+    \node[smallblock, below=of q6] (q7) {query 7};
+    \node[smallblock, below=of q7] (q8) {query 8};
+    \node[block, right=20mm of q6, yshift=-3mm, fill=green!8] (kv2) {shared K/V\\head 2};
+    \foreach \q in {q1,q2,q3,q4}{\draw[arrow] (\q.east) -- (kv1.west);}
+    \foreach \q in {q5,q6,q7,q8}{\draw[arrow] (\q.east) -- (kv2.west);}
+    \node[note, below=8mm of kv1, xshift=23mm, text width=10cm] {Eight query heads retain eight different retrieval questions, while only two K/V memories are stored. This is GQA with group size $g=4$.};
+\end{tikzpicture}
+\caption{Grouped-query attention. Several query heads share one key/value head, reducing K/V parameters and cache memory while preserving query diversity.}
+\label{fig:gqa-groups}
+\end{figure}
+
+\begin{intuitionbox}[Library analogy]
+Imagine several researchers using the same library catalogue. Each researcher asks a different question, so the queries remain separate. The catalogue and books, however, need not be duplicated for every researcher. Sharing K/V heads is analogous to sharing the catalogue and collection while retaining different search questions.
+\end{intuitionbox}
+
+\subsubsection{Parameter and cache savings}
+
+Ignoring biases, the MHA Q/K/V projections contain
+\begin{equation}
+    3\dmodel^2
+\end{equation}
+parameters because $\nhead\dhead=\dmodel$. GQA contains
+\begin{equation}\label{eq:gqa-qkv-params}
+    \underbrace{\dmodel^2}_{Q}
+    +\underbrace{2\dmodel(n_{\mathrm{kv}}\dhead)}_{K,V}
+    =\dmodel^2\left(1+2\frac{n_{\mathrm{kv}}}{\nhead}\right).
+\end{equation}
+The output projection still contributes $\dmodel^2$. The model-wide percentage reduction depends on how much of the model is attention rather than embeddings or FFNs, so it should be computed rather than assumed.
+
+The K/V cache becomes
+\begin{equation}\label{eq:gqa-cache}
+    2\nlayer B n_{\mathrm{kv}}T\dhead s
+\end{equation}
+bytes, where $s$ is bytes per scalar. Relative to MHA, the cache reduction factor is
+\begin{equation}
+    \frac{\nhead}{n_{\mathrm{kv}}}=g.
+\end{equation}
+For example, $\nhead=8$ and $n_{\mathrm{kv}}=2$ reduce K/V cache memory by a factor of four.
+
+\subsubsection{Spectrum and trade-off}
+
+\begin{center}
+\begin{tabular}{lcl}
+\toprule
+Mechanism & Number of K/V heads & Interpretation\\
+\midrule
+MHA & $n_{\mathrm{kv}}=\nhead$ & no sharing\\
+GQA & $1<n_{\mathrm{kv}}<\nhead$ & sharing within groups\\
+MQA & $n_{\mathrm{kv}}=1$ & all queries share one K/V head\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Reducing $n_{\mathrm{kv}}$ improves cache efficiency but constrains representation: query heads in one group cannot learn independent K/V coordinate systems. GQA is therefore an interpolation between MHA quality and MQA serving efficiency, not a free optimization. RoPE remains valid: all query heads are rotated, and each shared key head is rotated once at its position before being used by the associated query group.
+
+
 \subsection{Component shift: learned absolute positions to RoPE}
 
 \subsubsection{Baseline role: learned absolute positions}
@@ -942,6 +1052,91 @@ RoPE introduces no learned position parameters and gives relative-offset structu
 A fixed Q/K bias added before RoPE would be rotated by position, creating a position-dependent offset unrelated to token content. This is one reason RoPE-style models often remove Q/K biases. The detailed bias discussion appears once in \cref{sec:simplifications}.
 \end{connectionbox}
 
+
+
+\subsection{Alternative position mechanism: ALiBi}
+\label{sec:alibi}
+
+\subsubsection{Motivation: encode a distance prior directly in the logits}
+
+RoPE modifies query and key geometry. Attention with Linear Biases (ALiBi) takes a simpler route: Q and K remain content projections, and position enters as an additive distance penalty in the attention logits \cite{press2022alibi}. This cleanly separates two terms:
+\begin{equation}
+    \underbrace{\frac{\vq_i^\top\vk_j}{\sqrt{\dhead}}}_{\text{content compatibility}}
+    \quad+\quad
+    \underbrace{b_{ij}^{(h)}}_{\text{distance prior}}.
+\end{equation}
+
+For a causal head $h$ and an allowed key position $j\leq i$,
+\begin{equation}\label{eq:alibi-logit}
+    A_{ij}^{(h)}
+    =\frac{(\vq_i^{(h)})^\top\vk_j^{(h)}}{\sqrt{\dhead}}
+    -m_h(i-j),
+\end{equation}
+where $i-j\geq0$ is the backward distance and $m_h>0$ is a fixed head-specific slope. Future positions $j>i$ are still assigned $-\infty$ by the causal mask.
+
+\begin{motivationbox}[Why subtract distance?]
+Language often has a recency bias: nearby words are more likely to resolve local syntax, agreement, and short references. ALiBi supplies this bias before learning. Content similarity can still overcome it: a distant token with a sufficiently large Q/K match can receive high attention, but it must compensate for the distance penalty.
+\end{motivationbox}
+
+\subsubsection{Head-specific horizons}
+
+Different slopes produce different attention horizons. A large $m_h$ heavily penalizes distance and creates a local head. A small $m_h$ creates a broader head. For powers-of-two head counts, the original construction can be written
+\begin{equation}\label{eq:alibi-slopes}
+    m_h=2^{-8(h+1)/\nhead},
+    \qquad h=0,\ldots,\nhead-1,
+\end{equation}
+up to the chosen ordering of heads. Non-powers-of-two use an interleaving construction rather than applying \cref{eq:alibi-slopes} blindly.
+
+The penalty changes relative odds in a particularly transparent way. For two keys $j_1$ and $j_2$ with equal content logits,
+\begin{equation}
+    \frac{\alpha_{ij_1}^{(h)}}{\alpha_{ij_2}^{(h)}}
+    =\exp\!\left[-m_h\bigl((i-j_1)-(i-j_2)\bigr)\right].
+\end{equation}
+Thus every extra token of distance multiplies the odds by $e^{-m_h}$ when content evidence is equal.
+
+\begin{example}[Numerical attention horizon]
+Suppose two past tokens have identical content scores and one is ten positions farther away. For $m_h=0.5$, the farther token's unnormalized weight is multiplied by $e^{-5}\approx0.0067$ relative to the nearer token. For $m_h=0.02$, the factor is $e^{-0.2}\approx0.82$. The first head is strongly local; the second remains receptive to distant evidence.
+\end{example}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=0.75cm,y=0.62cm]
+    \draw[->, thick] (0,0) -- (10.7,0) node[right] {distance $d=i-j$};
+    \draw[->, thick] (0,-5.4) -- (0,0.7) node[above] {bias $-m_hd$};
+    \draw[very thick, blue!70!black] plot[domain=0:10] (\x,{-0.5*\x});
+    \draw[very thick, green!55!black] plot[domain=0:10] (\x,{-0.2*\x});
+    \draw[very thick, orange!80!black] plot[domain=0:10] (\x,{-0.05*\x});
+    \node[note, blue!70!black] at (7.5,-4.4) {steep: local};
+    \node[note, green!55!black] at (8.0,-2.2) {medium};
+    \node[note, orange!80!black] at (8.1,-0.75) {shallow: broad};
+\end{tikzpicture}
+\caption{ALiBi distance penalties. Different heads receive different fixed slopes, producing multiple recency scales without learned position parameters.}
+\label{fig:alibi-slopes}
+\end{figure}
+
+\subsubsection{Comparison with RoPE and extrapolation}
+
+\begin{center}
+\begin{tabular}{p{3.2cm}p{5.0cm}p{5.0cm}}
+\toprule
+Property & RoPE & ALiBi\\
+\midrule
+Where position enters & rotations of Q/K coordinates & additive attention-logit bias\\
+Relative structure & relative phase in dot products & monotone penalty in relative distance\\
+Expressive prior & multiple periodic frequencies & multiple linear recency slopes\\
+Cached keys & stored in position-rotated coordinates & stored as raw content projections\\
+Beyond training length & formula is defined, but phase distribution shifts & bias is defined, but quality still requires measurement\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+ALiBi was introduced specifically to improve length extrapolation relative to several position baselines. Nevertheless, ``defined for arbitrary distance'' is weaker than ``guaranteed to generalize.'' Longer sequences may still create unseen content patterns and probability calibration problems.
+
+\begin{warningbox}[Corrections to common misconceptions]
+RoPE rotations are mathematically invertible because $\mR_t^{-1}=\mR_t^\top$; cached rotated keys are not irreversibly destroyed. The practical distinction is that ALiBi does not require rotating or later unrotating them. Conversely, ALiBi is not more expressive merely because it is simpler: its position prior is monotone and linear, whereas RoPE provides a richer multi-frequency geometry.
+\end{warningbox}
+
+
 \subsection{Component shift: explicit attention matrix to FlashAttention-style kernels}
 
 \subsubsection{Baseline computation}
@@ -1001,16 +1196,273 @@ The partial weighted value sums are rescaled by the same factors, so the final r
 
 FlashAttention is a systems improvement, not a new statistical model. It reduces auxiliary memory and memory traffic, but it does not remove the $O(T^2\dhead)$ arithmetic cost of dense attention. It improves modeling results only indirectly when the saved memory or time is used for longer contexts, larger batches, or more training.
 
-In PyTorch, V1 can call the fused scaled dot-product attention interface:
-\begin{lstlisting}
-out = F.scaled_dot_product_attention(
-    q, k, v,
-    attn_mask=None,
-    dropout_p=dropout_p,
-    is_causal=True,
-)
-\end{lstlisting}
-Depending on hardware, dtype, tensor layout, and PyTorch version, this dispatches to a flash, memory-efficient, or math backend.
+
+\subsubsection{FlashAttention-2: the same exact function with better GPU work partitioning}
+
+FlashAttention-2 does not change \cref{eq:attention}; it improves how the tiled work is distributed on the GPU \cite{dao2023flashattention2}. The main ideas are:
+\begin{enumerate}[nosep]
+    \item reduce non-matrix-multiplication operations, which are relatively expensive on GPUs optimized for tensor-core matrix products;
+    \item parallelize across the sequence dimension when batch size or head count alone does not create enough independent thread blocks;
+    \item reduce communication and synchronization between warps inside a thread block.
+\end{enumerate}
+
+\begin{intuitionbox}[Kitchen analogy]
+FlashAttention-1 avoids carrying every intermediate dish to a distant warehouse. FlashAttention-2 keeps that good memory strategy but also reorganizes the kitchen staff: more teams can work on one long order, less time is spent handing ingredients between workers, and a larger fraction of time is spent on the high-throughput operation the hardware performs best.
+\end{intuitionbox}
+
+For a scientific comparison, the important conceptual rule is to separate \emph{model mathematics} from \emph{kernel efficiency}. If two variants use different kernel families, a wall-clock difference may reflect software dispatch rather than the architectural idea. Validation loss at a fixed token or FLOP budget remains a modeling comparison; elapsed time additionally measures the quality of the available implementation.
+
+
+
+
+
+\subsection{Sliding-window attention: a local causal inductive bias}
+\label{sec:swa}
+
+\subsubsection{Baseline limitation and design pressure}
+
+Full causal attention permits query $i$ to inspect every key $j\leq i$. This is maximally flexible, but the number of allowed query--key pairs grows quadratically:
+\begin{equation}
+    P_{\mathrm{full}}
+    =\sum_{i=1}^{T}i
+    =\frac{T(T+1)}{2}.
+\end{equation}
+Even an IO-efficient exact kernel must perform work for these pairs. Sliding-window attention (SWA) assumes that many transformations, especially in lower layers, can be learned from a local neighborhood \cite{jiang2023mistral}.
+
+\subsubsection{Windowed causal distribution}
+
+With window length $W$, query $i$ may attend only to
+\begin{equation}
+    \mathcal{J}_i
+    =\{j:\max(1,i-W+1)\leq j\leq i\}.
+\end{equation}
+The logits and probabilities are
+\begin{align}
+    A_{ij}
+    &=\begin{cases}
+       \vq_i^\top\vk_j/\sqrt{\dhead}, & j\in\mathcal{J}_i,\\
+       -\infty, & j\notin\mathcal{J}_i,
+      \end{cases}\\
+    \alpha_{ij}
+    &=\frac{\exp(A_{ij})}
+      {\sum_{u\in\mathcal{J}_i}\exp(A_{iu})},\\
+    \vo_i&=\sum_{j\in\mathcal{J}_i}\alpha_{ij}\vv_j.
+\end{align}
+Here $\mathcal{J}_i$ is the visible set, $\alpha_{ij}$ is a probability distribution over that set, and $\vo_i$ is the weighted value average.
+
+The number of allowed pairs is
+\begin{equation}\label{eq:swa-pairs}
+    P_{\mathrm{SWA}}
+    =\sum_{i=1}^{T}\min(i,W)
+    =TW-\frac{W(W-1)}{2}
+    \quad (W\leq T).
+\end{equation}
+For $T\gg W$, this is approximately $TW$ rather than $T^2/2$.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.78]
+    \fill[green!16] (0,0) -- (0,5) -- (1.5,5) -- (5,1.5) -- (5,0) -- cycle;
+    \fill[red!8] (1.5,5) -- (5,5) -- (5,1.5) -- cycle;
+    \draw[step=0.5cm, gray!55] (0,0) grid (5,5);
+    \draw[thick] (0,0) rectangle (5,5);
+    \draw[very thick, blue!70!black] (0,0) -- (5,5);
+    \draw[very thick, dashed, blue!70!black] (0,1.5) -- (3.5,5);
+    \node[note] at (1.25,2.4) {visible band};
+    \node[note] at (3.9,4.15) {too old or future};
+    \node[below] at (2.5,-0.35) {key position $j$};
+    \node[rotate=90] at (-0.45,2.5) {query position $i$};
+\end{tikzpicture}
+\caption{Banded causal mask for sliding-window attention. Each row keeps only the diagonal band containing the current token and its $W-1$ most recent predecessors.}
+\label{fig:swa-band}
+\end{figure}
+
+\subsubsection{How depth expands the receptive field}
+
+One local layer can move information backward by at most $W-1$ positions. After $L$ consecutive local layers, a path can span at most
+\begin{equation}\label{eq:swa-receptive}
+    D_L=L(W-1)
+\end{equation}
+positions, so the number of potentially influential positions is at most $1+D_L$, clipped by the available prefix length. This is a graph-reachability statement, not a guarantee that information is preserved perfectly. Each layer must compress and relay useful distant information through finite-dimensional residual vectors.
+
+\begin{example}[Message relay]
+With $W=4$, token 12 cannot directly read token 1 in one layer. It can read as far back as token 9. In a second layer, token 9's representation may already contain information from token 6; after enough layers, a chain of local updates can carry information from token 1 to token 12. This resembles passing a message along neighboring people: reach grows with the number of handoffs, but details may be lost at each handoff.
+\end{example}
+
+\subsubsection{Training--generation asymmetry in this project}
+
+A standard serving-oriented SWA design uses the same window at generation and can evict cache entries older than $W$, reducing cache memory to $O(W)$. The project intentionally tests a different hypothesis: local attention during training, but full cached attention during generation. This preserves the full cache and therefore gives no inference-memory saving.
+
+\begin{tradeoffbox}[Why the asymmetry is scientifically interesting but risky]
+Full attention at inference offers extra edges the model never used during training. Those distant logits may be poorly calibrated, so additional context can help, do nothing, or even distract. The experiment should compare local-at-train/local-at-test against local-at-train/global-at-test before interpreting any gain as a property of SWA itself.
+\end{tradeoffbox}
+
+\subsection{Interleaved local and global attention}
+\label{sec:interleaved-swa}
+
+Pure SWA makes every layer relay long-range information indirectly. Interleaving local and global layers asks whether occasional direct global access is enough. Let
+\begin{equation}
+    \mathcal{A}^{(\ell)}=\begin{cases}
+        \text{full causal attention}, & \ell\text{ even},\\
+        \text{windowed causal attention}, & \ell\text{ odd}.
+    \end{cases}
+\end{equation}
+This pattern is related to local--global interleaving used in Gemma 2 \cite{gemma2024}.
+
+If half the layers are global and half use window $W$, the allowed-pair count across $L$ layers is approximately
+\begin{equation}
+    P_{\mathrm{interleaved}}
+    =\frac{L}{2}P_{\mathrm{full}}
+     +\frac{L}{2}P_{\mathrm{SWA}}.
+\end{equation}
+The exact saving depends on causal triangular work and the kernel, but the conceptual compromise is clear: local layers spend less computation; global layers periodically restore direct access to the whole prefix.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 7mm]
+    \node[tensor] (x0) {input};
+    \node[block, right=of x0, fill=green!9] (g1) {global\\layer 1};
+    \node[block, right=of g1, fill=orange!10] (l2) {local\\layer 2};
+    \node[block, right=of l2, fill=green!9] (g3) {global\\layer 3};
+    \node[block, right=of g3, fill=orange!10] (l4) {local\\layer 4};
+    \node[tensor, right=of l4] (out) {output};
+    \draw[arrow] (x0)--(g1); \draw[arrow] (g1)--(l2); \draw[arrow] (l2)--(g3); \draw[arrow] (g3)--(l4); \draw[arrow] (l4)--(out);
+    \node[note, below=8mm of l2, xshift=20mm, text width=11cm] {Global layers retrieve distant information directly; local layers perform cheaper neighborhood processing between those retrieval stages.};
+\end{tikzpicture}
+\caption{Interleaved attention alternates global and local connectivity rather than imposing the same sparsity pattern at every depth.}
+\label{fig:interleaved-attn}
+\end{figure}
+
+A high-quality result would be evidence that direct global access is needed only periodically. A degradation would suggest either that more global layers are required or that long-range information must be available at particular depths, not merely somewhere in the stack.
+
+\subsection{Linear attention with a positive feature map}
+\label{sec:linear-attention}
+
+\subsubsection{From pairwise softmax to a prefix state}
+
+Softmax attention uses the kernel
+\begin{equation}
+    \kappa_{\mathrm{soft}}(\vq,\vk)
+    =\exp(\vq^\top\vk/\sqrt{\dhead}).
+\end{equation}
+The denominator for query $i$ depends on every previous key, so exact softmax attention naturally performs pairwise work. Linear attention replaces this kernel with an inner product of feature maps,
+\begin{equation}
+    \kappa(\vq,\vk)=\varphi(\vq)^\top\varphi(\vk),
+\end{equation}
+where $\varphi:\reals^{\dhead}\to\reals^r$ and $r$ is the feature dimension \cite{katharopoulos2020linear}. This defines a different attention family unless $\varphi$ is specifically constructed as an approximation to the exponential kernel.
+
+For causal attention,
+\begin{equation}\label{eq:linear-attn-sum}
+    \vo_i=
+    \frac{\sum_{j\leq i}\varphi(\vq_i)^\top\varphi(\vk_j)\vv_j}
+         {\sum_{j\leq i}\varphi(\vq_i)^\top\varphi(\vk_j)}.
+\end{equation}
+Associativity allows the query-dependent vector to be moved outside the prefix sums. Define
+\begin{align}
+    \mS_i&=\sum_{j=1}^{i}\varphi(\vk_j)\vv_j^\top
+          =\mS_{i-1}+\varphi(\vk_i)\vv_i^\top,
+          &\mS_i&\in\reals^{r\times d_v},\\
+    \vz_i&=\sum_{j=1}^{i}\varphi(\vk_j)
+          =\vz_{i-1}+\varphi(\vk_i),
+          &\vz_i&\in\reals^{r}.
+\end{align}
+Then
+\begin{equation}\label{eq:linear-attn-recurrence}
+    \vo_i=
+    \frac{\varphi(\vq_i)^\top\mS_i}
+         {\varphi(\vq_i)^\top\vz_i+\varepsilon}.
+\end{equation}
+Here $\mS_i$ is a matrix-valued content summary, $\vz_i$ normalizes total similarity mass, $d_v$ is value dimension, and $\varepsilon>0$ protects finite-precision division.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.82, transform shape, node distance=6mm and 6mm]
+    \node[tensor] (state0) {state\\$(\mS_{i-1},\vz_{i-1})$};
+    \node[data, below=of state0] (kv) {new $\vk_i,\vv_i$};
+    \node[block, right=of state0, yshift=-5mm] (update) {rank-one state update\\$\mS_i=\mS_{i-1}+\varphi(\vk_i)\vv_i^\top$};
+    \node[data, right=of update] (q) {query $\vq_i$};
+    \node[block, right=of q] (read) {normalized state read\\\cref{eq:linear-attn-recurrence}};
+    \node[tensor, right=of read] (o) {output $\vo_i$};
+    \draw[arrow] (state0)--(update); \draw[arrow] (kv)--(update); \draw[arrow] (update)--(read); \draw[arrow] (q)--(read); \draw[arrow] (read)--(o);
+\end{tikzpicture}
+\caption{Causal linear attention as a recurrent memory. The prefix is compressed into a fixed-size state rather than retained as one K/V pair per token.}
+\label{fig:linear-state}
+\end{figure}
+
+\subsubsection{Why use $\ELU(x)+1$?}
+
+The project uses the element-wise map
+\begin{equation}\label{eq:elu-plus-one}
+    \varphi(x)=\ELU(x)+1
+    =\begin{cases}
+        x+1, & x\geq0,\\
+        e^x, & x<0.
+      \end{cases}
+\end{equation}
+It is continuous, continuously differentiable at zero, strictly increasing, and strictly positive. Positivity makes every implicit similarity weight non-negative and ensures the denominator is positive in exact arithmetic after at least one key. It can still become numerically tiny when all relevant feature coordinates are close to zero, which motivates $\varepsilon$.
+
+\begin{example}[Outer-product memory]
+Suppose $r=d_v=2$, $\varphi(\vk_i)=(2,1)^\top$, and $\vv_i=(3,-1)^\top$. The state update is
+\begin{equation}
+    \varphi(\vk_i)\vv_i^\top
+    =\begin{pmatrix}2\\1\end{pmatrix}
+     \begin{pmatrix}3&-1\end{pmatrix}
+    =\begin{pmatrix}6&-2\\3&-1\end{pmatrix}.
+\end{equation}
+A future query does not retrieve this token directly. It reads a weighted combination of all such outer products accumulated in $\mS$.
+\end{example}
+
+\subsubsection{Complexity and information trade-off}
+
+For each head, updating $\mS_i$ and reading it costs $O(rd_v)$ per token. With $r=d_v=\dhead$, sequence cost is $O(T\dhead^2)$ and recurrent-state memory is $O(\dhead^2)$, independent of $T$. Full attention costs $O(T^2\dhead)$ and retains a memory that grows with $T$.
+
+The price is prefix compression. Full attention stores separate keys and values, so a later query can form a new weighting over individual past tokens. Linear attention maps the entire prefix into $(\mS_i,\vz_i)$. Different histories can produce the same state, and information that was merged cannot be separated later. This fixed-size-state bottleneck is a more accurate limitation than calling causal linear attention simply a low-rank attention matrix.
+
+\begin{tradeoffbox}[Arithmetic complexity is not wall-clock speed]
+A linear asymptotic expression does not guarantee a faster training run. Matrix-multiplication kernels for softmax attention are highly optimized and parallel. A sequential or poorly fused prefix recurrence can have low hardware occupancy and large launch overhead. Both FLOPs and achieved throughput must be measured.
+\end{tradeoffbox}
+
+\subsubsection{Position and causality}
+
+The recurrence is causal by construction because $(\mS_i,\vz_i)$ contains only indices $j\leq i$. Therefore the model is order-sensitive even without an explicit positional embedding: changing token order changes every subsequent prefix state. However, causality alone does not provide a rich representation of relative distance. Applying RoPE before a nonlinear $\varphi$ remains computationally possible, but the clean rotation identity in \cref{eq:rope_relative} is generally lost after the nonlinear feature map. The project's no-position version should therefore be interpreted as an architectural ablation, not a theorem that linear attention never needs position information.
+
+\subsection{Attention entropy as a routing diagnostic}
+\label{sec:attention-entropy}
+
+For a query position $i$, layer $\ell$, and head $h$, let
+\begin{equation}
+    \bm\alpha_i^{(\ell,h)}
+    =(\alpha_{i1},\ldots,\alpha_{in_i})
+\end{equation}
+be the attention probabilities over the $n_i$ visible keys. Shannon entropy is
+\begin{equation}\label{eq:attention-entropy}
+    H_i^{(\ell,h)}
+    =-\sum_{j=1}^{n_i}\alpha_{ij}\log\alpha_{ij}.
+\end{equation}
+It satisfies
+\begin{equation}
+    0\leq H_i^{(\ell,h)}\leq\log n_i.
+\end{equation}
+Entropy zero means all mass is on one key. Maximum entropy means uniform attention. Because $n_i$ changes with position and attention pattern, a normalized version is often easier to compare:
+\begin{equation}
+    \widetilde H_i^{(\ell,h)}
+    =\frac{H_i^{(\ell,h)}}{\log n_i}
+    \in[0,1]
+    \qquad (n_i>1).
+\end{equation}
+Another interpretable quantity is the effective support size
+\begin{equation}
+    n_{\mathrm{eff}}=\exp(H),
+\end{equation}
+which equals the number of equally weighted keys that would have the same entropy.
+
+\begin{example}[Sharp versus broad routing]
+Weights $(1,0,0,0)$ have $H=0$ and $n_{\mathrm{eff}}=1$. Uniform weights $(1/4,1/4,1/4,1/4)$ have $H=\log4$ and $n_{\mathrm{eff}}=4$. Weights $(0.7,0.1,0.1,0.1)$ lie between them, indicating focused but not single-token routing.
+\end{example}
+
+Entropy is descriptive, not a quality score. A copying head should be sharp; a summarizing head may be broad. Uniform attention can mean useful aggregation or failure to discriminate, while low entropy can mean precise retrieval or pathological fixation. It should be interpreted together with token distance, head outputs, ablations, and task performance.
+
+Exact entropy requires access to probabilities or equivalent sufficient statistics. Standard fused attention interfaces often return only the final weighted values, so entropy may be unavailable without a special diagnostic path. This is a measurement limitation, not a mathematical impossibility.
 
 
 % =============================================================================
@@ -1105,7 +1557,7 @@ ReLU requires only a comparison with zero. Also, inactive hidden units produce e
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[node distance=7mm and 10mm]
+\begin{tikzpicture}[scale=0.94, transform shape, node distance=6mm and 7mm]
     \node[tensor] (x) {token vector\\$\vx_t$};
     \node[block, right=of x] (score) {learned score\\$a_i=\vw_i^\top\vx_t$};
     \node[block, right=of score] (relu) {ReLU\\$h_i=\max(0,a_i)$};
@@ -1330,101 +1782,129 @@ In code, $d_h$ is often rounded to a multiple such as $64$ or $256$ for efficien
 \label{fig:swiglu-param-matching}
 \end{figure}
 
-\subsection{Implementation}
-
-\begin{lstlisting}
-gate = F.silu(self.w_gate(x))   # gate path: decides what to pass
-up = self.w_up(x)               # content path: candidate features
-hidden = gate * up              # multiplicative feature selection
-out = self.w_down(hidden)       # write update back to residual stream
-\end{lstlisting}
-
 \begin{connectionbox}[One-sentence summary]
 ReLU is a hard one-path feature detector; GELU and SiLU are smoother one-path gates; SwiGLU is a two-path gated FFN that separates candidate content from context-dependent permission, at the cost of another projection and more activation memory.
 \end{connectionbox}
 
-\subsection{Mixture of Experts: conditional computation via sparse routing}
+\subsection{Mixture of Experts: capacity through conditional computation}
 \label{sec:moe}
 
-\subsubsection{Baseline role: single dense FFN}
+\subsubsection{Why a dense FFN couples capacity and cost}
 
-In V0 and V1, every token passes through the same FFN in each layer. The FFN's total parameter count equals its per-token active parameter count: all weights participate in processing every token.
+In a dense Transformer layer, every token uses the same SwiGLU FFN and therefore activates every FFN parameter. Widening the FFN increases both total model capacity and per-token computation. Mixture of Experts (MoE) breaks this coupling: it stores many expert FFNs but routes each token through only a small subset \cite{fedus2022switch,jiang2024mixtral}.
 
-\subsubsection{Limitation and design pressure}
+The central hypothesis is that tokens do not all require the same transformation. A token inside source code, a proper noun, a punctuation mark, and a mathematical operator may benefit from different nonlinear feature banks. Sparse routing allows experts to specialize while keeping the active computation per token bounded.
 
-Scaling model capacity by widening the FFN is expensive: doubling $d_h$ doubles per-token FLOPs. The constraint is: increase representational capacity (total parameters) without proportionally increasing per-token compute (active parameters). This is the conditional computation hypothesis: not all tokens need the same features, so different subsets of parameters can specialize.
+\subsubsection{Router, top-$k$ selection, and weighted expert output}
 
-\subsubsection{Replacement mechanism: top-$k$ expert routing}
-
-A Mixture of Experts (MoE) layer replaces the single dense FFN with $N$ parallel expert FFNs and a learned router. Each token is processed by only the top-$k$ experts (with $k \ll N$):
-
-\begin{definition}[MoE Feed-Forward Layer]
-Given input $\vx \in \reals^{\dmodel}$, define:
-\begin{align}
-    \text{Router scores: } & \bm{p} = \softmax(\mW_r \vx), \quad \mW_r \in \reals^{N \times \dmodel}, \label{eq:moe_router} \\
-    \text{Expert selection: } & \mathcal{T} = \mathrm{top\text{-}k}(\bm{p}), \quad |\mathcal{T}| = k, \label{eq:moe_topk} \\
-    \text{Renormalized weights: } & \tilde{p}_i = \frac{p_i}{\sum_{j \in \mathcal{T}} p_j}, \quad i \in \mathcal{T}, \label{eq:moe_renorm} \\
-    \text{MoE output: } & \mathrm{MoE}(\vx) = \sum_{i \in \mathcal{T}} \tilde{p}_i \cdot \mathrm{Expert}_i(\vx). \label{eq:moe_output}
-\end{align}
-Each $\mathrm{Expert}_i$ is an independent SwiGLU FFN with its own parameters $(\mW^{(i)}_{\mathrm{gate}}, \mW^{(i)}_{\mathrm{up}}, \mW^{(i)}_{\mathrm{down}})$.
-\end{definition}
-
-In this project (V6), $N=8$ experts with $k=2$ (Mixtral-style). The attention, normalization, embeddings, and output head remain identical to V1.
-
-\subsubsection{Load-balancing auxiliary loss}
-
-Without regularization, the router can collapse to sending all tokens to one or two experts (expert collapse). A load-balancing loss penalizes uneven routing:
-\begin{equation}\label{eq:aux_loss}
-    \loss_{\mathrm{aux}} = \alpha \cdot N \cdot \sum_{i=1}^{N} f_i \cdot P_i,
-\end{equation}
-where $f_i$ is the fraction of tokens routed to expert $i$ in a batch and $P_i = \frac{1}{BT}\sum_{b,t} p_{b,t,i}$ is the mean router probability for expert $i$. When routing is uniform, $f_i = P_i = 1/N$, and the loss equals $\alpha$.
-
-A z-loss stabilizes router logit magnitudes:
-\begin{equation}\label{eq:z_loss}
-    \loss_z = \beta \cdot \frac{1}{BT}\sum_{b,t}\left(\log\sum_{i=1}^{N}\exp(z_{b,t,i})\right)^2,
-\end{equation}
-where $z_{b,t,i}$ are the raw router logits before softmax. The total training loss is $\loss_{\mathrm{CE}} + \loss_{\mathrm{aux}} + \loss_z$.
-
-\begin{intuitionbox}[Why the product $f_i \cdot P_i$]
-The product couples two quantities: $f_i$ reflects where tokens actually went (a non-differentiable hard assignment), and $P_i$ reflects what the router \emph{wanted} to do (a differentiable soft probability). The gradient of $\loss_{\mathrm{aux}}$ flows through $P_i$, nudging the router to spread probability mass toward underused experts. The multiplicative form penalizes the joint event ``expert $i$ already gets many tokens \emph{and} the router keeps assigning high probability to it.''
-\end{intuitionbox}
-
-\subsubsection{Active versus total parameters}
-
-\begin{definition}[Active Parameters]
-The parameters that participate in processing a single token:
+Let $N_{\mathrm{exp}}$ be the number of experts. For token representation $\vx\in\reals^{\dmodel}$, a router produces logits
 \begin{equation}
-    \text{Active} = \underbrace{\text{embed} + \text{attention} + \text{norms} + \text{head}}_{\text{shared}} + k \cdot (\text{params per expert}) \cdot L_{\mathrm{MoE}} + (\text{dense FFN params}) \cdot L_{\mathrm{dense}},
+    \vz=\mW_r\vx\in\reals^{N_{\mathrm{exp}}},
 \end{equation}
-where $L_{\mathrm{MoE}}$ is the number of MoE layers and $L_{\mathrm{dense}}$ is the number of dense layers.
-\end{definition}
+where $\mW_r\in\reals^{N_{\mathrm{exp}}\times\dmodel}$. Softmax probabilities are
+\begin{equation}
+    p_i=\frac{e^{z_i}}{\sum_{j=1}^{N_{\mathrm{exp}}}e^{z_j}},
+    \qquad i=1,\ldots,N_{\mathrm{exp}}.
+\end{equation}
+Let $\mathcal{T}(\vx)$ contain the indices of the $k$ largest probabilities. The selected probabilities are renormalized,
+\begin{equation}
+    \widetilde p_i
+    =\frac{p_i}{\sum_{j\in\mathcal{T}(\vx)}p_j},
+    \qquad i\in\mathcal{T}(\vx),
+\end{equation}
+and the MoE output is
+\begin{equation}\label{eq:moe-output-full}
+    \mathrm{MoE}(\vx)
+    =\sum_{i\in\mathcal{T}(\vx)}
+      \widetilde p_i\,E_i(\vx),
+\end{equation}
+where $E_i$ is expert $i$, usually an independent SwiGLU FFN.
 
-For fair comparison with V1, V6 matches active parameters ($\approx 51$M at main scale). Total parameters are $\approx 170$M because all $N$ experts are materialized. The ratio $\text{Total}/\text{Active} \approx N/k$ when the FFN dominates parameter count.
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=6mm and 8mm]
+    \node[tensor] (x) {token state $\vx$};
+    \node[block, right=of x] (router) {router\\probabilities $\bm p$};
+    \node[smallblock, above right=5mm and 13mm of router] (e1) {expert 1};
+    \node[smallblock, right=13mm of router] (e2) {expert 2};
+    \node[smallblock, below right=5mm and 13mm of router] (e3) {expert 3};
+    \node[smallblock, below=12mm of e3] (eN) {expert $N_{\mathrm{exp}}$};
+    \node[block, right=28mm of router] (mix) {weighted sum of\\top-$k$ outputs};
+    \node[tensor, right=of mix] (out) {residual update};
+    \draw[arrow] (x)--(router);
+    \draw[arrow] (router)--node[above, note] {$\widetilde p_1$}(e1);
+    \draw[arrow] (router)--node[above, note] {$\widetilde p_2$}(e2);
+    \draw[dashed, gray, ->] (router)--(e3);
+    \draw[dashed, gray, ->] (router)--(eN);
+    \draw[arrow] (e1)--(mix); \draw[arrow] (e2)--(mix); \draw[arrow] (mix)--(out);
+    \node[note, below=3mm of eN] {unselected experts do no token-level FFN work};
+\end{tikzpicture}
+\caption{Top-$2$ sparse routing. The router selects two experts, computes only their FFN outputs, and mixes them using renormalized routing weights.}
+\label{fig:moe-routing}
+\end{figure}
 
-\subsubsection{Sub-variants: where to place MoE layers}
+\begin{example}[Specialist workshop]
+A large workshop owns eight specialist machines, but each job visits only two. A metal part may use cutting and polishing; a printed circuit may use soldering and inspection. The workshop's total capability grows with all eight machines, while the time for one job depends mainly on the two machines it actually uses. MoE applies the same capacity-versus-active-cost idea to token transformations.
+\end{example}
 
-Three layer placement strategies explore different MoE density:
+\subsubsection{Total parameters versus active parameters}
+
+Suppose one expert contains $P_E$ parameters and shared non-expert components contain $P_S$. An all-MoE stack has approximately
+\begin{align}
+    P_{\mathrm{total}}&=P_S+L_{\mathrm{MoE}}N_{\mathrm{exp}}P_E,\\
+    P_{\mathrm{active/token}}&=P_S^{\mathrm{active}}+L_{\mathrm{MoE}}kP_E.
+\end{align}
+The distinction matters: total parameters determine storage capacity and memory footprint; active parameters are more closely related to per-token expert FLOPs. Their ratio is only approximately $N_{\mathrm{exp}}/k$ because embeddings, attention, routers, and any dense layers are shared.
+
+This is why parameter parity must be defined carefully for MoE. Matching V6 to a dense model by \emph{active} parameters controls per-token capacity better than matching total parameters, but total memory remains much larger.
+
+\subsubsection{Why routers collapse without balancing pressure}
+
+A router may discover that one expert is slightly better early in training. More tokens then visit that expert, giving it more gradient updates, making it even better, and creating a positive feedback loop. This is expert collapse.
+
+For a batch containing $M=BT$ token positions, define
+\begin{align}
+    f_i&=\frac{1}{M}\sum_{n=1}^{M}
+         \ind[i\in\mathcal{T}(\vx_n)]/k,\\
+    P_i&=\frac{1}{M}\sum_{n=1}^{M}p_i(\vx_n).
+\end{align}
+Here $f_i$ is the realized fraction of selected expert slots assigned to expert $i$, while $P_i$ is its average soft routing probability. A common auxiliary loss is
+\begin{equation}\label{eq:moe-balance}
+    \loss_{\mathrm{bal}}
+    =\alpha N_{\mathrm{exp}}
+      \sum_{i=1}^{N_{\mathrm{exp}}}f_iP_i,
+\end{equation}
+where $\alpha\geq0$ controls the strength. The hard counts $f_i$ are treated as constants during backpropagation; gradients flow through $P_i$. If an expert is overused, its large $f_i$ makes extra probability mass on it expensive.
+
+\begin{warningbox}[Uniform routing is not the final goal]
+The balancing loss prevents catastrophic concentration; it should not force experts to be identical or used exactly equally for every data domain. Too large an $\alpha$ can override the language-model objective and punish useful specialization.
+\end{warningbox}
+
+Router logits can also grow to unnecessarily large magnitudes, making softmax nearly discrete and optimization brittle. A router z-loss penalizes the squared log-partition function:
+\begin{equation}\label{eq:moe-zloss}
+    \loss_z
+    =\beta\frac{1}{M}
+      \sum_{n=1}^{M}
+      \left[\log\left(\sum_{i=1}^{N_{\mathrm{exp}}}e^{z_{n,i}}\right)\right]^2,
+\end{equation}
+where $\beta\geq0$ is a coefficient and $z_{n,i}$ is the router logit for token $n$ and expert $i$ \cite{zoph2022stmoe}. The training loss becomes
+\begin{equation}
+    \loss_{\mathrm{total}}
+    =\loss_{\mathrm{CE}}+\loss_{\mathrm{bal}}+\loss_z.
+\end{equation}
+
+\subsubsection{Where to place expert layers}
+
+Three placements answer different scientific questions:
 \begin{itemize}[nosep]
-    \item \textbf{V6-full}: all $\nlayer$ layers use MoE. Total params $\approx N/k$ times V1.
-    \item \textbf{V6-interleaved}: odd-indexed layers use MoE, even-indexed layers use dense SwiGLU. Half the expert parameters of V6-full.
-    \item \textbf{V6-deep}: layers with index $\geq \nlayer/2$ use MoE, earlier layers use dense. Tests the hypothesis that early layers learn general representations while deeper layers benefit from specialization.
+    \item \textbf{all layers:} maximum sparse capacity, maximum expert memory;
+    \item \textbf{interleaved dense/MoE:} tests whether specialization is needed at every depth;
+    \item \textbf{deep-only MoE:} tests whether early layers learn general lexical/syntactic features while deeper layers benefit more from specialized transformations.
 \end{itemize}
 
-\subsubsection{New trade-off}
+\subsubsection{New trade-offs}
 
-\begin{tradeoffbox}[MoE costs]
-\begin{enumerate}[nosep]
-    \item \textbf{Memory:} all $N$ expert weights reside in memory even though only $k$ are active per token.
-    \item \textbf{Load imbalance:} requires auxiliary loss tuning ($\alpha, \beta$). Too much regularization degrades quality; too little leads to expert collapse.
-    \item \textbf{Expert redundancy risk:} with limited data, experts may converge to similar functions, negating the capacity benefit.
-    \item \textbf{Non-uniform computation:} different tokens activate different parameters, complicating FLOP accounting and hardware utilization analysis.
-\end{enumerate}
-\end{tradeoffbox}
-
-\begin{motivationbox}[Why MoE is in the project]
-MoE demonstrates a fundamentally different scaling strategy: increase capacity without increasing per-token compute. The comparison answers: ``For a fixed per-token FLOP budget, does conditional expert routing improve next-token prediction over a single dense FFN?'' This is orthogonal to the attention-mechanism comparisons (V2--V5).
-\end{motivationbox}
-
+MoE increases total capacity without proportional expert FLOPs, but introduces memory, routing imbalance, communication, and statistical-efficiency problems. With limited data, experts may receive too few examples or converge to redundant functions. On a single GPU, all expert weights must still fit in memory. In distributed systems, routing tokens to experts can create expensive all-to-all communication. Therefore V6 should be evaluated on loss, active FLOPs, total memory, expert utilization, and expert diversity rather than on parameter count alone.
 
 % =============================================================================
 \section{Autoregressive Generation and Decoding}
@@ -1516,15 +1996,15 @@ The cache stores $\widetilde{\vk}_t$. Future queries are rotated by their own po
 RoPE applies a deterministic position-dependent rotation to each key at creation time. Since causal attention makes old keys independent of future tokens, the rotated key remains valid forever. This is why the correct generation order is: project K, rotate K by its position, then store it in the cache.
 \end{connectionbox}
 
-\subsection{A note on MQA and GQA}
+\subsection{KV-cache with grouped-query attention}
 
-This project uses standard multi-head attention unless stated otherwise. Production LLMs often use multi-query attention (MQA) or grouped-query attention (GQA), where several query heads share fewer key/value heads. These variants reduce cache memory by replacing $\nhead$ K/V heads with $n_{\mathrm{kv}}<\nhead$ K/V heads:
+The cache formula in \cref{eq:kvcache_memory} assumes one K/V head for every query head. GQA changes only the head-count factor:
 \begin{equation}
-    \mathrm{cache\ memory}\propto n_{\mathrm{kv}}\dhead
-    \quad\text{instead of}\quad
-    \nhead\dhead.
+    \mathrm{cache}_{\mathrm{GQA}}
+    =2\nlayer B n_{\mathrm{kv}}T\dhead s.
 \end{equation}
-MQA and GQA should be documented as future attention-serving variants, not as part of the current V1 shift.
+The reduction is especially important during token-by-token decoding because each new query must read the cache from memory. Fewer K/V heads reduce both storage and memory bandwidth. The full mechanism, parameter formulas, and MHA--GQA--MQA spectrum are explained once in \cref{sec:gqa}.
+
 
 \subsection{From logits to a generated token}
 
@@ -1577,7 +2057,7 @@ Temperature does not change the ranking of tokens; it changes how strongly the m
 
 Greedy decoding chooses the most likely next token:
 \begin{equation}
-    s_{t+1}=\argmax_w p_{\vtheta}(w\given s_{\leq t}).
+    s_{t+1}=\argmax_{w} p_{\vtheta}(w\given s_{\leq t}).
 \end{equation}
 It is deterministic and fast. Its limitation is that local probability maximization can lead to repetitive or bland text. The most likely next token at each step is not necessarily part of the best full sequence.
 
@@ -1777,9 +2257,9 @@ A typical mixed-precision strategy is:
 
 For a fixed compute budget, increasing model size without increasing training tokens can be inefficient. Compute-optimal scaling analyses suggest that model size and data size should be balanced rather than scaling only parameters \cite{hoffmann2022chinchilla}. For this project, if V1 improves validation loss over V0, the comparison should control for training tokens, optimizer settings, context length, and parameter count.
 
-\subsection{Fair V0 versus V1 comparison}
+\subsection{Fair comparisons across Transformer variants}
 
-To attribute performance differences to architecture rather than confounders, keep the following fixed:
+To attribute performance differences to architecture rather than confounders, keep the following fixed whenever the mechanism permits it:
 \begin{itemize}[nosep]
     \item tokenizer and vocabulary;
     \item training and validation data;
@@ -1787,7 +2267,8 @@ To attribute performance differences to architecture rather than confounders, ke
     \item context length;
     \item optimizer and learning-rate schedule;
     \item token batch size;
-    \item parameter count, as closely as possible.
+    \item parameter count or active parameter count, as appropriate;
+    \item evaluation frequency, precision policy, and hardware allocation.
 \end{itemize}
 
 \begin{figure}[H]
@@ -1811,6 +2292,338 @@ To attribute performance differences to architecture rather than confounders, ke
 \label{fig:ablation-path}
 \end{figure}
 
+
+
+\subsection{Parameter parity is a control, not a complete notion of complexity}
+\label{sec:param-parity}
+
+Let $N_v$ be the trainable parameter count of variant $v$ and let
+\begin{equation}
+    \bar N=\frac{1}{|\mathcal{V}_{\mathrm{var}}|}
+           \sum_{v\in\mathcal{V}_{\mathrm{var}}}N_v
+\end{equation}
+be the mean across the set of variants $\mathcal{V}_{\mathrm{var}}$. A parity rule such as
+\begin{equation}\label{eq:param-parity}
+    \frac{|N_v-\bar N|}{\bar N}\leq0.05
+\end{equation}
+limits raw-capacity differences.
+
+This is useful because a much larger model may win simply through more parameters. It is not sufficient because parameter count does not determine computation or expressivity by itself. GQA removes K/V parameters but leaves much attention arithmetic unchanged. SWA changes pairwise attention FLOPs with no parameter change. MoE has distinct total and active parameter counts. Linear attention has the same projection parameters as MHA but a different state bottleneck. Fair reporting therefore includes parameters, active parameters, FLOPs, memory, and wall-clock time rather than treating any one as ``model complexity.''
+
+\subsection{Three comparison axes: data, wall-clock time, and FLOPs}
+\label{sec:three-axes}
+
+One final validation loss answers only one question. The project uses three axes to separate statistical efficiency from systems efficiency.
+
+Let a training log contain checkpoints
+\begin{equation}
+    \{(u_s,t_s,F_s,\widehat\loss_s)\}_{s=1}^{S},
+\end{equation}
+where $u_s$ is cumulative training tokens, $t_s$ is elapsed time, $F_s$ is cumulative estimated FLOPs, and $\widehat\loss_s$ is validation loss.
+
+\begin{align}
+    \widehat\loss^{\mathrm{data}}(U)
+      &=\mathrm{Interp}\{(u_s,\widehat\loss_s)\}(U),\\
+    \widehat\loss^{\mathrm{time}}(\tau)
+      &=\mathrm{Interp}\{(t_s,\widehat\loss_s)\}(\tau),\\
+    \widehat\loss^{\mathrm{FLOP}}(G)
+      &=\mathrm{Interp}\{(F_s,\widehat\loss_s)\}(G).
+\end{align}
+Here $U$, $\tau$, and $G$ are common budgets, and $\mathrm{Interp}$ denotes an explicitly reported interpolation or smoothing rule.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Axis & Held fixed & Main question\\
+\midrule
+Fixed data & tokens $U$ & which architecture learns most per token?\\
+Fixed time & elapsed seconds $\tau$ & which gives the best result by a deadline?\\
+Fixed FLOPs & compute budget $G$ & which extracts most learning per arithmetic operation?\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=9mm and 12mm]
+    \node[block] (run) {same training logs};
+    \node[block, above right=4mm and 15mm of run] (data) {slice at common\\token budget};
+    \node[block, right=15mm of run] (time) {slice at common\\time budget};
+    \node[block, below right=4mm and 15mm of run] (flop) {slice at common\\FLOP budget};
+    \node[tensor, right=22mm of time] (compare) {three answers\\to three questions};
+    \draw[arrow] (run)--(data); \draw[arrow] (run)--(time); \draw[arrow] (run)--(flop);
+    \draw[arrow] (data)--(compare); \draw[arrow] (time)--(compare); \draw[arrow] (flop)--(compare);
+\end{tikzpicture}
+\caption{The same runs can be compared under three budgets. No single axis should be presented as the universally correct ranking.}
+\label{fig:three-axes}
+\end{figure}
+
+Interpolation can hide noise or sparse logging. The common budget should lie inside every run's observed range, and the report should show the underlying curves. A fixed-time comparison also includes compiler, kernel, and dataloader effects; that is a feature when measuring practical performance, but a confound when making a purely mathematical architecture claim.
+
+\subsection{Component-level FLOP accounting}
+\label{sec:flop-accounting}
+
+The approximation $6N\times\text{tokens}$ is useful for dense Transformers but cannot distinguish full attention from SWA, GQA projection savings, or sparse expert activation. A component model makes the assumptions visible.
+
+For one forward pass with batch size $B$, length $T$, and a standard MHA layer, matrix-multiplication FLOPs are approximately
+\begin{align}
+    F_{QKV}&=6BT\dmodel^2,\\
+    F_O&=2BT\dmodel^2,\\
+    F_{\mathrm{SwiGLU}}&=6BT\dmodel d_h.
+\end{align}
+The factor $2$ in a matrix product counts one multiply and one add. SwiGLU has three projections: gate, up, and down.
+
+Attention pairwise work is most clearly expressed using $P$, the number of allowed query--key pairs per sequence:
+\begin{equation}\label{eq:attention-flops-pairs}
+    F_{\mathrm{pair}}
+    \approx4B\nhead\dhead P.
+\end{equation}
+The first factor $2$ is for $QK^\top$ and the second factor $2$ is for multiplying probabilities by $V$. For full causal attention,
+\begin{equation}
+    P=P_{\mathrm{full}}=\frac{T(T+1)}{2},
+\end{equation}
+and for SWA use \cref{eq:swa-pairs}. Actual kernel FLOPs may differ because tiles, padding, and masked regions can still incur work.
+
+For GQA, replace the QKV term by
+\begin{equation}
+    F_{QKV}^{\mathrm{GQA}}
+    =2BT\dmodel(\dmodel+2n_{\mathrm{kv}}\dhead),
+\end{equation}
+while pairwise attention still has $\nhead$ query heads. For MoE, the FFN term uses $k$ active experts per token, plus router cost; total expert parameters do not all contribute FLOPs to one token. For linear attention, the attention-state term is $O(BT\nhead r d_v)$ rather than a query--key pair count.
+
+Backward propagation for a large matrix multiplication is roughly twice its forward cost, so a matmul-dominated training estimate often multiplies forward FLOPs by about three. This is an approximation, not a universal constant; nonlinearities, normalization, recomputation, optimizer updates, and kernel choices add work. Profiler measurements are the preferred validation.
+
+\subsection{Model FLOPs utilization and the roofline model}
+\label{sec:roofline}
+
+Model FLOPs utilization (MFU) compares achieved model arithmetic with a hardware peak:
+\begin{equation}\label{eq:mfu}
+    \mathrm{MFU}
+    =\frac{F_{\mathrm{model,step}}/t_{\mathrm{step}}}
+           {P_{\mathrm{peak}}},
+\end{equation}
+where $F_{\mathrm{model,step}}$ is the chosen FLOP estimate, $t_{\mathrm{step}}$ is measured step time, and $P_{\mathrm{peak}}$ is a compatible peak throughput. Numerator and denominator must use the same precision and sparsity assumptions.
+
+The roofline model relates performance to operational intensity \cite{williams2009roofline}:
+\begin{equation}\label{eq:roofline}
+    P_{\mathrm{bound}}(I)
+    =\min(P_{\mathrm{peak}},\;\mathrm{BW}\cdot I),
+    \qquad
+    I=\frac{\text{FLOPs}}{\text{bytes transferred from DRAM}}.
+\end{equation}
+Here $\mathrm{BW}$ is sustained memory bandwidth, not merely a nominal interface speed. The ridge point is
+\begin{equation}
+    I^*=\frac{P_{\mathrm{peak}}}{\mathrm{BW}}.
+\end{equation}
+Below $I^*$, the bandwidth ceiling is lower; above $I^*$, compute peak is lower.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1.15cm,y=0.9cm]
+    \draw[->, thick] (0,0)--(7.3,0) node[right] {operational intensity $I$};
+    \draw[->, thick] (0,0)--(0,5.0) node[above] {performance $P$};
+    \draw[very thick, blue!70!black] (0.3,0.35)--(4.2,4.15)--(7.0,4.15);
+    \draw[dashed] (4.2,0)--(4.2,4.15);
+    \node[note] at (2.1,2.5) {bandwidth bound\\$P=\mathrm{BW}\,I$};
+    \node[note] at (5.7,4.5) {compute ceiling $P_{\mathrm{peak}}$};
+    \node[note] at (4.2,-0.4) {ridge $I^*$};
+    \fill (2.2,1.6) circle (2pt) node[below right, note] {memory-heavy variant};
+    \fill (5.7,3.4) circle (2pt) node[below, note] {compute-heavy variant};
+\end{tikzpicture}
+\caption{Roofline model. It supplies an upper bound, not a prediction that every implementation reaches the roof.}
+\label{fig:roofline}
+\end{figure}
+
+For the NVIDIA L4, the published BF16 tensor-core figure is 242 TFLOP/s \emph{with structured sparsity}; NVIDIA states that the non-sparse figure is half, about 121 TFLOP/s. Published memory bandwidth is 300 GB/s \cite{nvidial4spec}. Therefore the nominal dense ridge point is about
+\begin{equation}
+    I^*_{\mathrm{dense}}
+    \approx\frac{121\times10^{12}}{300\times10^9}
+    \approx403\ \text{FLOPs/byte},
+\end{equation}
+whereas 807 FLOPs/byte applies only if the workload genuinely uses the advertised structured-sparsity peak. A virtualized L4 profile may have additional scheduling limits, so a measured microbenchmark ceiling is preferable.
+
+A point far below the roof can also be limited by launch overhead, insufficient parallelism, synchronization, or poor tensor shapes. Roofline classification is therefore a first diagnostic, not a complete performance explanation.
+
+\subsection{Statistical reporting across random seeds}
+\label{sec:seed-reporting}
+
+Let $m_s$ be a metric from seed $s=1,\ldots,S$. Report the sample mean and standard deviation,
+\begin{align}
+    \bar m&=\frac{1}{S}\sum_{s=1}^{S}m_s,\\
+    s_m&=\sqrt{\frac{1}{S-1}
+        \sum_{s=1}^{S}(m_s-\bar m)^2}.
+\end{align}
+The standard deviation describes run-to-run variability. It is not the uncertainty of the mean. The standard error is
+\begin{equation}
+    \mathrm{SE}(\bar m)=\frac{s_m}{\sqrt S},
+\end{equation}
+and an approximate two-sided $(1-\gamma)$ confidence interval is
+\begin{equation}
+    \bar m\pm t_{1-\gamma/2,S-1}\frac{s_m}{\sqrt S},
+\end{equation}
+where $t_{q,\nu}$ is a Student-$t$ quantile with $\nu=S-1$ degrees of freedom.
+
+With only three seeds, both $s_m$ and the confidence interval are unstable. The document should therefore show individual seed points and avoid treating overlapping or non-overlapping ``mean $\pm$ SD'' bars as a formal significance test. When variants can share data-order seeds, paired differences
+\begin{equation}
+    d_s=m_{A,s}-m_{B,s}
+\end{equation}
+usually reduce variance and answer the architectural comparison more directly.
+
+\subsection{Stable rank: a scale-robust effective-dimension diagnostic}
+\label{sec:stable-rank}
+
+Collect $n$ token representations from layer $\ell$ into $\mH^{(\ell)}\in\reals^{n\times\dmodel}$. First center the columns:
+\begin{equation}
+    \widetilde{\mH}=\mC\mH,
+    \qquad
+    \mC=\mI_n-\frac{1}{n}\mathbf{1}\mathbf{1}^\top.
+\end{equation}
+For nonzero $\widetilde{\mH}$, stable rank is
+\begin{equation}\label{eq:stable-rank}
+    \mathrm{srank}(\widetilde{\mH})
+    =\frac{\|\widetilde{\mH}\|_F^2}
+           {\|\widetilde{\mH}\|_2^2}
+    =\frac{\sum_j\sigma_j^2}{\sigma_1^2}.
+\end{equation}
+Here $\|\cdot\|_F$ is the Frobenius norm, $\|\cdot\|_2=\sigma_1$ is the spectral norm, and $\sigma_j$ are singular values. Stable rank lies between $1$ and the ordinary matrix rank.
+
+If one singular direction dominates, the numerator and denominator are nearly equal and stable rank is near one. If energy is spread across $r$ equal singular directions, stable rank is $r$.
+
+\begin{example}[Same ordinary rank, different effective rank]
+Matrices with singular values $(10,1,1,1)$ and $(5,5,5,5)$ both have ordinary rank four. Their stable ranks are $(100+3)/100=1.03$ and $100/25=4$. Stable rank distinguishes a nearly one-dimensional representation from one that uses four directions comparably.
+\end{example}
+
+A falling curve can indicate concentration into a few directions, but high stable rank is not automatically better. A task may legitimately compress information into a low-dimensional sufficient statistic. Compare variants on the same data, centering rule, token sample, and layer location, and interpret stable rank alongside loss and retrieval probes.
+
+\subsection{Centered kernel alignment: comparing representation geometry}
+\label{sec:cka}
+
+Suppose $\mX\in\reals^{n\times p}$ and $\mY\in\reals^{n\times q}$ contain representations of the same $n$ token examples from two layers or models. Center them using $\mC$:
+\begin{equation}
+    \mX_c=\mC\mX,
+    \qquad
+    \mY_c=\mC\mY.
+\end{equation}
+Linear centered kernel alignment (CKA) is
+\begin{equation}\label{eq:cka}
+    \mathrm{CKA}(\mX,\mY)
+    =\frac{\|\mY_c^\top\mX_c\|_F^2}
+           {\|\mX_c^\top\mX_c\|_F
+            \|\mY_c^\top\mY_c\|_F}.
+\end{equation}
+It compares the pairwise geometry of examples and is invariant to isotropic scaling and orthogonal changes of feature basis \cite{kornblith2019cka}.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.72]
+    \foreach \i in {0,...,5}{
+      \foreach \j in {0,...,5}{
+        \pgfmathsetmacro{\shade}{10+70*exp(-abs(\i-\j))}
+        \fill[blue!\shade] (\j,5-\i) rectangle +(1,1);
+      }
+    }
+    \draw[step=1cm, white, line width=0.4pt] (0,0) grid (6,6);
+    \draw[thick] (0,0) rectangle (6,6);
+    \node[below] at (3,-0.35) {layer in model B};
+    \node[rotate=90] at (-0.45,3) {layer in model A};
+    \node[note] at (3,6.35) {bright diagonal: corresponding depths are similar};
+\end{tikzpicture}
+\caption{Schematic CKA heatmap. The actual values are computed from centered hidden-state matrices; color here illustrates the interpretation.}
+\label{fig:cka-heatmap}
+\end{figure}
+
+High adjacent-layer CKA does not by itself prove redundant computation. Residual connections make adjacent states share a large identity component, and a small but task-critical subspace may change while CKA remains high. More convincing evidence combines CKA with ablation, residual-update norms, and task metrics.
+
+\subsection{Multi-query associative recall: a controlled retrieval probe}
+\label{sec:mqar}
+
+Multi-query associative recall (MQAR) tests whether a model can bind several key--value pairs in context and retrieve the correct value when each key reappears later \cite{arora2024zoology}. A synthetic sequence may contain
+\begin{equation}
+    (a_1,b_1),\ldots,(a_K,b_K)
+\end{equation}
+interleaved with distractors, followed by queries $a_{q_1},\ldots,a_{q_R}$. At a query for key $a_j$, the target next token is $b_j$.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.78, transform shape, node distance=3mm and 3mm]
+    \node[data] (k1) {$a_1$}; \node[data, right=of k1] (v1) {$b_1$};
+    \node[data, right=of v1] (d1) {noise};
+    \node[data, right=of d1] (k2) {$a_2$}; \node[data, right=of k2] (v2) {$b_2$};
+    \node[data, right=of v2] (d2) {$\cdots$};
+    \node[data, right=of d2, fill=orange!12] (q2) {query $a_2$};
+    \node[tensor, right=of q2] (pred) {predict $b_2$};
+    \draw[arrow] (k1)--(v1); \draw[arrow] (v1)--(d1); \draw[arrow] (d1)--(k2); \draw[arrow] (k2)--(v2); \draw[arrow] (v2)--(d2); \draw[arrow] (d2)--(q2); \draw[arrow] (q2)--(pred);
+    \draw[residual] (v2.north) .. controls +(0,1.1) and +(0,1.1) .. node[above, note] {association must survive distance and distractors} (q2.north);
+\end{tikzpicture}
+\caption{MQAR separates key--value binding and later retrieval, allowing distance and number of associations to be controlled.}
+\label{fig:mqar}
+\end{figure}
+
+For query instance $r$, let $d_r$ be the token distance from its binding and let $y_r$ be the correct value. Accuracy in a distance bin $D$ is
+\begin{equation}
+    \mathrm{Acc}(D)
+    =\frac{1}{|\{r:d_r\in D\}|}
+      \sum_{r:d_r\in D}
+      \ind\!\left[
+        \argmax_{w} p_{\vtheta}(w\mid\text{context}_r)=y_r
+      \right].
+\end{equation}
+Distance bins are usually more stable than requiring many examples at every exact integer distance. Report chance accuracy, vocabulary construction, number of associations, distractor process, and whether keys or values repeat.
+
+MQAR isolates retrieval better than overall perplexity. SWA may degrade once the binding lies beyond direct or effective reach; fixed-state linear attention may degrade as more associations compete for the same state; full attention may remain stronger. It is still synthetic, so good MQAR performance is evidence of a mechanism, not proof of general language quality.
+
+\subsection{Per-position context-use curves and a power-law summary}
+\label{sec:icl-decay}
+
+Let $L(t)$ be average validation NLL at sequence position $t$, computed over examples for which position $t$ is non-padding. Later positions have more preceding context, so $L(t)$ often decreases, but the curve can contain tokenization, document-boundary, and data-composition effects.
+
+The project fits the descriptive model
+\begin{equation}\label{eq:icl-power}
+    L(t)=A t^{-\alpha}+C,
+\end{equation}
+where $A\geq0$ is the reducible amplitude, $\alpha\geq0$ controls the rate of decay, and $C\geq0$ is an asymptotic floor. A larger $\alpha$ means the fitted reducible part falls faster with position. It does \emph{not} automatically mean better long-context use: a curve can fall quickly and then hit a high floor $C$.
+
+\begin{warningbox}[Treat the power law as a hypothesis, not a law]
+Per-position loss is not guaranteed to follow \cref{eq:icl-power}. Report residual plots, confidence intervals, and $R^2$; exclude or separately model early boundary positions if they dominate the fit. Compare the full $L(t)$ curves in addition to the single exponent.
+\end{warningbox}
+
+A useful derived quantity is the fitted context benefit between positions $t_1<t_2$:
+\begin{equation}
+    \Delta L(t_1,t_2)
+    =A(t_1^{-\alpha}-t_2^{-\alpha}).
+\end{equation}
+This uses all three parameters and is easier to interpret than $\alpha$ alone.
+
+\subsection{Pareto fronts: reporting trade-offs without a single arbitrary score}
+\label{sec:pareto}
+
+Suppose each variant has a cost $x_v$ and a loss $y_v$, both to be minimized. Variant $v'$ dominates $v$ if
+\begin{equation}
+    x_{v'}\leq x_v,
+    \qquad y_{v'}\leq y_v,
+\end{equation}
+with at least one strict inequality. The Pareto front is the set of non-dominated variants.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1.0cm,y=1.0cm]
+    \draw[->, thick] (0,0)--(7,0) node[right] {cost};
+    \draw[->, thick] (0,0)--(0,5.6) node[above] {validation loss};
+    \foreach \x/\y/\lab in {1.0/4.7/A,1.8/3.8/B,2.8/3.2/C,4.2/2.7/D,5.6/2.5/E,3.8/4.1/F,5.1/3.5/G}{
+      \fill (\x,\y) circle (2.5pt) node[above right, note] {\lab};
+    }
+    \draw[very thick, blue!70!black] (1.0,4.7)--(1.8,3.8)--(2.8,3.2)--(4.2,2.7)--(5.6,2.5);
+    \node[note, blue!70!black] at (4.7,1.8) {non-dominated frontier};
+    \draw[dashed, red!70!black, ->] (3.8,4.1)--(2.8,3.2);
+    \node[note, red!70!black] at (4.8,4.35) {F is dominated by C};
+\end{tikzpicture}
+\caption{Pareto analysis. A point behind the frontier is worse on both objectives than at least one alternative.}
+\label{fig:pareto}
+\end{figure}
+
+Useful objective pairs are cumulative FLOPs versus loss, wall-clock time versus loss, and peak memory versus loss. A variant can be Pareto-optimal without being the preferred choice; the user must still decide how much extra cost is worth a loss reduction. Seed uncertainty can also change dominance, so error bars or bootstrap dominance probabilities should accompany close points.
+
+
 \subsection{Validation uncertainty, sanity checks, and calibration}
 
 Token losses are correlated within documents, so a simple token-level standard error is too optimistic. A rougher batch- or document-level estimate is
@@ -1832,27 +2645,38 @@ Before trusting a training run, verify:
 Cross-entropy measures probabilistic accuracy, but a model can still be miscalibrated. Calibration can be checked by binning predictions by confidence and comparing average confidence with empirical accuracy.
 
 % =============================================================================
-\section{Computational Infrastructure}
+\section{Computational Concepts Around the Model}
 \label{sec:infrastructure}
-% =============================================================================
 
-\subsection{\texttt{torch.compile}}
+\subsection{Graph compilation and kernel fusion}
 
-PyTorch eager mode launches operations one by one. \texttt{torch.compile} traces and optimizes graphs, enabling kernel fusion, memory planning, and operation reordering.
+A mathematical expression such as RMSNorm or SwiGLU is often implemented as several primitive operations. Launching each primitive separately incurs overhead and repeatedly moves intermediate tensors through memory. Graph compilation analyzes a region of computation and may fuse compatible operations so intermediates remain in registers or on-chip memory.
 
-\begin{example}[Why fusion helps]
-A Transformer block contains many small operations around large matrix multiplications: reshapes, elementwise products, normalization steps, dropout if enabled, and residual additions. In eager mode these may become separate kernel launches and separate memory reads/writes. A compiler can fuse some of them so intermediate values stay closer to the GPU compute units.
+\begin{example}[Why fusion changes time but not the model]
+The expression
+\begin{equation*}
+    \mW_{\mathrm{down}}\!\left[\SiLU(\mW_g\vx)\odot(\mW_u\vx)\right]
+\end{equation*}
+has the same mathematical value whether the activation and element-wise product are separate GPU kernels or one fused kernel. The statistical model is unchanged; only memory traffic, launch overhead, and numerical operation order may differ.
 \end{example}
 
-Compilation is most effective when shapes are static, as in training with fixed batch size and context length. During generation with a growing KV-cache, shapes may change at each step. This can trigger recompilation or graph breaks. A common practical choice is to use \texttt{torch.compile} for training and explicit KV-cache logic for generation.
+Static tensor shapes make optimization easier because the compiler can specialize schedules and memory plans. Dynamic generation shapes and growing caches can require multiple compiled graphs or reduce fusion opportunities. These effects belong in fixed-wall-clock and MFU analysis, not in claims about validation quality at a fixed token budget.
 
-\subsection{Throughput metrics}
+\subsection{Training, prefill, and decode throughput}
 
-For experiments, report tokens per second rather than only wall-clock time:
+Training throughput is commonly
 \begin{equation}
-    \mathrm{tokens/sec}=\frac{B\cdot T\cdot\text{training steps}}{\text{elapsed seconds}}.
+    \mathrm{tokens/sec}
+    =\frac{B\,T\,S}{t_{\mathrm{elapsed}}},
 \end{equation}
-For generation, distinguish prefill throughput from decode throughput. Prefill processes the prompt in parallel. Decode generates one token at a time using the KV-cache.
+where $S$ is the number of optimizer steps. Report whether this counts target tokens, input tokens, gradient-accumulation micro-batches, and data-loading time.
+
+Generation has two different regimes:
+\begin{itemize}[nosep]
+    \item \textbf{prefill:} processes the prompt in parallel and creates the initial cache;
+    \item \textbf{decode:} produces one new token per sequence per iteration and repeatedly reads the cache.
+\end{itemize}
+Prefill resembles a training forward pass and can use large matrix products. Decode often becomes memory-bandwidth and latency sensitive because each step has little parallel work per sequence. GQA mainly helps decode cache traffic; FlashAttention mainly helps long parallel attention; these benefits should not be collapsed into one throughput number.
 
 % =============================================================================
 \section{How to Add Future Transformer Variants}
@@ -1876,9 +2700,9 @@ For each new component, add one subsection answering:
 \subsection{Where future components should go}
 
 \begin{itemize}[nosep]
-    \item Add ALiBi, scaled RoPE, or position interpolation to \cref{sec:attention-position}.
-    \item Add grouped-query attention, multi-query attention, sliding-window attention, or sparse attention to \cref{sec:attention-position} or \cref{sec:generation}, depending on whether the main change is training attention or serving cache memory.
-    \item Add mixture-of-experts, ReGLU, GEGLU, or other FFN variants to \cref{sec:ffn}.
+    \item Add scaled RoPE, position interpolation, or learned relative bias refinements to \cref{sec:attention-position}.
+    \item Add dilated, block-sparse, retrieval-augmented, or state-space attention alternatives to \cref{sec:attention-position} or \cref{sec:generation}.
+    \item Add ReGLU, GEGLU, expert-choice routing, or shared-expert variants to \cref{sec:ffn}.
     \item Add alternative normalizers or residual-scaling rules to \cref{sec:normalization}.
     \item Add fine-tuning regularizers, adapters, or bias changes to \cref{sec:simplifications} or \cref{sec:training-eval}.
 \end{itemize}
@@ -1887,37 +2711,6 @@ For each new component, add one subsection answering:
 Do not write ``we use component X because it is modern.'' Write ``we use component X because component Y creates limitation Z under constraint C, and X addresses Z by mechanism M while introducing trade-off T.''
 \end{motivationbox}
 
-% =============================================================================
-\section{Minimal Implementation Skeleton}
-% =============================================================================
-
-The V1 block can be summarized as:
-\begin{lstlisting}
-class TransformerBlock(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.attn_norm = RMSNorm(cfg.d_model)
-        self.ffn_norm = RMSNorm(cfg.d_model)
-        self.attn = CausalSelfAttentionWithRoPE(cfg)
-        self.ffn = SwiGLUFFN(cfg)
-
-    def forward(self, x, pos, kv_cache=None):
-        # Pre-norm attention residual update
-        x = x + self.attn(self.attn_norm(x), pos, kv_cache=kv_cache)
-
-        # Pre-norm FFN residual update
-        x = x + self.ffn(self.ffn_norm(x))
-        return x
-\end{lstlisting}
-
-The training objective is shifted-token cross-entropy:
-\begin{lstlisting}
-logits = model(input_ids)              # (B, T, vocab_size)
-loss = F.cross_entropy(
-    logits[:, :-1, :].reshape(-1, vocab_size),
-    input_ids[:, 1:].reshape(-1),
-)
-\end{lstlisting}
 
 % =============================================================================
 \section{References}
@@ -2011,7 +2804,7 @@ Ofir Press, Noah A. Smith, and Mike Lewis.
 \newblock \emph{ICLR}, 2022.
 
 \bibitem{ainslie2023gqa}
-Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yinfei Yang, Manzil Zaheer, and Sanghai Sumit.
+Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico Lebr\'on, and Sumit Sanghai.
 \newblock GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints.
 \newblock \emph{EMNLP}, 2023.
 
@@ -2040,638 +2833,36 @@ Iz Beltagy, Matthew E. Peters, and Arman Cohan.
 \newblock Longformer: The Long-Document Transformer.
 \newblock arXiv:2004.05150, 2020.
 
+
+
+\bibitem{gemma2024}
+Gemma Team et al.
+\newblock Gemma 2: Improving Open Language Models at a Practical Size.
+\newblock arXiv:2408.00118, 2024.
+
+\bibitem{kornblith2019cka}
+Simon Kornblith, Mohammad Norouzi, Honglak Lee, and Geoffrey Hinton.
+\newblock Similarity of Neural Network Representations Revisited.
+\newblock \emph{ICML}, 2019.
+
+\bibitem{arora2024zoology}
+Simran Arora, Sabri Eyuboglu, Aman Timalsina, Isys Johnson, Michael Poli, James Zou, Atri Rudra, and Christopher R\'e.
+\newblock Zoology: Measuring and Improving Recall in Efficient Language Models.
+\newblock arXiv:2312.04927, 2023.
+
+\bibitem{williams2009roofline}
+Samuel Williams, Andrew Waterman, and David Patterson.
+\newblock Roofline: An Insightful Visual Performance Model for Multicore Architectures.
+\newblock \emph{Communications of the ACM}, 52(4):65--76, 2009.
+
+\bibitem{nvidial4spec}
+NVIDIA.
+\newblock NVIDIA L4 Tensor Core GPU Product Specifications.
+\newblock \url{https://www.nvidia.com/en-us/data-center/l4/}, accessed July 2026.
+
+
 \end{thebibliography}
 
 % =============================================================================
-\section{Implemented Concepts Awaiting Full Notes}
-\label{sec:implemented-awaiting-notes}
-% =============================================================================
-
-The following concepts have been implemented in the project but are not yet explained in the main body of this document. Each entry follows the design-log template from \cref{sec:future-variants} and should be expanded into a full motivation-first subsection within its designated home section.
-
-\begin{enumerate}[leftmargin=2em]
-
-% --- ALiBi ---
-\item \textbf{ALiBi: Attention with Linear Biases (V2)} \emph{(home: \cref{sec:attention-position})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Baseline role:} RoPE encodes position by rotating Q and K vectors, making dot-product attention scores relative-position-aware.
-    \item \textbf{Limitation:} RoPE requires explicit frequency precomputation, introduces phase-wrapping at long contexts, and adds an irreversible transformation to Q/K before caching (cached keys are rotated and cannot be un-rotated). The multi-frequency structure is powerful but complex — position encoding is entangled with content representation.
-    \item \textbf{Design pressure:} Simpler position mechanism that leaves Q/K as pure content representations and encodes position exclusively in the attention logit space. Also motivated by potential extrapolation beyond training sequence length (the bias function is defined for arbitrary distances, unlike a finite learned table or fixed precomputed frequencies).
-    \item \textbf{Replacement mechanism:} Remove all position encoding from Q and K. Instead, add a fixed per-head linear bias to attention logits before softmax. For head $h$ with slope $m_h$, the bias at query position $i$ attending to key position $j$ is:
-    \begin{equation}
-        A_{ij} = \frac{\vq_i^\top \vk_j}{\sqrt{\dhead}} - m_h \cdot (i - j)
-    \end{equation}
-    where $\vq, \vk$ are raw linear projections (no rotation). Slopes follow a geometric series:
-    \begin{equation}
-        m_h = 2^{-8(h+1)/\nhead}, \qquad h = 0, \ldots, \nhead - 1
-    \end{equation}
-    Low-index heads have steep decay (attend locally); high-index heads decay slowly (attend broadly). This creates a built-in multi-scale attention pattern without learned parameters.
-    \item \textbf{Intuition:} ALiBi can be understood as a soft sliding window. Each head has a different ``attention horizon'' determined by its slope. A head with steep slope effectively ignores distant tokens (their bias penalty overwhelms content similarity). A head with gentle slope can still attend far away if the content match is strong enough. The model learns to use different heads for local syntax vs.\ long-range semantics.
-    \item \textbf{Comparison with RoPE:}
-    \begin{center}
-    \begin{tabular}{lll}
-    \toprule
-    Property & RoPE & ALiBi\\
-    \midrule
-    Where position enters & Q/K vector geometry & attention logits (additive)\\
-    Learned parameters & none (fixed rotations) & none (fixed slopes)\\
-    Relative vs.\ absolute & relative (via rotation composition) & relative (via distance penalty)\\
-    Position modulation & multi-frequency (rich patterns) & monotone linear decay (simple)\\
-    Extrapolation & requires frequency scaling tricks & naturally defined beyond training $T$\\
-    KV-cache keys & stored after rotation (position-encoded) & stored raw (content-only)\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-    \item \textbf{New trade-off:} Gives up RoPE's learned relative-distance modulation. RoPE's multi-frequency structure can learn that certain offsets matter more than others (e.g., the model might learn to attend strongly at distance 3 for trigrams). ALiBi imposes a fixed monotone decay — it cannot learn non-monotone position preferences. The simplicity is both the strength (no pathological phase interactions) and the weakness (less expressive position modeling).
-    \item \textbf{Parameter impact:} Zero additional parameters. Slopes are fixed constants derived from head count. The parameter count is essentially unchanged from V1 (removes RoPE frequency buffers, which are non-learnable anyway).
-    \item \textbf{Connection to KV-cache (\cref{sec:generation}):} With ALiBi, cached K/V are raw projections — no position encoding has been applied to them. The position bias is recomputed from scratch at each generation step based on the current total sequence length. This is conceptually simpler than RoPE caching (where keys must be stored post-rotation and the rotation convention must be consistent).
-\end{itemize}
-
-% --- GQA ---
-\item \textbf{Grouped-Query Attention / GQA (V3)} \emph{(home: \cref{sec:attention-position} and \cref{sec:generation})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Baseline role:} Standard multi-head attention (MHA) uses $\nhead$ independent Q, K, V heads. Each head has its own learned projections of size $\dmodel \to \dhead$. KV-cache stores $\nhead$ key and value vectors per layer per position.
-    \item \textbf{Limitation:} KV-cache memory scales linearly with $\nhead$. At inference with long contexts and large batches, KV-cache can dominate total memory. Additionally, at smaller model sizes, having many independent KV heads may be over-parameterized — empirical evidence suggests that K/V representations are more redundant across heads than Q representations.
-    \item \textbf{Design pressure:} Reduce KV-cache memory and KV projection parameters while preserving query expressiveness. The hypothesis: queries need to be diverse (different retrieval patterns), but keys and values can be shared across groups of queries without significant quality loss.
-    \item \textbf{Replacement mechanism:} Use $n_{\mathrm{kv}} < \nhead$ key-value heads. Each KV head serves a group of $\nhead / n_{\mathrm{kv}}$ query heads. The Q projection remains full size; K and V projections are reduced:
-    \begin{align}
-        \mW_Q &\in \reals^{\dmodel \times (\nhead \cdot \dhead)} \quad \text{(unchanged)}\\
-        \mW_K, \mW_V &\in \reals^{\dmodel \times (n_{\mathrm{kv}} \cdot \dhead)} \quad \text{(reduced)}
-    \end{align}
-    For query head $h$ in group $g = \lfloor h \cdot n_{\mathrm{kv}} / \nhead \rfloor$:
-    \begin{equation}
-        \mathrm{head}_h = \mathrm{Attention}(\mQ^{(h)}, \mK^{(g)}, \mV^{(g)})
-    \end{equation}
-    \item \textbf{Spectrum from MHA to MQA:}
-    \begin{center}
-    \begin{tabular}{lcl}
-    \toprule
-    Name & $n_{\mathrm{kv}}$ & Meaning\\
-    \midrule
-    MHA (multi-head) & $\nhead$ & every head has its own K/V\\
-    GQA (grouped-query) & $1 < n_{\mathrm{kv}} < \nhead$ & groups of queries share K/V\\
-    MQA (multi-query) & $1$ & all queries share one K/V\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-    In this project, $n_{\mathrm{kv}} = \nhead / 4$ (group size = 4):
-    \begin{center}
-    \begin{tabular}{lccc}
-    \toprule
-    Scale & $\nhead$ & $n_{\mathrm{kv}}$ & Group size\\
-    \midrule
-    debug & 4 & 1 & 4 (equivalent to MQA)\\
-    main & 8 & 2 & 4\\
-    stretch & 12 & 3 & 4\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-    \item \textbf{Parameter accounting:} Standard MHA has $3\dmodel^2$ parameters per layer for Q/K/V projections. GQA has $\dmodel(\nhead \cdot \dhead) + 2\dmodel(n_{\mathrm{kv}} \cdot \dhead) = \dmodel^2(1 + 2n_{\mathrm{kv}}/\nhead)$. At main scale: standard = $786\text{K}$ per layer; GQA = $393\text{K}$ per layer. Total model parameter reduction is approximately 6\%.
-    \item \textbf{KV-cache impact:} Cache shape becomes $(B, n_{\mathrm{kv}}, T, \dhead)$ instead of $(B, \nhead, T, \dhead)$. Memory reduced by factor $\nhead / n_{\mathrm{kv}} = 4$. For the cache size formula from \cref{sec:generation}:
-    \begin{equation}
-        \text{GQA cache} = 2 \cdot \nlayer \cdot B \cdot n_{\mathrm{kv}} \cdot T \cdot \dhead \cdot s
-    \end{equation}
-    \item \textbf{Intuition:} Think of GQA as having ``one librarian (KV head) serve multiple readers (query heads).'' The librarian organizes the same collection of facts; different readers ask different questions about those facts. If the readers' questions are diverse enough, they can extract different information from the same key-value store. The cost is that the librarian cannot customize the organization for each reader individually.
-    \item \textbf{New trade-off:} Fewer KV heads means less expressive key-value representations. If different query heads genuinely need different routing patterns (different keys), GQA forces them to share. At the 4:1 ratio, the approximately 6\% parameter reduction is inherent to the mechanism and is noted in results rather than compensated.
-    \item \textbf{Connection to RoPE:} RoPE is applied to Q (all $\nhead$ heads) and K (only $n_{\mathrm{kv}}$ heads). The relative-position property is preserved because each query-key dot product still involves one rotated Q and one rotated K, regardless of how many queries share that K.
-\end{itemize}
-
-% --- Flash Attention 2 ---
-\item \textbf{Flash Attention 2: Explicit Kernel Control} \emph{(home: \cref{sec:attention-position})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Baseline:} The existing notes explain Flash Attention as a tiling strategy that avoids materializing the $T \times T$ attention matrix. V1 accessed this via PyTorch's SDPA interface, which auto-selects the kernel.
-    \item \textbf{What's new:} Flash Attention 2 improves on Flash Attention 1 with better work partitioning across GPU thread blocks and reduced non-matmul FLOPs. More importantly for this project, the explicit library provides:
-    \begin{enumerate}[nosep]
-        \item Native \texttt{alibi\_slopes} parameter — fuses ALiBi bias into the tiled computation without materializing a bias matrix.
-        \item Native support for mismatched Q/KV head counts — handles GQA without manual tensor repetition.
-        \item Fused KV-cache append + attention in a single kernel call (\texttt{flash\_attn\_with\_kvcache}).
-    \end{enumerate}
-    \item \textbf{Why explicit kernel matters for experiments:} With SDPA, different variants might dispatch to different kernels (Flash for V1, memory-efficient for V2 with an attn\_mask). Using the same explicit Flash kernel for all variants eliminates this confound from throughput comparisons.
-    \item \textbf{Conceptual relationship:} Flash Attention is a compute optimization (same math, different execution). Flash Attention 2 is a better implementation of the same idea. Neither changes the statistical model — they change wall-clock time and memory usage. The notes should explain the online softmax recurrence (already present) and add: (a) the work-partitioning improvement in v2, and (b) how ALiBi slopes integrate into the tiled computation without breaking the O(T) memory property.
-\end{itemize}
-
-% --- Sliding Window Attention ---
-\item \textbf{Sliding Window Attention / SWA (V4)} \emph{(home: \cref{sec:attention-position})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Baseline role:} Full causal attention allows every query at position $i$ to attend to all positions $j \leq i$. This gives maximum expressiveness — any pattern of information retrieval is representable within the attention weight simplex.
-
-    \item \textbf{Limitation:} Full causal attention has two practical limitations as sequence length grows:
-    \begin{enumerate}[nosep]
-        \item Even with FlashAttention's tiling, the $O(T^2)$ arithmetic cost applies to every layer at every training step. For long sequences, much of this compute goes to attending to very distant tokens whose relevance may be small.
-        \item The KV-cache at inference scales as $O(\nlayer \cdot T \cdot \dmodel)$. In serving scenarios with long contexts, this dominates memory.
-    \end{enumerate}
-    Additionally, empirical evidence suggests that lower Transformer layers primarily capture local patterns (syntax, short phrases), while only upper layers benefit from long-range attention. Applying full attention uniformly at every layer may be over-parameterizing the attention pattern for lower layers.
-
-    \item \textbf{Design pressure:} Reduce training FLOPs for attention while preserving the model's ability to capture local patterns that dominate natural language structure. The hypothesis: restricting attention to a fixed local window during training is a useful inductive bias that encourages the model to encode information into the residual stream efficiently, rather than relying on attending to arbitrarily distant raw tokens.
-
-    \item \textbf{Replacement mechanism --- windowed causal attention:} Each query at position $i$ can attend only to positions in the window $[\max(0, i - W + 1), \; i]$, where $W$ is the window size. The causal mask is replaced by a banded causal mask:
-    \begin{equation}\label{eq:swa_mask}
-        A_{ij} = \begin{cases}
-            \vq_i^\top \vk_j / \sqrt{\dhead}, & \max(0, i - W + 1) \leq j \leq i,\\
-            -\infty, & \text{otherwise}.
-        \end{cases}
-    \end{equation}
-    After softmax, positions outside the window receive zero weight.
-
-    \item \textbf{Mathematical formulation:} The windowed attention output at position $i$ is:
-    \begin{equation}
-        \vo_i = \sum_{j=\max(0,\, i-W+1)}^{i} \alpha_{ij} \vv_j, \qquad
-        \alpha_{ij} = \frac{\exp(\vq_i^\top \vk_j / \sqrt{\dhead})}{\sum_{k=\max(0,\, i-W+1)}^{i} \exp(\vq_i^\top \vk_k / \sqrt{\dhead})}
-    \end{equation}
-    The normalisation denominator sums only over the window, not all past positions. Thus the attention weights $\alpha_{ij}$ still form a valid probability distribution (non-negative, sum to 1) over the restricted set.
-
-    \item \textbf{Window size as a fixed proportion:} In this project, $W = \lfloor T / 4 \rfloor$ where $T$ is the training sequence length:
-    \begin{center}
-    \begin{tabular}{lcccc}
-    \toprule
-    Scale & $T$ (seq\_len) & $W$ (window) & Ratio $W/T$ & Visible positions at $i = T$\\
-    \midrule
-    debug & 512 & 128 & 1/4 & 128\\
-    main & 1024 & 256 & 1/4 & 256\\
-    stretch & 1024 & 256 & 1/4 & 256\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-    A fixed proportion rather than a fixed absolute window means the receptive field scales with context length. Each layer sees a local window; stacking $\nlayer$ layers gives an effective receptive field that grows linearly with depth.
-
-    \item \textbf{Effective receptive field:} After $L$ layers of windowed attention, position $i$ can be influenced by information from positions as far back as $i - L \cdot W$. This is because each layer propagates information one window-width backward through the residual stream:
-    \begin{equation}
-        \text{effective receptive field} = \min(i,\; L \cdot W)
-    \end{equation}
-    At debug scale: $L = 4$ layers $\times$ $W = 128$ = 512 positions, which covers the full sequence. Thus even with windowed attention, the model can in principle propagate information across the entire context through multi-layer composition.
-
-    \item \textbf{Training vs.\ generation asymmetry:} A key design decision is that the window restriction applies only during training. At generation time, the full KV-cache is used without window restriction:
-    \begin{center}
-    \begin{tabular}{lll}
-    \toprule
-    Phase & Attention scope & Rationale\\
-    \midrule
-    Training & $[i - W + 1, \; i]$ & Inductive bias, reduced FLOPs\\
-    Generation & $[0, \; i]$ (full) & Maximum expressiveness at inference\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-    This asymmetry means the model is trained with a local inductive bias but evaluated with access to all context. The model learns to write useful information into the residual stream within each window, and at inference time can optionally use longer-range key-value pairs if they happen to be useful.
-
-    \item \textbf{Complexity analysis:}
-    \begin{center}
-    \begin{tabular}{lcc}
-    \toprule
-    & Full Causal Attention & Sliding Window ($W < T$)\\
-    \midrule
-    Time per layer & $O(T^2 \cdot \dhead)$ & $O(T \cdot W \cdot \dhead)$\\
-    Effective reduction & --- & factor of $T / W = 4$ in this project\\
-    KV-cache (generation) & $O(T \cdot \dhead)$ & $O(T \cdot \dhead)$ (same --- no window at inference)\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-    With the flash\_attn kernel, the window is implemented as a kernel parameter rather than a mask matrix. The kernel simply skips loading tiles outside the window, achieving the computational savings without materializing any mask.
-
-    \item \textbf{Connection to RoPE:} SWA uses RoPE identically to V1. Rotary position embeddings are applied to Q and K before the attention computation. Within the window, relative positions range from $0$ to $W - 1$. RoPE is defined for all integer offsets, so no modification is needed. The key insight is that even though the model only attends within a window during training, the RoPE frequencies encode positions beyond the window — this is what enables the full-context generation to work correctly at inference.
-
-    \item \textbf{Relationship to local attention literature:} SWA belongs to a family of sparse attention patterns:
-    \begin{center}
-    \begin{tabular}{ll}
-    \toprule
-    Pattern & Description\\
-    \midrule
-    Full causal & attend to all past positions\\
-    Sliding window (SWA) & attend to $W$ most recent positions\\
-    Dilated window & attend to every $d$-th position in a larger span\\
-    Global + local & some heads attend globally, others locally\\
-    Longformer-style & local window + global tokens\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-    SWA is the simplest member: a contiguous local window with no global tokens. Mistral-7B uses exactly this pattern (window size 4096 with 32k context). The simplicity is intentional for this project — it isolates the effect of local attention bias without confounding it with complex sparse patterns.
-
-    \item \textbf{New trade-off:}
-    \begin{enumerate}[nosep]
-        \item \textbf{Expressiveness loss in training:} Lower layers cannot directly attend to distant positions during training. If certain tasks require long-range attention in early layers (e.g., matching a bracket opened 500 tokens ago), the model must propagate that information through the residual stream layer by layer.
-        \item \textbf{Train/test distribution mismatch:} The model trains with restricted attention but generates with full attention. The attention weights at inference may not be well-calibrated for distant positions because those patterns were never trained.
-        \item \textbf{No KV-cache savings at inference:} Unlike some serving-optimized systems that evict old KV entries beyond the window, this implementation keeps the full cache. The benefit is purely in training FLOPs.
-        \item \textbf{Minimal implementation complexity:} Because SWA is a kernel parameter rather than a structural change, it adds zero parameters, zero new modules, and zero changes to the cache format. It is the lightest possible attention-pattern experiment.
-    \end{enumerate}
-
-    \item \textbf{Parameter count impact:} Zero. The window restriction changes the attention computation but not the model parameters. QKV projections, output projection, RoPE buffers, FFN weights, and normalization scales are all identical to V1. Formally: $|\vtheta_{\text{SWA}}| = |\vtheta_{\text{V1}}|$ at every scale.
-
-    \item \textbf{Connection to linear attention (V5):} SWA and linear attention address the same design pressure ($O(T^2)$ cost) from opposite directions. SWA keeps the softmax kernel but restricts the number of positions attended (reducing arithmetic by a constant factor). Linear attention changes the kernel itself to enable $O(T)$ recurrence but attends to all past positions (with implicit rank-limited weighting). Neither achieves both full-range attention and sub-quadratic complexity simultaneously.
-
-    \item \textbf{Correctness properties verified by tests:}
-    \begin{enumerate}[nosep]
-        \item Window size validation rejects out-of-range values ($W < 1$ or $W > T$)
-        \item Training kernel receives \texttt{window\_size=(W, W)} argument
-        \item Generation kernel does \emph{not} receive window\_size (full attention at inference)
-        \item Window is computed as $W = \lfloor T / 4 \rfloor$ for all scales
-        \item Parameter count is identical to V1 at every scale
-        \item Existing variants (V1, V2, V3) produce unchanged outputs after SWA addition
-    \end{enumerate}
-\end{itemize}
-
-% --- Linear Attention ---
-\item \textbf{Linear Attention: ELU-Based Causal Attention (V5)} \emph{(home: \cref{sec:attention-position})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Baseline role:} Standard softmax attention computes a weighted average over values using normalized exponential scores:
-    \begin{equation}
-        \mathrm{Attn}(\mQ,\mK,\mV)_i = \frac{\sum_{j \leq i} \exp(\vq_i^\top \vk_j / \sqrt{\dhead})\, \vv_j}{\sum_{j \leq i} \exp(\vq_i^\top \vk_j / \sqrt{\dhead})}
-    \end{equation}
-    This requires materializing (or tiling over) the $T \times T$ attention score matrix, giving $O(T^2 \dhead)$ time and $O(T^2)$ or $O(T)$ space depending on implementation strategy.
-
-    \item \textbf{Limitation:} Even with FlashAttention's tiling, the \emph{arithmetic cost} remains $O(T^2 \dhead)$. For very long sequences or research settings where wall-clock scaling matters, quadratic cost is fundamentally limiting. Additionally, the softmax normalization couples all positions — there is no closed-form incremental update rule that avoids revisiting past scores.
-
-    \item \textbf{Design pressure:} Achieve sub-quadratic \emph{time} complexity for causal attention while preserving: (1)~strict causal ordering (no future leakage), (2)~a proper normalization so outputs are bounded, and (3)~compatibility with the existing ModernTransformer shell (same interface, same parameter count). The target is $O(T \cdot \dhead^2)$ time and $O(\dhead^2)$ recurrence space.
-
-    \item \textbf{Replacement mechanism --- kernel linearization:} Replace softmax with a feature map $\varphi$ applied to Q and K separately. The key identity is:
-    \begin{equation}
-        \mathrm{Attn}(\mQ,\mK,\mV)_i \approx \frac{\sum_{j \leq i} \varphi(\vq_i)^\top \varphi(\vk_j) \cdot \vv_j}{\sum_{j \leq i} \varphi(\vq_i)^\top \varphi(\vk_j)}
-    \end{equation}
-    Because $\varphi(\vq_i)$ does not depend on $j$, it can be factored out of the sum:
-    \begin{equation}\label{eq:linear_attn_factored}
-        \vo_i = \frac{\varphi(\vq_i)^\top \mS_i}{\varphi(\vq_i)^\top \vz_i}
-    \end{equation}
-    where the accumulators are defined recursively:
-    \begin{align}
-        \mS_i &= \mS_{i-1} + \varphi(\vk_i) \vv_i^\top \in \reals^{\dhead \times \dhead} \label{eq:S_recurrence}\\
-        \vz_i &= \vz_{i-1} + \varphi(\vk_i) \in \reals^{\dhead} \label{eq:z_recurrence}
-    \end{align}
-    with $\mS_0 = \bm{0}$ and $\vz_0 = \bm{0}$. This recurrence is naturally causal (each step depends only on past) and costs $O(\dhead^2)$ per step for the outer product update.
-
-    \item \textbf{Feature map choice --- ELU+1:} The project uses:
-    \begin{equation}\label{eq:elu_feature_map}
-        \varphi(x) = \mathrm{ELU}(x) + 1 = \begin{cases} x + 1 & x \geq 0 \\ e^x & x < 0 \end{cases}
-    \end{equation}
-    applied element-wise. This satisfies the critical requirement $\varphi(x) > 0$ for all $x \in \reals$, which guarantees:
-    \begin{enumerate}[nosep]
-        \item The normalisation denominator $\varphi(\vq_i)^\top \vz_i > 0$ (both vectors have strictly positive entries after at least one key has been accumulated).
-        \item The ``attention weights'' (implicit in the factored form) are non-negative, preserving the interpretation of attention as a weighted average.
-    \end{enumerate}
-
-    \item \textbf{Mathematical properties of $\varphi$:}
-    \begin{itemize}[nosep]
-        \item \textbf{Positivity:} $\varphi(x) > 0$ for all $x \in \reals$. For $x \geq 0$: $\varphi(x) = x + 1 \geq 1 > 0$. For $x < 0$: $\varphi(x) = e^x \in (0, 1)$.
-        \item \textbf{Range partitioning:} For negative inputs, $\varphi$ maps $(-\infty, 0) \to (0, 1)$. For non-negative inputs, $\varphi$ maps $[0, \infty) \to [1, \infty)$. The function is continuous at $x = 0$ since both branches give $\varphi(0) = 1$.
-        \item \textbf{Monotonicity:} $\varphi'(x) = 1$ for $x \geq 0$ and $\varphi'(x) = e^x > 0$ for $x < 0$. Thus $\varphi$ is strictly monotone increasing everywhere.
-        \item \textbf{Derivative continuity:} $\varphi'(0^-) = e^0 = 1 = \varphi'(0^+)$. The function is $C^1$ everywhere (smooth gradient flow during backpropagation).
-    \end{itemize}
-
-    \item \textbf{Complexity analysis:}
-    \begin{center}
-    \begin{tabular}{lcc}
-    \toprule
-    & Softmax Attention & Linear Attention\\
-    \midrule
-    Time per layer & $O(T^2 \dhead)$ & $O(T \cdot \dhead^2)$\\
-    Space (working) & $O(T^2)$ or $O(T)$ (tiled) & $O(\dhead^2)$ (accumulator)\\
-    Output storage & $O(T \cdot \dhead)$ & $O(T \cdot \dhead)$\\
-    Crossover regime & favourable when $T < \dhead$ & favourable when $T > \dhead$\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-    At the project's debug scale ($T = 512$, $\dhead = 64$), $T \gg \dhead$, so linear attention is in its favourable regime arithmetically. However, the Python-loop implementation has constant overhead per step that dominates at small $T$.
-
-    \item \textbf{Why no position encoding:} RoPE works because it exploits the \emph{multiplicative structure of softmax}: $\exp(\widetilde{\vq}_m^\top \widetilde{\vk}_n) = \exp(\vq_m^\top \mR_{n-m} \vk_n)$, so the rotation decomposes into a relative offset inside the exponential. In linear attention, the kernel is $\varphi(\vq)^\top \varphi(\vk)$, which is a dot product of two independently transformed vectors. Rotating Q and K before applying $\varphi$ does not produce a clean relative-offset decomposition because $\varphi$ is not multiplicatively compatible with rotations:
-    \begin{equation}
-        \varphi(\mR_m \vq)^\top \varphi(\mR_n \vk) \neq f(n - m, \vq, \vk) \quad \text{in general}
-    \end{equation}
-    Position information must therefore come from elsewhere (token embeddings in the residual stream, or future work on position-aware feature maps).
-
-    \item \textbf{Numerical stability --- $\varepsilon$-clamping:} The normalisation denominator can become very small when $\varphi(\vq_i)$ is nearly orthogonal to the accumulated $\vz_i$. To prevent division by zero or numerically unstable outputs:
-    \begin{equation}
-        \hat{d}_i = \max\left(\varphi(\vq_i)^\top \vz_i,\; \varepsilon\right), \qquad \varepsilon = 10^{-6}
-    \end{equation}
-    This clamping introduces a small bias at affected positions (outputs are slightly smaller than the true normalised value) but ensures finite gradients everywhere.
-
-    \item \textbf{Causal correctness guarantee:} The recurrence structure in \cref{eq:S_recurrence,eq:z_recurrence} ensures causality by construction. At step $i$, the accumulator $\mS_i$ contains information only from positions $1, \ldots, i$. No future position $j > i$ can influence $\mS_i$ or $\vz_i$ because the loop processes positions left-to-right. This is formally equivalent to a lower-triangular implicit attention matrix where entry $(i, j) = 0$ for $j > i$.
-
-    \item \textbf{Relationship to kernel methods:} Linear attention can be viewed through the lens of kernel approximation. Standard softmax attention with the exponential kernel $\kappa(\vq, \vk) = \exp(\vq^\top \vk / \sqrt{\dhead})$ can be approximated by $\kappa(\vq, \vk) \approx \varphi(\vq)^\top \varphi(\vk)$ for appropriate $\varphi$. The ELU+1 map is not derived from approximating the softmax kernel specifically --- it is a simpler positive map that enables the recurrence factorization. More sophisticated feature maps (random Fourier features, positive orthogonal features) can approximate softmax more closely but add complexity.
-
-    \item \textbf{Connection to state-space models and RNNs:} The accumulator recurrence $\mS_i = \mS_{i-1} + \varphi(\vk_i)\vv_i^\top$ is structurally similar to a linear recurrent neural network with additive state updates. The ``state'' is $\mS \in \reals^{\dhead \times \dhead}$, updated at each step by a rank-1 outer product. This connection places linear attention on the spectrum between:
-    \begin{center}
-    \begin{tabular}{lll}
-    \toprule
-    Architecture & State size & Attention pattern\\
-    \midrule
-    RNN (e.g., LSTM) & $O(\dhead)$ & implicit, via hidden state\\
-    Linear Attention & $O(\dhead^2)$ & explicit rank-1 updates\\
-    Full Attention & $O(T \cdot \dhead)$ & explicit $T \times T$ matrix\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-    Linear attention trades off between expressiveness (smaller state than full attention) and recurrence efficiency (constant-time update per step, unlike full attention's growing context).
-
-    \item \textbf{New trade-off:}
-    \begin{enumerate}[nosep]
-        \item \textbf{Expressiveness vs.\ efficiency:} Softmax attention can represent arbitrary attention patterns (any row-stochastic matrix for given Q, K). Linear attention's implicit weights are constrained by the rank of the outer-product accumulator --- it cannot represent patterns that require more than $\dhead$ ``basis'' attention columns.
-        \item \textbf{No KV-cache generation:} The recurrence is efficient for training (process all $T$ positions in one pass) but autoregressive generation would require maintaining and querying the $\mS, \vz$ state. This is feasible but not implemented per ADR 0002 (training-comparison-only variant).
-        \item \textbf{Python loop overhead:} The sequential recurrence requires $T$ iterations. Without a fused CUDA kernel or \texttt{torch.compiler} scan primitive, the Python loop adds significant per-step overhead. At $T = 512$, this makes V5 slower in wall-clock than FlashAttention-based V1, despite lower arithmetic complexity.
-        \item \textbf{No learned position:} Without RoPE or ALiBi, the model relies entirely on token order information propagated through the residual stream across layers. Early layers have no explicit position signal; position awareness emerges only through the sequential processing pattern.
-    \end{enumerate}
-
-    \item \textbf{Parameter count impact:} Linear attention uses the same $4\dmodel^2$ parameters per layer as standard MHA (three QKV projections + one output projection, all of shape $\dmodel \times \dmodel$). No RoPE buffers (non-learnable). The total parameter count is within $\pm 0\%$ of V1, well within the $\pm 5\%$ parity requirement for fair comparisons.
-
-    \item \textbf{Correctness properties verified by property-based tests:}
-    \begin{enumerate}[nosep]
-        \item $\varphi(x) > 0$ for all $x \in [-100, 100]$ (strict positivity of feature map)
-        \item For $x < 0$: $\varphi(x) \in (0, 1)$ (range characterization)
-        \item Causal independence: modifying input at position $t$ does not change output at positions $< t$
-        \item Finite outputs for all inputs in $[-10, 10]$ (numerical stability)
-        \item Output shape $(B, T, \dmodel)$ and second return element is \texttt{None} (interface contract)
-    \end{enumerate}
-\end{itemize}
-
-\end{enumerate}
-
-% --- V4-interleaved ---
-\item \textbf{Interleaved SWA: Alternating Local and Global Layers (V4-interleaved)} \emph{(home: \cref{sec:attention-position})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Baseline role:} V4 (SWA) applies the same window restriction at every layer. All $\nlayer$ layers attend to only the $W$ most recent tokens. Long-range information can only propagate through multi-layer residual composition.
-    \item \textbf{Limitation:} Pure SWA relies entirely on the residual stream to relay long-range information layer by layer. If the model needs direct access to a distant token (e.g., matching a parenthesis opened far away), it must compress that information into the residual stream within the window at an earlier layer. This places a strong representational burden on lower layers and may degrade tasks requiring long-range retrieval.
-    \item \textbf{Design pressure:} Isolate the question: ``Does periodic full-context access recover the information lost by windowing?'' If alternating one full-attention layer between every SWA layer recovers most of the quality loss, it suggests that only a few global layers are needed and the remaining layers can be efficient local layers.
-    \item \textbf{Replacement mechanism:} Even-indexed layers ($\ell = 0, 2, 4, \ldots$) use full causal attention (no window restriction). Odd-indexed layers ($\ell = 1, 3, 5, \ldots$) use sliding window attention with $W = \lfloor T / 4 \rfloor$. Each layer uses the same \texttt{FlashAttention} module but with per-layer \texttt{window\_size} configuration:
-    \begin{equation}
-        W^{(\ell)} = \begin{cases}
-            \text{None (full attention)}, & \ell \mod 2 = 0,\\
-            \lfloor T/4 \rfloor, & \ell \mod 2 = 1.
-        \end{cases}
-    \end{equation}
-    This is inspired by Gemma-2-style layer interleaving. The registry constructs per-layer configs via a \texttt{per\_layer\_config\_builder} function.
-    \item \textbf{Complexity:} For $L$ layers with half global and half local:
-    \begin{equation}
-        \text{Time} = \frac{L}{2} \cdot O(T^2 \dhead) + \frac{L}{2} \cdot O(T \cdot W \cdot \dhead) = O\!\left(\frac{L}{2}(T^2 + TW)\dhead\right)
-    \end{equation}
-    Compared to full attention at every layer ($O(LT^2\dhead)$), this saves roughly $\frac{1}{2}(1 - W/T) = \frac{3}{8}$ of the attention FLOPs.
-    \item \textbf{New trade-off:} Gains some long-range access (every other layer is global) at the cost of recovering half of the full-attention compute. The experiment tests whether this 50/50 split is better than pure SWA or pure full attention on the same token budget. Additionally, the per-layer config adds implementation complexity (each block may have a different effective attention pattern).
-    \item \textbf{Parameter count impact:} Zero. All layers use the same projections. The only difference is which layers pass \texttt{window\_size} to the attention kernel.
-    \item \textbf{Connection to V4 (pure SWA):} V4-interleaved is a sub-variant of V4. If the interleaved variant matches V1's quality while V4 degrades, it demonstrates that the SWA quality loss is due to insufficient long-range access rather than some other artifact of the window mechanism.
-\end{itemize}
-
-% --- Evaluation Comparison Axes ---
-\item \textbf{Three-Axis Comparison Framework} \emph{(home: \cref{sec:training-eval})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Baseline role:} Comparing Transformer variants on final validation loss alone conflates quality improvements with compute-efficiency improvements. A variant with more FLOPs per step may reach better loss simply because it processes data differently, not because its architecture is better at a fixed cost.
-    \item \textbf{Limitation:} A single metric (e.g., val loss at fixed training steps) cannot distinguish whether a variant is better because it learns faster per token, because it processes tokens faster in wall-clock time, or because it extracts more learning from each FLOP.
-    \item \textbf{Design pressure:} Need simultaneous controlled perspectives that separate quality, time-efficiency, and compute-efficiency. All comparisons should use the same training runs (no additional experiments needed).
-    \item \textbf{Replacement mechanism --- three comparison axes applied post-hoc:}
-    \begin{center}
-    \begin{tabular}{lll}
-    \toprule
-    Axis & Control variable & Metric\\
-    \midrule
-    Fixed-data & Same token budget $B_{\text{tok}}$ & Val loss $\loss(B_{\text{tok}})$\\
-    Fixed-wallclock & Same elapsed time $t_{\max}$ & Val loss $\loss(t_{\max})$\\
-    Fixed-FLOPs & Same cumulative FLOPs $F_{\max}$ & Val loss $\loss(F_{\max})$\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-    The wall-clock and FLOP budgets are determined dynamically as $t_{\max} = \min_v t_v^{\text{total}}$ and $F_{\max} = \min_v F_v^{\text{total}}$ respectively. Loss values at intermediate budgets are interpolated from training logs.
-    \item \textbf{New trade-off:} Fixed-data comparisons favour architectures that learn more per token but may be slower. Fixed-wallclock comparisons favour architectures that are fast even if they learn less per token. Fixed-FLOPs comparisons favour architectures with lower per-step FLOP cost. Reporting all three prevents cherry-picking one axis that favours a particular variant.
-    \item \textbf{Mathematical formulation:} Given training logs $\{(s, \loss_s, t_s, F_s)\}$ where $s$ is the step, $t_s$ is cumulative wall-clock, and $F_s$ is cumulative FLOPs, define:
-    \begin{align}
-        \loss^{\text{data}}(B) &= \text{interpolate}(\{(\text{tokens}_s, \loss_s)\}, B)\\
-        \loss^{\text{time}}(\tau) &= \text{interpolate}(\{(t_s, \loss_s)\}, \tau)\\
-        \loss^{\text{flop}}(F) &= \text{interpolate}(\{(F_s, \loss_s)\}, F)
-    \end{align}
-\end{itemize}
-
-% --- Component-Level FLOP Accounting ---
-\item \textbf{Component-Level FLOP Accounting and MFU} \emph{(home: \cref{sec:training-eval})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Baseline:} The common approximation $6NT$ (where $N$ is parameter count, $T$ is tokens per step) gives a rough FLOP estimate but does not distinguish between variants with different attention costs. V4 (SWA) does less attention work than V1 for the same $N$ and $T$; the $6NT$ approximation cannot capture this.
-    \item \textbf{Design pressure:} Need per-step FLOP estimates that reflect actual computation at the component level, so fixed-FLOP comparisons are meaningful across variants with different attention mechanisms.
-    \item \textbf{Mechanism:} Sum FLOPs from each component class per layer:
-    \begin{align}
-        F_{\text{QKV}} &= 3 \cdot \nlayer \cdot 2 \cdot T \cdot \dmodel^2 \quad \text{(Q, K, V projections)}\\
-        F_{\text{attn}} &= \nlayer \cdot 2 \cdot T \cdot C_{\text{attn}} \cdot \dhead \cdot \nhead \quad \text{(attention scores)}\\
-        F_{\text{out}} &= \nlayer \cdot 2 \cdot T \cdot \dmodel^2 \quad \text{(output projection)}\\
-        F_{\text{FFN}} &= \nlayer \cdot 2 \cdot n_{\text{proj}} \cdot T \cdot \dmodel \cdot d_h \quad \text{(FFN projections)}
-    \end{align}
-    where $C_{\text{attn}}$ is the effective context length (variant-dependent):
-    \begin{equation}
-        C_{\text{attn}} = \begin{cases}
-            T & \text{full attention (V0, V1, V3)}\\
-            W & \text{SWA (V4)}\\
-            r & \text{Linformer (V5), projection rank}
-        \end{cases}
-    \end{equation}
-    A $3\times$ training multiplier accounts for forward + backward passes.
-    \item \textbf{Model FLOPs Utilization (MFU):} The ratio of achieved computation rate to hardware peak:
-    \begin{equation}
-        \mathrm{MFU} = \frac{F_{\text{step}} / t_{\text{step}}}{F_{\text{peak}}}
-    \end{equation}
-    where $F_{\text{peak}} = 242$ TFLOPS (L4 BF16 peak). MFU distinguishes compute-bound regimes (high MFU, close to hardware peak) from memory-bandwidth-bound regimes (low MFU, limited by data movement).
-    \item \textbf{Arithmetic intensity:} The ratio of FLOPs to bytes transferred:
-    \begin{equation}
-        I = \frac{F_{\text{step}}}{B_{\text{bytes}}}
-    \end{equation}
-    where $B_{\text{bytes}}$ estimates parameter reads plus activation traffic in BF16. The L4 ridge point is $I^* \approx 807$ FLOPs/byte. Variants with $I < I^*$ are memory-bound; variants with $I > I^*$ are compute-bound.
-\end{itemize}
-
-% --- Roofline Diagram ---
-\item \textbf{Roofline Diagram} \emph{(home: \cref{sec:training-eval})}
-
-\begin{itemize}[nosep]
-    \item \textbf{What it is:} A plot of achieved performance (TFLOPS/s) versus arithmetic intensity (FLOPs/byte). The hardware ceiling creates a characteristic ``roofline'' shape:
-    \begin{equation}
-        P_{\text{achievable}}(I) = \min\!\left(F_{\text{peak}},\; \mathrm{BW} \cdot I\right)
-    \end{equation}
-    where $\mathrm{BW} = 300$ GB/s (L4 memory bandwidth) and $F_{\text{peak}} = 242$ TFLOPS.
-    \item \textbf{Use in this project:} Each variant is plotted as a point on the roofline at its measured $(I, P)$ coordinates. Variants that sit on the diagonal (bandwidth-limited regime) benefit from reduced memory traffic. Variants on the flat ceiling (compute-limited regime) benefit from reduced arithmetic. This tells us whether a variant's wall-clock advantage comes from doing less math or from being more cache-friendly.
-    \item \textbf{Ridge point:} The crossover occurs at $I^* = F_{\text{peak}} / \mathrm{BW} = 242 \times 10^{12} / (300 \times 10^9) \approx 807$ FLOPs/byte.
-\end{itemize}
-
-% --- Stable Rank ---
-\item \textbf{Stable Rank: Representation Health Diagnostic} \emph{(home: \cref{sec:training-eval})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Definition:} For a hidden-state matrix $\mH \in \reals^{n \times d}$ (where $n$ is the number of tokens and $d = \dmodel$), the stable rank is:
-    \begin{equation}
-        \mathrm{srank}(\mH) = \frac{\|\mH\|_F^2}{\|\mH\|_2^2} = \frac{\sum_i \sigma_i^2}{\sigma_1^2}
-    \end{equation}
-    where $\sigma_1 \geq \sigma_2 \geq \ldots$ are singular values. The stable rank is bounded: $1 \leq \mathrm{srank}(\mH) \leq \min(n, d)$.
-    \item \textbf{Interpretation:} Stable rank measures the effective dimensionality of the representation. If $\mathrm{srank}(\mH) = 1$, all tokens lie on a single direction (representation collapse). If $\mathrm{srank}(\mH) \approx d$, the representation uses the full available space. A healthy model should maintain reasonable stable rank throughout its layers; a sharp drop in deep layers suggests the model is over-compressing information.
-    \item \textbf{Measurement protocol:} Computed at the final checkpoint, averaged over $\sim 100$ validation batches. Reported per-layer as a curve: $\mathrm{srank}^{(\ell)}$ for $\ell = 0, \ldots, \nlayer - 1$.
-    \item \textbf{Why it matters for variant comparison:} Different attention patterns (full, windowed, linear) create different representational dynamics. A variant that aggressively compresses context (e.g., V5 linear attention with its finite-rank accumulator) might show earlier stable-rank collapse than full attention. This provides evidence about whether a variant's loss difference is due to representational capacity limits or other factors.
-\end{itemize}
-
-% --- CKA ---
-\item \textbf{Centered Kernel Alignment (CKA)} \emph{(home: \cref{sec:training-eval})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Definition:} For representations $\mX \in \reals^{n \times p}$ and $\mY \in \reals^{n \times q}$ from two layers (same inputs), linear CKA is:
-    \begin{equation}
-        \mathrm{CKA}(\mX, \mY) = \frac{\|\mY^\top \mX\|_F^2}{\|\mX^\top \mX\|_F \cdot \|\mY^\top \mY\|_F}
-    \end{equation}
-    (after centering both matrices). CKA $\in [0, 1]$, with $\mathrm{CKA}(\mX, \mX) = 1$.
-    \item \textbf{Properties:}
-    \begin{itemize}[nosep]
-        \item Invariant to orthogonal transformations and isotropic scaling
-        \item Symmetric: $\mathrm{CKA}(\mX, \mY) = \mathrm{CKA}(\mY, \mX)$
-        \item Self-similarity: diagonal entries of the full $L \times L$ matrix equal 1
-    \end{itemize}
-    \item \textbf{Use:} High CKA between non-adjacent layers $(\ell, \ell + k)$ for $k > 1$ indicates that those layers perform redundant computation --- the representation did not change much. The primary presentation is an adjacent-layer curve $\mathrm{CKA}(\mX^{(\ell)}, \mX^{(\ell+1)})$ for $\ell = 0, \ldots, \nlayer - 2$. The full $L \times L$ heatmap is supplementary.
-    \item \textbf{Interpretation for variants:} If V4 (SWA) shows high adjacent-CKA in windowed layers but low CKA across global layers in V4-interleaved, it suggests that global layers introduce genuinely new information while windowed layers are more incremental.
-\end{itemize}
-
-% --- MQAR ---
-\item \textbf{Multi-Query Associative Recall (MQAR)} \emph{(home: \cref{sec:training-eval})}
-
-\begin{itemize}[nosep]
-    \item \textbf{What it tests:} Whether the model can bind key-value token pairs planted at known positions in a synthetic sequence and recall the correct value when prompted with the key later.
-    \item \textbf{Protocol:} Generate sequences containing $k$ key-value associations $(a_1 \to b_1, \ldots, a_k \to b_k)$ at controlled distances. After all pairs, present query tokens (the keys) and measure $P(\text{correct value} \mid \text{key query})$.
-    \item \textbf{Metric:} Overall accuracy and accuracy-by-distance (how recall degrades as the retrieval distance increases).
-    \item \textbf{Why it matters:} This probe isolates retrieval capacity. Variants with restricted attention (V4-SWA, V5-Linformer) should show measurable degradation at distances beyond their effective receptive field, while full-attention variants (V1, V2, V3) should be roughly constant. It provides a mechanistic explanation for any loss differences observed in the three-axis comparison.
-    \item \textbf{Mathematical formulation:} Let $d_j$ be the distance (in tokens) between the key-value binding and the query for association $j$. The per-distance accuracy is:
-    \begin{equation}
-        \text{acc}(d) = \frac{1}{|\{j : d_j = d\}|} \sum_{j : d_j = d} \ind[\argmax_w p_\vtheta(w \mid \text{context}_j) = b_j]
-    \end{equation}
-\end{itemize}
-
-% --- ICL Loss Decay ---
-\item \textbf{ICL Loss Decay Exponent ($\alpha$)} \emph{(home: \cref{sec:training-eval})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Definition:} The per-position validation loss $L(t)$ typically decays as a power law with sequence position $t$:
-    \begin{equation}
-        L(t) = A \cdot t^{-\alpha} + C
-    \end{equation}
-    where $A > 0$ is an amplitude, $\alpha > 0$ is the decay exponent, and $C \geq 0$ is the irreducible loss floor.
-    \item \textbf{Interpretation:} A steep $\alpha$ (large negative power) means the model effectively uses context --- each additional token of context significantly reduces prediction uncertainty. A small $\alpha$ indicates the model hits diminishing returns from context early. $C$ represents the information-theoretic limit that cannot be reduced by additional context.
-    \item \textbf{Fitting procedure:} Non-linear least squares (\texttt{scipy.optimize.curve\_fit}) on the per-position loss curve measured over validation data. Report $\alpha$, $C$, and goodness-of-fit $R^2$.
-    \item \textbf{Variant comparison:} V4 (SWA) may show a flatter $\alpha$ because window-restricted layers cannot directly leverage distant context. V5 (linear attention) may show early flattening due to the finite-rank accumulator losing information about distant positions.
-\end{itemize}
-
-% --- Attention Entropy ---
-\item \textbf{Attention Entropy} \emph{(home: \cref{sec:attention-position})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Definition:} For attention weights $\bm{\alpha}_i \in \Delta^T$ (probability simplex) at query position $i$, head $h$, layer $\ell$:
-    \begin{equation}
-        H^{(\ell,h)}_i = -\sum_{j=1}^{i} \alpha_{ij} \log \alpha_{ij}
-    \end{equation}
-    Averaged over positions and batches to give per-layer and per-head entropy statistics.
-    \item \textbf{Interpretation:} High entropy means the head attends broadly (uniform-like). Low entropy means the head focuses sharply on few positions. Entropy $= 0$ means the head attends to exactly one position. Maximum entropy $= \log(i)$ at position $i$ means uniform attention.
-    \item \textbf{Applicability:} Only computable for variants where attention weights are materialized (V0, V5). Flash-attention-based variants (V1--V4) do not produce the explicit attention matrix, so attention entropy returns None for these variants. This is a known limitation, not a bug.
-    \item \textbf{Use:} Identifies degenerate attention patterns (all entropy near zero suggests the model collapses to trivial routing; all entropy near maximum suggests the model fails to discriminate).
-\end{itemize}
-
-% --- Pareto Front Analysis ---
-\item \textbf{Pareto Front Analysis} \emph{(home: \cref{sec:training-eval})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Definition:} A variant $v$ is Pareto-optimal on the $(x, y)$ objective pair if no other variant achieves both lower $x$ and lower $y$. Formally, $v$ is non-dominated if:
-    \begin{equation}
-        \nexists\, v' \neq v : x_{v'} \leq x_v \;\wedge\; y_{v'} \leq y_v \;\wedge\; (x_{v'} < x_v \;\vee\; y_{v'} < y_v)
-    \end{equation}
-    \item \textbf{Objective pairs reported:}
-    \begin{center}
-    \begin{tabular}{lll}
-    \toprule
-    $x$ (cost) & $y$ (quality) & What it reveals\\
-    \midrule
-    Cumulative FLOPs & Val loss & Compute-efficiency frontier\\
-    Wall-clock time & Val loss & Time-efficiency frontier\\
-    Peak GPU memory & Val loss & Memory-efficiency frontier\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-    \item \textbf{Interpretation:} Variants on the Pareto front represent the best achievable trade-offs --- no other variant dominates them on both axes. A variant behind the front is strictly inferior: another variant exists that is both cheaper and better (or equal on one axis and strictly better on the other).
-\end{itemize}
-
-% --- Seed Aggregation ---
-\item \textbf{Statistical Reporting: Seed Aggregation} \emph{(home: \cref{sec:training-eval})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Protocol:} All results are reported as mean $\pm$ standard deviation over 3+ random seeds. Let $\{m_1, \ldots, m_S\}$ be metric values from $S$ seeds:
-    \begin{equation}
-        \bar{m} = \frac{1}{S}\sum_{s=1}^S m_s, \qquad \sigma_m = \sqrt{\frac{1}{S-1}\sum_{s=1}^S (m_s - \bar{m})^2}
-    \end{equation}
-    \item \textbf{Reporting format:} ``$\bar{m} \pm \sigma_m$'' in all comparison tables and visualizations.
-    \item \textbf{Confidence threshold:} If $S < 3$, results are flagged as lacking confidence and additional seeds may be added selectively for variant pairs with overlapping intervals.
-    \item \textbf{Why seeds matter:} Training involves stochastic elements (initialization, data order, dropout if used). Reporting single-seed results can lead to false conclusions --- one variant may appear better due to a lucky seed. Multiple seeds give statistical evidence of true architectural advantages.
-\end{itemize}
-
-% --- Parameter Parity Validation ---
-\item \textbf{Parameter Parity Validation} \emph{(home: \cref{sec:training-eval})}
-
-\begin{itemize}[nosep]
-    \item \textbf{Rule:} All compared variants must have parameter counts within $\pm 5\%$ of their mean. If variant $v$ has $N_v$ trainable parameters:
-    \begin{equation}
-        \frac{|N_v - \bar{N}|}{\bar{N}} \leq 0.05 \quad \forall v, \qquad \bar{N} = \frac{1}{|V|}\sum_{v \in V} N_v
-    \end{equation}
-    \item \textbf{Exception:} Variants whose mechanism \emph{inherently} reduces parameters (e.g., GQA removes KV projection parameters) may exceed this tolerance. The difference is noted in results rather than compensated (e.g., by widening the FFN).
-    \item \textbf{Purpose:} Ensures that quality differences are attributable to architectural mechanisms rather than raw capacity differences. A model with 20\% more parameters might win simply due to more capacity, not a better inductive bias.
-\end{itemize}
-
-% --- ProbeTarget Protocol ---
-\item \textbf{ProbeTarget Protocol (Software Architecture)} \emph{(home: \cref{sec:infrastructure})}
-
-\begin{itemize}[nosep]
-    \item \textbf{What it is:} A structural protocol that decouples evaluation probes from model internals. Probes program against \texttt{ProbeTarget} rather than reaching into \texttt{model.blocks} or registering hooks directly.
-    \item \textbf{Two methods:}
-    \begin{enumerate}[nosep]
-        \item \texttt{forward(x) $\to$ logits} --- lightweight, sufficient for MQAR (only needs output logits)
-        \item \texttt{forward\_with\_internals(x) $\to$ ProbeInternals} --- returns per-layer hidden states for stable rank, CKA, and entropy probes
-    \end{enumerate}
-    \item \textbf{Design rationale:} Separating these two methods avoids OOM on large models when only logits are needed. The heavy path (capturing all layer outputs) is opt-in.
-    \item \textbf{Adapter pattern:} \texttt{ModelProbeAdapter} wraps real models (V0--V5) to satisfy the \texttt{ProbeTarget} protocol. Probes never import model-specific classes.
-    \item \textbf{Connection to testing:} Test fakes satisfy \texttt{ProbeTarget} without inheritance (structural typing via Python's \texttt{Protocol}). This allows evaluation tests to run without GPU or real model weights.
-\end{itemize}
-
-% --- AttentionModule Protocol ---
-\item \textbf{AttentionModule Protocol (Software Architecture)} \emph{(home: \cref{sec:attention-position})}
-
-\begin{itemize}[nosep]
-    \item \textbf{What it is:} A structural protocol formalizing the contract that all attention variants (V0 CausalSelfAttention, V1 ModernAttention, V2 ALiBiAttention, V3 GQAAttention, V4 FlashAttention with window, V5 LinearAttention) already satisfy informally:
-    \begin{equation}
-        \texttt{forward}(\vx, \texttt{kv\_cache}) \to (\texttt{output}, \texttt{new\_kv\_cache})
-    \end{equation}
-    \item \textbf{Purpose:} Documentary, not enforcement. Makes the shared interface discoverable without requiring all variants to inherit from a common base class. Type annotations in \texttt{TransformerBlock} and \texttt{ModernTransformerBlock} use this protocol.
-    \item \textbf{Cache type:} Deliberately uses \texttt{Any} for the cache type because V0/V1 (concat-based 2-tuple) and V1--V4 (pre-allocated 3-tuple via flash\_attn) use incompatible cache shapes. Unifying cache types is deferred.
-    \item \textbf{Connection to GQA:} GQA's cache shape is $(B, n_{\mathrm{kv}}, T, \dhead)$ rather than $(B, \nhead, T, \dhead)$. The protocol's \texttt{Any} cache type accommodates this without specialization.
-\end{itemize}
-
-% --- Evaluation Pipeline ---
-\item \textbf{Evaluation Pipeline (Software Architecture)} \emph{(home: \cref{sec:infrastructure})}
-
-\begin{itemize}[nosep]
-    \item \textbf{What it is:} A single-interface module that orchestrates the full post-hoc evaluation workflow:
-    \begin{equation}
-        \text{checkpoints} \xrightarrow{\text{pipeline}} \text{ReportResult (structured data + files)}
-    \end{equation}
-    The pipeline loads checkpoints, computes FLOPs, runs probes, slices comparisons across three axes, aggregates seeds, generates visualizations, and writes reports.
-    \item \textbf{Interface:} \texttt{EvaluationPipeline.run(checkpoints, output\_dir) $\to$ ReportResult}. Callers (CLI, tests, notebooks, future dashboard) share this one entry point.
-    \item \textbf{Design decisions:}
-    \begin{itemize}[nosep]
-        \item Class (not function) because configuration is captured once (device, data\_dir) and methods are extensible
-        \item Returns \texttt{ReportResult} alongside file writes so tests and dashboards get structured data without re-parsing files
-        \item Lenient error handling: pipeline always produces a partial report with a warnings list; callers inspect warnings to decide severity
-    \end{itemize}
-    \item \textbf{Output structure:} A self-contained report directory:
-    \begin{center}
-    \begin{tabular}{ll}
-    \toprule
-    Path & Contents\\
-    \midrule
-    \texttt{plots/*.png} & All visualizations (10 plot types)\\
-    \texttt{raw/metrics.csv} & Tabular computed data\\
-    \texttt{raw/metrics.json} & Structured computed data\\
-    \texttt{summary.md} & Human-readable report with embedded image links\\
-    \texttt{metadata.json} & Timestamp, software versions, hardware ID, evaluated checkpoints\\
-    \bottomrule
-    \end{tabular}
-    \end{center}
-\end{itemize}
-
-\begin{motivationbox}[Integration instructions for future writing pass]
-Each item above should be expanded into a full subsection within its designated home section, following the design-log template: baseline role $\to$ limitation $\to$ design pressure $\to$ replacement mechanism $\to$ new trade-off. Include mathematical definitions, TikZ figures where helpful, worked examples, and intuition boxes. Cross-reference related items (e.g., ALiBi cross-references the KV-cache section; GQA cross-references the KV-cache memory formula). Do not duplicate explanations already present in other sections. Do not include implementation code or API details --- focus on the mathematical and conceptual content.
-\end{motivationbox}
 
 \end{document}
