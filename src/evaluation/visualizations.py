@@ -1104,7 +1104,7 @@ def generate_summary_md(comparison: ComparisonResult, output_dir: Path) -> Path:
     lines.append("")
     lines.append("![FLOP Breakdown](plots/flop_breakdown.png)")
     lines.append("")
-    lines.append("![Pareto Front](plots/pareto_flops_loss.png)")
+    lines.append("![Pareto Front](plots/pareto_flops_val_loss.png)")
     lines.append("")
     lines.append("![Roofline](plots/roofline.png)")
     lines.append("")

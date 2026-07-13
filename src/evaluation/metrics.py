@@ -44,12 +44,29 @@ def load_metrics_log(checkpoint_dir: Path) -> list[dict]:
             f"metrics.jsonl not found in checkpoint directory: {checkpoint_dir}"
         )
 
+    aliases = {
+        "tokens_seen": "tokens_processed",
+        "elapsed_time": "elapsed_seconds",
+        "peak_memory_mb": "gpu_memory_mb",
+    }
+    latest_axes: dict[str, int | float] = {}
     entries: list[dict] = []
     with open(metrics_path, "r") as f:
         for line in f:
             line = line.strip()
             if line:
-                entries.append(json.loads(line))
+                entry = json.loads(line)
+                for canonical, emitted in aliases.items():
+                    value = entry.get(canonical, entry.get(emitted))
+                    if value is not None:
+                        entry[canonical] = value
+                        latest_axes[canonical] = value
+                    elif canonical in latest_axes:
+                        # Validation rows contain loss but omit the training axes.
+                        # Carry the latest measurements forward so comparison
+                        # slicing can place the validation point on each axis.
+                        entry[canonical] = latest_axes[canonical]
+                entries.append(entry)
     return entries
 
 

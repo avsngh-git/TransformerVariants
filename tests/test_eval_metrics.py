@@ -28,9 +28,27 @@ class TestLoadMetricsLog:
     def test_valid_metrics_jsonl(self, tmp_path):
         """Requirement 3.1: Parses metrics.jsonl and returns list of dicts."""
         entries = [
-            {"step": 1, "train_loss": 5.0, "val_loss": 4.8, "tokens_seen": 1024, "elapsed_time": 1.2},
-            {"step": 2, "train_loss": 4.5, "val_loss": 4.3, "tokens_seen": 2048, "elapsed_time": 2.4},
-            {"step": 3, "train_loss": 4.0, "val_loss": None, "tokens_seen": 3072, "elapsed_time": 3.6},
+            {
+                "step": 1,
+                "train_loss": 5.0,
+                "val_loss": 4.8,
+                "tokens_seen": 1024,
+                "elapsed_time": 1.2,
+            },
+            {
+                "step": 2,
+                "train_loss": 4.5,
+                "val_loss": 4.3,
+                "tokens_seen": 2048,
+                "elapsed_time": 2.4,
+            },
+            {
+                "step": 3,
+                "train_loss": 4.0,
+                "val_loss": None,
+                "tokens_seen": 3072,
+                "elapsed_time": 3.6,
+            },
         ]
         metrics_file = tmp_path / "metrics.jsonl"
         with open(metrics_file, "w") as f:
@@ -58,6 +76,30 @@ class TestLoadMetricsLog:
         result = load_metrics_log(tmp_path)
 
         assert result == []
+
+    def test_normalizes_real_training_schema_and_carries_axes_to_eval(self, tmp_path):
+        """Evaluation axes should use the field names emitted by RunLogger."""
+        entries = [
+            {
+                "type": "train",
+                "step": 10,
+                "tokens_processed": 655360,
+                "elapsed_seconds": 8.5,
+                "gpu_memory_mb": 4096.0,
+            },
+            {"type": "eval", "step": 10, "val_loss": 3.5},
+        ]
+        metrics_file = tmp_path / "metrics.jsonl"
+        with open(metrics_file, "w") as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+
+        result = load_metrics_log(tmp_path)
+
+        for entry in result:
+            assert entry["tokens_seen"] == 655360
+            assert entry["elapsed_time"] == 8.5
+            assert entry["peak_memory_mb"] == 4096.0
 
 
 class TestComputePerplexity:

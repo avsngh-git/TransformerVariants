@@ -128,6 +128,7 @@ def run_mqar_probe(
     vocab_size: int = 50257,
     n_associations: int = 8,
     n_sequences: int = 256,
+    batch_size: int = 8,
     device: str = "cuda",
 ) -> MQARResult:
     """Run MQAR (Multi-Query Associative Recall) probe on a model checkpoint.
@@ -144,6 +145,8 @@ def run_mqar_probe(
         vocab_size: Vocabulary size for token generation.
         n_associations: Number of key-value pairs per sequence.
         n_sequences: Number of sequences to evaluate.
+        batch_size: Inference micro-batch size. Kept deliberately small because
+            each forward materializes ``batch × seq_len × vocab_size`` logits.
         device: Device for computation.
 
     Returns:
@@ -151,6 +154,8 @@ def run_mqar_probe(
     """
     model.eval()
     seq_len = config.seq_len
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
 
     tokens, all_key_positions, all_query_positions, all_expected_values = (
         _generate_mqar_sequences(
@@ -163,7 +168,7 @@ def run_mqar_probe(
     )
 
     # Run batched inference
-    batch_size = min(32, n_sequences)
+    batch_size = min(batch_size, n_sequences)
     total_correct = 0
     total_queries = 0
     distance_correct: dict[int, int] = {}
@@ -207,6 +212,8 @@ def run_mqar_probe(
                         distance_total[distance] = 0
                     distance_correct[distance] += int(correct)
                     distance_total[distance] += 1
+
+            del logits, output
 
     # Compute overall accuracy
     accuracy = total_correct / total_queries if total_queries > 0 else 0.0
@@ -302,7 +309,9 @@ def compute_stable_rank(
                     # H shape: (batch_size, seq_len, d_model)
                     # Reshape to (batch_size * seq_len, d_model) for SVD
                     B, T, D = H.shape
-                    H_flat = H.reshape(B * T, D)
+                    # Linear algebra analysis runs in float32 even when model
+                    # inference uses bf16/fp16 (required by FlashAttention).
+                    H_flat = H.reshape(B * T, D).float()
 
                     # Compute singular values only (no need for U, V)
                     sv = torch.linalg.svdvals(H_flat)
@@ -457,7 +466,9 @@ def compute_cka(
                     # Reshape to (batch_size * seq_len, d_model)
                     B, T, D = H.shape
                     H_flat = H.reshape(B * T, D)
-                    all_representations[layer_idx].append(H_flat.cpu())
+                    # Keep representation statistics in float32 for numerical
+                    # stability and consistent support across devices.
+                    all_representations[layer_idx].append(H_flat.float().cpu())
 
                     # Clear reference to free GPU memory
                     hidden_states[layer_idx] = None

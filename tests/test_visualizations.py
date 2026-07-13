@@ -386,6 +386,7 @@ class TestGenerateSummaryMd:
             "plots/stable_rank.png",
             "plots/cka_adjacent.png",
             "plots/flop_breakdown.png",
+            "plots/pareto_flops_val_loss.png",
             "plots/roofline.png",
         ]
         for plot in expected_plots:

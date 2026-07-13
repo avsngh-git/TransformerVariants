@@ -5,7 +5,6 @@ Validates: Requirements 6.1, 6.2, 6.3, 6.4, 6.5
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 from src.evaluation.probes import StableRankResult, compute_stable_rank
 from src.models.config import ModelConfig
@@ -143,3 +142,14 @@ class TestComputeStableRank:
         # Random initialization should yield diverse representations,
         # so stable rank should be meaningfully above 1
         assert np.all(result.per_layer > 1.0)
+
+    def test_bfloat16_model_uses_supported_analysis_precision(self):
+        """Stable-rank SVD should promote low-precision activations to float32."""
+        model, loader, _config = self._make_model_and_loader(
+            n_layer=1, d_model=16, seq_len=8, vocab_size=32
+        )
+        model = model.to(torch.bfloat16)
+
+        result = compute_stable_rank(model, loader, n_batches=1, device="cpu")
+
+        assert np.isfinite(result.per_layer).all()

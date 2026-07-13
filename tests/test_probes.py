@@ -56,6 +56,18 @@ class CopyModel(nn.Module):
         return logits, None, []
 
 
+class BatchTrackingModel(DebugModel):
+    """Debug model that records MQAR inference micro-batch sizes."""
+
+    def __init__(self, vocab_size: int = 50257):
+        super().__init__(vocab_size=vocab_size)
+        self.batch_sizes = []
+
+    def forward(self, idx, targets=None, kv_cache=None):
+        self.batch_sizes.append(idx.shape[0])
+        return super().forward(idx, targets=targets, kv_cache=kv_cache)
+
+
 class TestMQARSequenceGeneration:
     """Tests for _generate_mqar_sequences."""
 
@@ -211,11 +223,22 @@ class TestRunMQARProbe:
         model = DebugModel(vocab_size=1000)
         # If gradients were tracked, this would increase memory; we verify no grad
         # by checking that model parameters don't have .grad set after probe
-        result = run_mqar_probe(
+        run_mqar_probe(
             model, config, vocab_size=1000, n_associations=4, n_sequences=8, device="cpu"
         )
         for param in model.parameters():
             assert param.grad is None
+
+    def test_default_micro_batch_bounds_full_vocab_logits(self):
+        """MQAR must not materialize logits for more than eight sequences at once."""
+        config = ModelConfig(n_layer=2, d_model=64, seq_len=128, vocab_size=1000)
+        model = BatchTrackingModel(vocab_size=1000)
+
+        run_mqar_probe(
+            model, config, vocab_size=1000, n_associations=4, n_sequences=17, device="cpu"
+        )
+
+        assert model.batch_sizes == [8, 8, 1]
 
 
 class _FakeLoader:

@@ -67,7 +67,8 @@ def _infer_variant_name(directory: Path) -> str:
 
     Supports naming conventions:
     - `{variant}_{scale}_s{seed}` (e.g., "vanilla_main_s42" → "vanilla")
-    - `{variant}_{activation}_{scale}_{timestamp}` (e.g., "modern_swiglu_main_20240101_1200" → "modern")
+    - `{variant}_{activation}_{scale}_{timestamp}`
+      (e.g., "modern_swiglu_main_20240101_1200" → "modern")
     - `{variant}_{scale}_{timestamp}` (e.g., "vanilla_debug_20240101_1200" → "vanilla")
 
     Falls back to the full directory name if no pattern matches.
@@ -102,33 +103,40 @@ def _load_config_from_dir(checkpoint_dir: Path) -> ModelConfig | None:
 
     Returns None if no config file is found or parsing fails.
     """
-    # Try run_config.json first (standard training run output)
-    run_config_path = checkpoint_dir / "run_config.json"
-    if run_config_path.exists():
+    search_dirs = [checkpoint_dir]
+    metrics_path = checkpoint_dir / "metrics.jsonl"
+    if metrics_path.is_symlink():
         try:
-            with open(run_config_path, "r") as f:
-                run_config = json.load(f)
+            run_dir = metrics_path.resolve(strict=True).parent
+            if run_dir != checkpoint_dir:
+                search_dirs.append(run_dir)
+        except OSError as e:
+            logger.warning("Failed to resolve metrics symlink in %s: %s", checkpoint_dir, e)
 
-            # run_config.json may have a nested "model" key with config fields
-            model_dict = run_config.get("model", run_config)
+    for config_dir in search_dirs:
+        # Try run_config.json first (standard training run output)
+        run_config_path = config_dir / "run_config.json"
+        if run_config_path.exists():
+            try:
+                with open(run_config_path, "r") as f:
+                    run_config = json.load(f)
+                return _run_config_to_model_config(run_config)
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                logger.warning(
+                    f"Failed to parse run_config.json in {config_dir}: {e}"
+                )
 
-            return _dict_to_model_config(model_dict)
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            logger.warning(
-                f"Failed to parse run_config.json in {checkpoint_dir}: {e}"
-            )
-
-    # Try config.json (direct serialization)
-    config_path = checkpoint_dir / "config.json"
-    if config_path.exists():
-        try:
-            with open(config_path, "r") as f:
-                config_dict = json.load(f)
-            return _dict_to_model_config(config_dict)
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            logger.warning(
-                f"Failed to parse config.json in {checkpoint_dir}: {e}"
-            )
+        # Try config.json (direct serialization)
+        config_path = config_dir / "config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, "r") as f:
+                    config_dict = json.load(f)
+                return _dict_to_model_config(config_dict)
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                logger.warning(
+                    f"Failed to parse config.json in {config_dir}: {e}"
+                )
 
     return None
 
@@ -147,21 +155,43 @@ def _dict_to_model_config(d: dict) -> ModelConfig:
     return ModelConfig(**filtered)
 
 
-def _config_from_variant_name(variant_name: str) -> ModelConfig | None:
+def _run_config_to_model_config(run_config: dict) -> ModelConfig:
+    """Reconstruct a complete model config from a saved training run config."""
+    model_dict = run_config.get("model", run_config)
+    if not isinstance(model_dict, dict):
+        raise TypeError("run config 'model' must be an object")
+
+    variant_name = model_dict.get("variant") or run_config.get("variant")
+    scale = run_config.get("scale")
+    config = _config_from_variant_name(variant_name, scale=scale) if variant_name else None
+
+    if config is None:
+        return _dict_to_model_config(model_dict)
+
+    valid_fields = {f.name for f in ModelConfig.__dataclass_fields__.values()}
+    merged = vars(config).copy()
+    merged.update({k: v for k, v in model_dict.items() if k in valid_fields})
+    merged["variant"] = variant_name
+    return ModelConfig(**merged)
+
+
+def _config_from_variant_name(
+    variant_name: str, scale: str | None = None
+) -> ModelConfig | None:
     """Attempt to create a default ModelConfig from a known variant name.
 
     Uses the registry's known defaults. Returns None if the variant is unknown.
     """
     # Import here to avoid circular imports at module level
     try:
-        from src.models.registry import VARIANTS, SCALES
+        from src.models.registry import SCALES, VARIANTS
 
         if variant_name not in VARIANTS:
             return None
 
         spec = VARIANTS[variant_name]
-        # Use "debug" scale as default when inferring from name
-        dims = SCALES.get("debug", {"n_layer": 4, "d_model": 256, "n_head": 4, "seq_len": 512})
+        scale_name = scale if scale in SCALES else "debug"
+        dims = SCALES[scale_name]
 
         config = ModelConfig(
             n_layer=dims["n_layer"],
@@ -173,17 +203,11 @@ def _config_from_variant_name(variant_name: str) -> ModelConfig | None:
             position_encoding=spec.position_encoding,
             ffn_type=spec.ffn_type,
             attention_type=spec.attention_type,
+            attention_backend="sdpa",
+            activation=spec.default_activation,
         )
 
-        # Set variant-specific fields
-        if spec.attention_type == "sliding_window":
-            config.window_size = dims["seq_len"] // 4
-        if spec.attention_type == "linear":
-            config.projection_rank = 64
-        if spec.attention_type == "flash_gqa":
-            config.n_kv_head = dims["n_head"] // 4
-
-        return config
+        return spec.config_overrides(config, dims)
     except ImportError:
         return None
 

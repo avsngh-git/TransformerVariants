@@ -37,7 +37,7 @@ from src.evaluation.comparison import (
     slice_fixed_wallclock,
     validate_parameter_parity,
 )
-from src.evaluation.flops import FLOPBreakdown, compute_mfu, compute_step_flops
+from src.evaluation.flops import compute_step_flops
 from src.evaluation.metrics import (
     MetricsResult,
     compute_per_position_loss,
@@ -46,10 +46,10 @@ from src.evaluation.metrics import (
     fit_icl_decay,
 )
 from src.evaluation.probes import (
+    AttentionEntropyResult,
+    CKAResult,
     MQARResult,
     StableRankResult,
-    CKAResult,
-    AttentionEntropyResult,
     compute_attention_entropy,
     compute_cka,
     compute_stable_rank,
@@ -361,7 +361,9 @@ class EvaluationPipeline:
 
         # Attention entropy
         logger.info("  Computing attention entropy for %s...", v.name)
-        entropy_result = compute_attention_entropy(model, val_loader, n_batches=25, device=self._device)
+        entropy_result = compute_attention_entropy(
+            model, val_loader, n_batches=25, device=self._device
+        )
         if entropy_result is not None:
             probe_results.attention_entropy[v.name] = entropy_result
             logger.info("    Attention entropy mean: %.3f", entropy_result.per_layer.mean())
@@ -603,7 +605,8 @@ class EvaluationPipeline:
 
     def _load_model_from_checkpoint(self, variant_data: VariantData):
         """Load a model from checkpoint weights using the registry."""
-        from src.models.registry import build as registry_build, SCALES
+        from src.models.registry import SCALES, VARIANTS
+        from src.models.registry import build as registry_build
 
         config = variant_data.config
         if config is None:
@@ -622,7 +625,15 @@ class EvaluationPipeline:
                     scale = scale_name
                     break
 
-            model, _ = registry_build(variant_name, scale, activation=config.activation, dtype="float32")
+            spec = VARIANTS[variant_name]
+            dtype = (
+                "bfloat16"
+                if spec.requires_bf16 or config.attention_backend == "flash_attn"
+                else "float32"
+            )
+            model, _ = registry_build(
+                variant_name, scale, activation=config.activation, dtype=dtype
+            )
         except (ValueError, KeyError) as e:
             logger.warning("Failed to build model for %s: %s", variant_data.name, e)
             return None
@@ -635,6 +646,7 @@ class EvaluationPipeline:
             checkpoint_dir / "checkpoint_best.pt",
         ]
 
+        loaded_weights = False
         for weight_path in weight_paths:
             if weight_path.exists():
                 try:
@@ -650,11 +662,20 @@ class EvaluationPipeline:
                         state_dict = checkpoint
 
                     model.load_state_dict(state_dict, strict=False)
-                    logger.info("Loaded weights for %s from %s", variant_data.name, weight_path.name)
+                    logger.info(
+                        "Loaded weights for %s from %s",
+                        variant_data.name,
+                        weight_path.name,
+                    )
+                    loaded_weights = True
                     break
                 except Exception as e:
                     logger.warning("Failed to load weights from %s: %s", weight_path, e)
                     continue
+
+        if not loaded_weights:
+            logger.warning("No compatible checkpoint weights found for %s", variant_data.name)
+            return None
 
         model = model.to(self._device)
         model.eval()
