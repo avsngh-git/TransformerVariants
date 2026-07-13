@@ -118,7 +118,7 @@ Operational state of the project. Read this to understand what's built, what's r
 **Architecture:**
 - V4 (SWA): Each query attends only to `window_size = seq_len // 4` preceding tokens. Uses `FlashAttention` with `window_size` kwarg — flash_attn kernel handles windowing natively.
 - V4-interleaved: Even layers use full attention (window_size=None), odd layers use SWA. Per-layer configs built by registry.
-- V5 (Linear): ELU+1 feature map with running accumulator. No RoPE, no KV-cache (training-comparison only). Position info from token embeddings only.
+- V5 (Linear): causal ELU+1 prefix-state attention with RoPE; recurrent generation cache is not yet exposed.
 
 ---
 
@@ -223,7 +223,7 @@ Run all tests: `conda run -n transformer_lab python -m pytest tests/ -v` (430 te
 - `configs/model/gqa.yaml` — V3 GQA
 - `configs/model/swa.yaml` — V4 Sliding Window Attention
 - `configs/model/swa_interleaved.yaml` — V4-interleaved (alternating local/global layers)
-- `configs/model/linear.yaml` — V5 Linear Attention (ELU-based causal)
+- `configs/model/linear.yaml` — V5 causal ELU+1 linear attention with RoPE
 
 ---
 
@@ -282,7 +282,7 @@ src/
 │   ├── flash_attention.py     # V1/V4: FlashAttention (RoPE + optional window_size)
 │   ├── alibi_attention.py     # V2: ALiBi slopes via flash_attn
 │   ├── gqa_attention.py       # V3: Grouped-query attention
-│   ├── linear_attention.py    # V5: Linformer low-rank projection attention
+│   ├── linear_attention.py    # V5: causal ELU+1 prefix-state attention
 │   └── generate.py            # Autoregressive generation utilities
 ├── evaluation/
 │   ├── pipeline.py            # EvaluationPipeline — deep orchestration module

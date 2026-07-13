@@ -11,16 +11,15 @@ from typing import Callable, Type
 import torch
 import torch.nn as nn
 
-from src.models.config import ModelConfig
-from src.models.attention import CausalSelfAttention
-from src.models.vanilla_transformer import VanillaTransformer
-from src.models.modern_transformer import ModernTransformer
-from src.models.modern_attention import ModernAttention
-from src.models.flash_attention import FlashAttention
 from src.models.alibi_attention import ALiBiAttention
+from src.models.attention import CausalSelfAttention
+from src.models.config import ModelConfig
+from src.models.flash_attention import FlashAttention
 from src.models.gqa_attention import GQAAttention
-from src.models.linear_attention import LinformerAttention
-
+from src.models.linear_attention import CausalLinearAttention
+from src.models.modern_attention import ModernAttention
+from src.models.modern_transformer import ModernTransformer
+from src.models.vanilla_transformer import VanillaTransformer
 
 SCALES: dict[str, dict[str, int]] = {
     "debug":   {"n_layer": 4,  "d_model": 256, "n_head": 4,  "seq_len": 512},
@@ -53,12 +52,6 @@ def _swa_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
 def _gqa_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
     """GQA: set n_kv_head to n_head // 4."""
     config.n_kv_head = dims["n_head"] // 4
-    return config
-
-
-def _linear_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
-    """Linformer: set projection_rank."""
-    config.projection_rank = 64
     return config
 
 
@@ -96,10 +89,7 @@ def _swa_interleaved_per_layer(config: ModelConfig, dims: dict) -> list[ModelCon
 
 def _moe_interleaved_per_layer(config: ModelConfig, dims: dict) -> list[ModelConfig]:
     """Odd layers get MoE, even layers stay dense."""
-    return [
-        replace(config, num_experts=8 if i % 2 == 1 else None)
-        for i in range(dims["n_layer"])
-    ]
+    return [replace(config, num_experts=8 if i % 2 == 1 else None) for i in range(dims["n_layer"])]
 
 
 def _moe_deep_per_layer(config: ModelConfig, dims: dict) -> list[ModelConfig]:
@@ -108,10 +98,7 @@ def _moe_deep_per_layer(config: ModelConfig, dims: dict) -> list[ModelConfig]:
     If n_layer is odd, the extra middle layer goes to the dense half.
     """
     split = dims["n_layer"] // 2  # dense layers: [0, split), MoE: [split, n_layer)
-    return [
-        replace(config, num_experts=8 if i >= split else None)
-        for i in range(dims["n_layer"])
-    ]
+    return [replace(config, num_experts=8 if i >= split else None) for i in range(dims["n_layer"])]
 
 
 # --- VariantSpec dataclass ---
@@ -237,10 +224,9 @@ VARIANTS: dict[str, VariantSpec] = {
         position_encoding="rope",
         ffn_type="swiglu",
         attention_type="linear",
-        attention_class=LinformerAttention,
+        attention_class=CausalLinearAttention,
         default_activation="swiglu",
         requires_bf16=False,
-        config_overrides=_linear_overrides,
     ),
     "moe": VariantSpec(
         model_class=ModernTransformer,
@@ -368,7 +354,9 @@ def build(
 
     # Construct the model
     if per_layer_configs is not None:
-        model = spec.model_class(config, attention_class=attention_class, per_layer_configs=per_layer_configs)
+        model = spec.model_class(
+            config, attention_class=attention_class, per_layer_configs=per_layer_configs
+        )
     else:
         model = spec.model_class(config, attention_class=attention_class)
 

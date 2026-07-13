@@ -23,7 +23,7 @@ A variant is NOT defined by which "slots" it fills — it may introduce entirely
 | V2 | ALiBi | Swap RoPE → ALiBi (linear position biases) | V1 |
 | V3 | GQA | Swap independent heads → grouped-query attention | V1 |
 | V4 | SWA (Sliding Window Attention) | Fixed-proportion sliding window, no global tokens | V1 |
-| V5 | Linear (Linformer) | Low-rank K/V projection, O(n) attention complexity | V1 |
+| V5 | Causal Linear Attention | ELU+1 feature-map prefix state, O(n) sequence complexity | V1 |
 | V6 | MoE (Mixture of Experts) | Mixtral-style top-2 routing, 8 SwiGLU experts per MoE layer | V1 |
 
 ### Sub-variant
@@ -93,13 +93,13 @@ The flash_attn kernel supports SWA natively via its `window_size` parameter. No 
 
 SWA isolates the variable "attention span" while keeping all other components (RoPE, projections, FFN, normalization) identical to V1.
 
-### Linear Attention (Linformer)
+### Causal Linear Attention
 
-An attention mechanism that approximates full self-attention by projecting the Key and Value matrices from length T down to a fixed rank r=64, giving O(n·r) complexity instead of O(n²). Each transformer layer has two shared projection matrices E and F of shape `(seq_len, r)` — shared across all heads in that layer.
+An autoregressive attention mechanism using the positive feature map `phi(x) = ELU(x) + 1`. Instead of materializing a T-by-T matrix, each position reads cumulative key and key-value statistics from its prefix. The result is strictly causal and has O(T * d_head^2) complexity instead of O(T^2 * d_head).
 
-RoPE is applied to Q and K before the low-rank projection. The attention computation is: `softmax(Q · (EK)^T / sqrt(d_head)) · (FV)`.
+RoPE is applied to Q and K before the feature map. The implementation processes fixed-size chunks: a small triangular matrix handles causal interactions within each chunk, while accumulated state summarizes all earlier chunks. This is algebraically equivalent to the token-wise recurrence.
 
-V5 uses `ModernTransformer` as its model shell (RMSNorm, SwiGLU) and a standalone `LinearAttention(nn.Module)` class. Because the E and F projection matrices are tied to a fixed `seq_len`, autoregressive KV-cache generation is not supported — V5 is a training-comparison-only variant.
+V5 uses `ModernTransformer` as its model shell (RMSNorm, SwiGLU) and `CausalLinearAttention`. Recurrent generation state is not yet exposed through the shared KV-cache interface, so V5 currently remains a training-comparison-only variant.
 
 ### Shard
 
@@ -173,7 +173,7 @@ A measure of the effective dimensionality of a hidden state matrix H: srank(H) =
 
 ### Multi-Query Associative Recall (MQAR)
 
-A synthetic evaluation probe that tests a model's ability to bind and recall key-value associations across context. Sequences contain planted token patterns; the metric is whether the model assigns high probability to the correct recall token. Isolates retrieval capacity — variants with limited context (V4-SWA, V5-Linformer) should show measurable degradation.
+A synthetic evaluation probe that tests a model's ability to bind and recall key-value associations across context. Sequences contain planted token patterns; the metric is whether the model assigns high probability to the correct recall token. Isolates retrieval capacity — variants with limited or compressed context (V4-SWA, V5 causal linear) should show measurable degradation.
 
 ### ICL Loss Decay Exponent (α)
 

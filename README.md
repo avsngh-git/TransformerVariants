@@ -17,7 +17,7 @@ This project is not intended to train a frontier-scale language model. Instead, 
 | V2 | ALiBi | Attention with Linear Biases (no position embeddings) |
 | V3 | GQA / MQA | Grouped-query and multi-query attention |
 | V4 | Sparse local/global | Sliding window + global tokens |
-| V5 | Linformer or Performer | Linear-complexity attention |
+| V5 | Causal Linear Attention | ELU+1 feature-map prefix-state attention |
 
 ## Hardware Target
 
@@ -61,7 +61,7 @@ TransformerVariants/
 | 04 | L4-aware training loop and checkpointing | Planned |
 | 05 | Modern baseline (RoPE, RMSNorm, SwiGLU, fast attention) | Planned |
 | 06 | ALiBi, GQA, MQA, inference benchmark | Planned |
-| 07 | Sparse attention, Linformer/Performer | Planned |
+| 07 | Sparse and causal linear attention | Planned |
 | 08 | Evaluation framework (plots, statistics) | Planned |
 | 09 | Interactive visualization dashboard | Planned |
 | 10 | Large-scale data pipeline | Planned |

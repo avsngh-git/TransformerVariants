@@ -1,12 +1,11 @@
-# V5: Linear Attention (ELU-based causal)
-# No RoPE, RMSNorm, SwiGLU, O(n) attention
+# V5: Causal Linear Attention (ELU+1 feature map)
+# RoPE, RMSNorm, SwiGLU, O(n * d_head^2) attention
 
 model:
   variant: linear
   variant_id: V5
   norm_type: rmsnorm
   position_encoding: rope
-  projection_rank: 64
   ffn_type: swiglu
   attention_type: linear
 

@@ -1,5 +1,7 @@
 # PRD: Phase 8 — Evaluation Framework
 
+> V5-specific Linformer and attention-entropy requirements are superseded by ADR 0007.
+
 **Label:** `ready-for-agent`  
 **Status:** Ready for implementation
 

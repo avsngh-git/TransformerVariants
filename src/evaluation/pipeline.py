@@ -328,9 +328,7 @@ class EvaluationPipeline:
         """Run all probes on a single variant's model."""
         # Per-position loss + ICL decay
         logger.info("  Computing per-position loss for %s...", v.name)
-        per_pos_loss = compute_per_position_loss(
-            model, val_loader, v.config.seq_len, self._device
-        )
+        per_pos_loss = compute_per_position_loss(model, val_loader, v.config.seq_len, self._device)
         icl_params = fit_icl_decay(per_pos_loss)
 
         val_loss_value = compute_val_loss(v.log_entries) if v.log_entries else 0.0
@@ -661,7 +659,13 @@ class EvaluationPipeline:
                     else:
                         state_dict = checkpoint
 
-                    model.load_state_dict(state_dict, strict=False)
+                    incompatibility = model.load_state_dict(state_dict, strict=False)
+                    if incompatibility.missing_keys or incompatibility.unexpected_keys:
+                        raise RuntimeError(
+                            "checkpoint architecture does not match model: "
+                            f"missing={incompatibility.missing_keys}, "
+                            f"unexpected={incompatibility.unexpected_keys}"
+                        )
                     logger.info(
                         "Loaded weights for %s from %s",
                         variant_data.name,

@@ -1,13 +1,13 @@
 """Attention module protocol — the formal contract all attention variants satisfy.
 
 Every attention module in this project (CausalSelfAttention, ModernAttention,
-FlashAttention, ALiBiAttention, GQAAttention, LinformerAttention) implements
+FlashAttention, ALiBiAttention, GQAAttention, CausalLinearAttention) implements
 this interface via duck typing. This Protocol formalizes the informal contract
 for discoverability and type-checking.
 
 The KV-cache type is deliberately `Any` — different backends use different
 cache shapes (tuple[Tensor, Tensor] for SDPA, tuple[Tensor, Tensor, Tensor]
-for flash_attn, None for Linformer). Callers pass cache opaquely; they don't
+for flash_attn, None for causal linear attention). Callers pass cache opaquely; they don't
 inspect or construct it. See CONTEXT.md "KV-Cache unification" open question.
 
 Usage:
@@ -38,7 +38,7 @@ class AttentionModule(Protocol):
         - FlashAttention (V1/V4): RoPE + flash_attn kernels, optional window_size
         - ALiBiAttention (V2): no position rotation, alibi_slopes via kernel
         - GQAAttention (V3): grouped KV heads, separate Q/KV projections
-        - LinformerAttention (V5): low-rank K/V projection, always returns None cache
+        - CausalLinearAttention (V5): ELU+1 prefix-state attention, returns None cache
     """
 
     def forward(

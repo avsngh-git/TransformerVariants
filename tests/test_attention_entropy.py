@@ -8,9 +8,9 @@ import torch
 
 from src.evaluation.probes import AttentionEntropyResult, compute_attention_entropy
 from src.models.config import ModelConfig
-from src.models.vanilla_transformer import VanillaTransformer
+from src.models.linear_attention import CausalLinearAttention
 from src.models.modern_transformer import ModernTransformer
-from src.models.linear_attention import LinformerAttention
+from src.models.vanilla_transformer import VanillaTransformer
 
 
 class _FakeLoader:
@@ -79,11 +79,11 @@ class TestAttentionEntropyV0:
 
 
 class TestAttentionEntropyV5:
-    """Tests for compute_attention_entropy with V5 (Linformer)."""
+    """Causal linear attention does not materialize probability weights."""
 
-    def _make_model_and_loader(self):
+    def test_returns_none(self):
         config = ModelConfig(
-            n_layer=2,
+            n_layer=1,
             d_model=64,
             n_head=4,
             vocab_size=1000,
@@ -92,38 +92,13 @@ class TestAttentionEntropyV5:
             norm_type="rmsnorm",
             position_encoding="rope",
             ffn_type="swiglu",
-            projection_rank=8,
             dropout=0.0,
         )
-        model = ModernTransformer(config, attention_class=LinformerAttention)
+        model = ModernTransformer(config, attention_class=CausalLinearAttention)
         model.eval()
         loader = _FakeLoader(batch_size=2, seq_len=32, vocab_size=1000)
-        return model, loader, config
-
-    def test_returns_attention_entropy_result(self):
-        """Requirement 8.1: Returns AttentionEntropyResult for V5 (Linformer)."""
-        model, loader, config = self._make_model_and_loader()
         result = compute_attention_entropy(model, loader, n_batches=3, device="cpu")
-        assert isinstance(result, AttentionEntropyResult)
-
-    def test_per_layer_shape(self):
-        """Requirement 8.1: per_layer shape (n_layer,) for V5."""
-        model, loader, config = self._make_model_and_loader()
-        result = compute_attention_entropy(model, loader, n_batches=3, device="cpu")
-        assert result.per_layer.shape == (config.n_layer,)
-
-    def test_per_head_shape(self):
-        """Requirement 8.1: per_head shape (n_layer, n_head) for V5."""
-        model, loader, config = self._make_model_and_loader()
-        result = compute_attention_entropy(model, loader, n_batches=3, device="cpu")
-        assert result.per_head.shape == (config.n_layer, config.n_head)
-
-    def test_entropy_non_negative(self):
-        """Requirement 8.4: All entropy values >= 0 for V5."""
-        model, loader, config = self._make_model_and_loader()
-        result = compute_attention_entropy(model, loader, n_batches=3, device="cpu")
-        assert np.all(result.per_layer >= 0)
-        assert np.all(result.per_head >= 0)
+        assert result is None
 
 
 class TestAttentionEntropyFlashVariants:

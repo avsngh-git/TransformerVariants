@@ -144,7 +144,7 @@ class ModelProbeAdapter:
 
         # Determine if attention weights are accessible
         attention_type = self.config.attention_type
-        capture_attn = attention_type in ("full", "linear")
+        capture_attn = attention_type == "full"
 
         # --- Register hooks ---
         hooks: list[torch.utils.hooks.RemovableHook] = []
@@ -156,6 +156,7 @@ class ModelProbeAdapter:
                     layer_outputs[idx] = output[0].detach()
                 else:
                     layer_outputs[idx] = output.detach()
+
             return hook_fn
 
         for i, block in enumerate(blocks):
@@ -164,10 +165,12 @@ class ModelProbeAdapter:
 
         # Attention weight hooks (only for non-flash variants)
         if capture_attn:
+
             def make_attn_hook(idx: int):
                 def hook_fn(module, input, output):
                     # input[0] is the post-softmax attention weights
                     attn_weights[idx] = input[0].detach()
+
                 return hook_fn
 
             for i, block in enumerate(blocks):

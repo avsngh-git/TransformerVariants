@@ -60,14 +60,15 @@ class ModelConfig:
     # Sliding Window Attention
     window_size: int | None = None
 
-    # Linformer low-rank projection
+    # Legacy Linformer field retained so old run configs remain parseable.
+    # The causal linear V5 implementation does not use a projection rank.
     projection_rank: int | None = None
 
     # Mixture of Experts
-    num_experts: int | None = None      # None = dense FFN, 2+ = MoE
-    moe_top_k: int = 2                  # Number of experts per token
-    aux_loss_alpha: float = 0.01        # Load-balancing loss coefficient
-    z_loss_beta: float = 0.001          # Router z-loss coefficient
+    num_experts: int | None = None  # None = dense FFN, 2+ = MoE
+    moe_top_k: int = 2  # Number of experts per token
+    aux_loss_alpha: float = 0.01  # Load-balancing loss coefficient
+    z_loss_beta: float = 0.001  # Router z-loss coefficient
 
     def __post_init__(self):
         if self.window_size is not None:
@@ -79,9 +80,7 @@ class ModelConfig:
 
         if self.num_experts is not None:
             if self.num_experts < 2:
-                raise ValueError(
-                    f"num_experts must be >= 2 when set, got {self.num_experts}"
-                )
+                raise ValueError(f"num_experts must be >= 2 when set, got {self.num_experts}")
             if self.moe_top_k < 1 or self.moe_top_k > self.num_experts:
                 raise ValueError(
                     f"moe_top_k must be between 1 and num_experts ({self.num_experts}) "

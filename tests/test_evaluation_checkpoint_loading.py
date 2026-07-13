@@ -62,9 +62,7 @@ def test_load_variant_data_follows_metrics_symlink_to_training_config(tmp_path: 
     assert config.attention_type == "flash_alibi"
 
 
-def test_checkpoint_loader_builds_required_variant_in_bfloat16(
-    tmp_path: Path, monkeypatch
-):
+def test_checkpoint_loader_builds_required_variant_in_bfloat16(tmp_path: Path, monkeypatch):
     """FlashAttention variants must not be reconstructed in float32."""
     checkpoint_dir = tmp_path / "alibi_debug_s42"
     checkpoint_dir.mkdir()
@@ -105,9 +103,7 @@ def test_checkpoint_loader_builds_required_variant_in_bfloat16(
     assert next(loaded.parameters()).dtype == torch.bfloat16
 
 
-def test_checkpoint_loader_returns_none_when_no_weights_load(
-    tmp_path: Path, monkeypatch
-):
+def test_checkpoint_loader_returns_none_when_no_weights_load(tmp_path: Path, monkeypatch):
     """A randomly initialized fallback must never be evaluated as a checkpoint."""
     checkpoint_dir = tmp_path / "vanilla_debug_s42"
     checkpoint_dir.mkdir()
@@ -129,4 +125,37 @@ def test_checkpoint_loader_returns_none_when_no_weights_load(
 
     loaded = EvaluationPipeline(device="cpu")._load_model_from_checkpoint(variant)
 
+    assert loaded is None
+
+
+def test_checkpoint_loader_rejects_unexpected_architecture_keys(tmp_path: Path, monkeypatch):
+    """Old Linformer E/F weights must not load into causal linear V5."""
+    checkpoint_dir = tmp_path / "linear_debug_s42"
+    checkpoint_dir.mkdir()
+    source_model = nn.Linear(2, 2, bias=False)
+    state_dict = source_model.state_dict()
+    state_dict["legacy_projection.E"] = torch.zeros(2, 1)
+    torch.save(
+        {"model_state_dict": state_dict},
+        checkpoint_dir / "checkpoint_latest.pt",
+    )
+
+    def fake_build(variant_name, scale, activation, dtype):
+        return nn.Linear(2, 2, bias=False), ModelConfig(variant=variant_name)
+
+    monkeypatch.setattr("src.models.registry.build", fake_build)
+    variant = VariantData(
+        name="linear",
+        checkpoint_dir=checkpoint_dir,
+        log_entries=[],
+        config=ModelConfig(
+            variant="linear",
+            norm_type="rmsnorm",
+            position_encoding="rope",
+            ffn_type="swiglu",
+            attention_type="linear",
+        ),
+    )
+
+    loaded = EvaluationPipeline(device="cpu")._load_model_from_checkpoint(variant)
     assert loaded is None

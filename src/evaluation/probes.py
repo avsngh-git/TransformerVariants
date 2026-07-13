@@ -79,9 +79,7 @@ def _generate_mqar_sequences(
         f"Need at least {3 * n_associations} positions."
     )
 
-    tokens = torch.full(
-        (n_sequences, seq_len), filler_token, dtype=torch.long, device=device
-    )
+    tokens = torch.full((n_sequences, seq_len), filler_token, dtype=torch.long, device=device)
 
     all_key_positions: list[list[int]] = []
     all_query_positions: list[list[int]] = []
@@ -89,12 +87,8 @@ def _generate_mqar_sequences(
 
     for seq_idx in range(n_sequences):
         # Sample unique keys and values for this sequence
-        keys = torch.randint(
-            key_range_start, key_range_end, (n_associations,), device=device
-        )
-        values = torch.randint(
-            val_range_start, val_range_end, (n_associations,), device=device
-        )
+        keys = torch.randint(key_range_start, key_range_end, (n_associations,), device=device)
+        values = torch.randint(val_range_start, val_range_end, (n_associations,), device=device)
 
         key_positions = []
         query_positions = []
@@ -157,14 +151,12 @@ def run_mqar_probe(
     if batch_size < 1:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
 
-    tokens, all_key_positions, all_query_positions, all_expected_values = (
-        _generate_mqar_sequences(
-            n_sequences=n_sequences,
-            n_associations=n_associations,
-            seq_len=seq_len,
-            vocab_size=vocab_size,
-            device=device,
-        )
+    tokens, all_key_positions, all_query_positions, all_expected_values = _generate_mqar_sequences(
+        n_sequences=n_sequences,
+        n_associations=n_associations,
+        seq_len=seq_len,
+        vocab_size=vocab_size,
+        device=device,
     )
 
     # Run batched inference
@@ -530,12 +522,11 @@ def compute_attention_entropy(
 ) -> "AttentionEntropyResult | None":
     """Compute Shannon entropy of attention weight distributions per layer and head.
 
-    Only applicable to variants where attention weights are explicitly materialized:
-    - V0 (VanillaTransformer, attention_type="full")
-    - V5 (Linformer, attention_type="linear")
+    Only applicable to V0, where softmax attention weights are explicitly
+    materialized. Causal linear attention maintains prefix statistics rather
+    than a probability matrix, so Shannon entropy is not directly defined.
 
-    For flash-attention variants (V1–V4, attention_type in {"flash_sdpa", "sliding_window"}),
-    returns None since attention weights are never materialized.
+    All other variants return None.
 
     Shannon entropy: H = -Σ p·log(p) where p is the attention probability distribution.
     Values of p=0 are handled safely (0·log(0) = 0).
@@ -557,7 +548,7 @@ def compute_attention_entropy(
 
     # Check if attention weights are accessible for this variant
     attention_type = model.config.attention_type
-    if attention_type not in ("full", "linear"):
+    if attention_type != "full":
         return None
 
     blocks = model.blocks
@@ -577,7 +568,6 @@ def compute_attention_entropy(
         def hook_fn(module, input, output):
             # input is a tuple; input[0] is the attention weights tensor
             # For CausalSelfAttention: shape (B, n_head, T, S)
-            # For LinformerAttention: shape (B, n_head, T, r)
             attn_weights_store[layer_idx] = input[0].detach()
 
         return hook_fn
@@ -600,8 +590,7 @@ def compute_attention_entropy(
                 # Compute entropy for each layer from captured attention weights
                 for layer_idx in range(n_layers):
                     weights = attn_weights_store[layer_idx]
-                    # weights shape: (B, n_head, T, key_dim)
-                    # key_dim is S (seq_len) for V0 or r (projection_rank) for V5
+                    # weights shape: (B, n_head, T, seq_len)
 
                     # Shannon entropy: H = -Σ p·log(p)
                     # Clamp to avoid log(0); where p=0, p·log(p) = 0

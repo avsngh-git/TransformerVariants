@@ -86,12 +86,13 @@ def compute_step_flops(config: ModelConfig) -> FLOPBreakdown:
         window = min(config.window_size, seq_len) if config.window_size else seq_len
         attention_score_per_layer = 2 * n_head * seq_len * window * d_head
     elif config.attention_type == "linear":
-        # Linformer: E projection + Q @ K_proj^T
-        # E projection: 2 × n_head × projection_rank × seq_len × d_head
-        # Q @ K_proj^T: 2 × n_head × seq_len × projection_rank × d_head
-        # Total (simplified): 2 × (2 × n_head × projection_rank × seq_len × d_head)
-        rank = config.projection_rank if config.projection_rank else seq_len
-        attention_score_per_layer = 2 * (2 * n_head * rank * seq_len * d_head)
+        # Causal linear attention has two dominant per-token operations:
+        # update prefix state with phi(K) @ V^T, then query it with phi(Q).
+        # The denominator dot product is lower order but included.
+        state_update = 2 * n_head * seq_len * d_head * d_head
+        state_query = 2 * n_head * seq_len * d_head * d_head
+        normalization = 2 * n_head * seq_len * d_head
+        attention_score_per_layer = state_update + state_query + normalization
     else:
         # Fallback to full attention cost
         attention_score_per_layer = 2 * n_head * seq_len * seq_len * d_head
@@ -260,9 +261,7 @@ def compute_mfu(
         ValueError: If step_time_seconds is zero or negative.
     """
     if step_time_seconds <= 0:
-        raise ValueError(
-            f"step_time_seconds must be positive, got {step_time_seconds}"
-        )
+        raise ValueError(f"step_time_seconds must be positive, got {step_time_seconds}")
 
     achieved_tflops = step_flops / (step_time_seconds * 1e12)
     mfu = achieved_tflops / peak_tflops

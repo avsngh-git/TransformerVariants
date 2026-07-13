@@ -1,15 +1,17 @@
-"""Linformer low-rank projection attention module (V5).
+"""Causal linear attention module (V5).
 
-Implements sub-quadratic attention by projecting Key and Value sequences from
-length T down to a fixed rank r using learned projection matrices E and F,
-while retaining softmax attention and RoPE position encoding. This achieves
-O(T·r·d) complexity instead of the O(T²·d) of full attention.
+Implements the autoregressive linear Transformer from Katharopoulos et al.
+using the positive feature map φ(x) = ELU(x) + 1. Prefix key/value statistics
+replace the quadratic attention matrix, giving O(T·d_head²) complexity while
+ensuring that position i depends only on positions j <= i.
 
-The module interface matches the standard attention contract used by
-ModernTransformer: forward(x, kv_cache=None) -> (output, None).
+The recurrence is evaluated in fixed-size chunks. Within each chunk, a small
+causal attention matrix handles local contributions; accumulated prefix state
+handles all earlier chunks. This is mathematically equivalent to the token-wise
+recurrence but substantially faster on GPU and under torch.compile.
 
-KV-cache generation is not supported — E/F projection matrices are tied to
-fixed seq_len (training-comparison variant only, per ADR 0003).
+RoPE is applied before the feature map for positional parity with V1. Recurrent
+generation state is not yet exposed through the shared KV-cache interface.
 """
 
 import torch
@@ -19,20 +21,25 @@ from src.models.config import ModelConfig
 from src.models.rope import apply_rope, precompute_rope_frequencies
 
 
-class LinformerAttention(nn.Module):
-    """Linformer attention with learned low-rank projection, RoPE, and softmax.
+def feature_map(x: torch.Tensor) -> torch.Tensor:
+    """Apply the strictly positive ELU+1 feature map."""
+    return torch.where(x >= 0, x + 1.0, torch.exp(x))
 
-    Projects Keys and Values from sequence length T to a fixed rank r using
-    learned projection matrices E and F. Applies RoPE to Q and K before
-    projection for position encoding parity with V1 (full attention).
 
-    Complexity: O(T·r·d) per head, where r << T.
+class CausalLinearAttention(nn.Module):
+    """ELU+1 causal linear attention with RoPE.
+
+    For each position i, the normalized output is::
+
+        φ(Q_i)^T Σ_{j<=i}(φ(K_j) V_j^T)
+        ---------------------------------
+             φ(Q_i)^T Σ_{j<=i}φ(K_j)
+
+    The prefix sums make the computation linear in sequence length. Chunking
+    preserves the same equation while avoiding a Python loop per token.
 
     Args:
-        config: ModelConfig providing d_model, n_head, seq_len, projection_rank, dropout.
-
-    Raises:
-        ValueError: If projection_rank is None, <= 0, or > seq_len.
+        config: Model configuration.
     """
 
     def __init__(self, config: ModelConfig) -> None:
@@ -41,46 +48,24 @@ class LinformerAttention(nn.Module):
         self.n_head = config.n_head
         self.d_head = config.d_head
         self.d_model = config.d_model
+        self.chunk_size = min(64, config.seq_len)
 
-        # Validate projection_rank
-        if config.projection_rank is None:
-            raise ValueError(
-                "projection_rank must be set for LinformerAttention (got None). "
-                "Set config.projection_rank to a positive integer <= seq_len."
-            )
-        if config.projection_rank <= 0:
-            raise ValueError(
-                f"projection_rank must be > 0, got {config.projection_rank}"
-            )
-        if config.projection_rank > config.seq_len:
-            raise ValueError(
-                f"projection_rank ({config.projection_rank}) must be <= seq_len ({config.seq_len})"
-            )
+        self.q_proj = nn.Linear(config.d_model, config.d_model, bias=config.bias)
+        self.k_proj = nn.Linear(config.d_model, config.d_model, bias=config.bias)
+        self.v_proj = nn.Linear(config.d_model, config.d_model, bias=config.bias)
+        self.out_proj = nn.Linear(config.d_model, config.d_model, bias=config.bias)
 
-        # Q, K, V, and output projections
-        self.q_proj = nn.Linear(config.d_model, config.d_model, bias=False)
-        self.k_proj = nn.Linear(config.d_model, config.d_model, bias=False)
-        self.v_proj = nn.Linear(config.d_model, config.d_model, bias=False)
-        self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
-
-        # Learned projection matrices E (for K) and F (for V)
-        # Shape: (seq_len, projection_rank)
-        self.E = nn.Parameter(torch.empty(config.seq_len, config.projection_rank))
-        self.F = nn.Parameter(torch.empty(config.seq_len, config.projection_rank))
-        nn.init.xavier_uniform_(self.E)
-        nn.init.xavier_uniform_(self.F)
-
-        # Precompute RoPE cos/sin buffers
         cos, sin = precompute_rope_frequencies(config.d_head, config.seq_len)
         self.register_buffer("rope_cos", cos, persistent=False)
         self.register_buffer("rope_sin", sin, persistent=False)
 
-        # Dropout layers
-        self.attn_dropout = nn.Dropout(config.dropout)
+        causal_mask = torch.ones(self.chunk_size, self.chunk_size).tril()
+        self.register_buffer("chunk_causal_mask", causal_mask, persistent=False)
+
         self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor, kv_cache=None) -> tuple[torch.Tensor, None]:
-        """Compute Linformer attention.
+        """Compute causal linear attention.
 
         Args:
             x: Input tensor of shape (B, T, d_model).
@@ -91,12 +76,11 @@ class LinformerAttention(nn.Module):
 
         Raises:
             NotImplementedError: If kv_cache is not None.
-            AssertionError: If T > config.seq_len.
+            AssertionError: If the input exceeds the configured context length.
         """
         if kv_cache is not None:
             raise NotImplementedError(
-                "KV-cache generation is not supported for Linformer attention "
-                "(E/F projection matrices are tied to fixed seq_len)"
+                "Recurrent generation state is not yet supported for causal linear attention"
             )
 
         B, T, C = x.shape
@@ -104,32 +88,51 @@ class LinformerAttention(nn.Module):
             f"Input seq_len {T} exceeds config.seq_len {self.config.seq_len}"
         )
 
-        # Project Q, K, V and reshape to (B, H, T, d_head)
         q = self.q_proj(x).view(B, T, self.n_head, self.d_head).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_head, self.d_head).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_head, self.d_head).transpose(1, 2)
 
-        # Apply RoPE to Q and K (before low-rank projection)
         q = apply_rope(q, self.rope_cos[:T], self.rope_sin[:T])
         k = apply_rope(k, self.rope_cos[:T], self.rope_sin[:T])
 
-        # Low-rank projection of K and V
-        E_t = self.E[:T, :].t()  # (r, T)
-        F_t = self.F[:T, :].t()  # (r, T)
-        k_proj = torch.einsum('rt,bhtd->bhrd', E_t, k)  # (B, H, r, d_head)
-        v_proj = torch.einsum('rt,bhtd->bhrd', F_t, v)  # (B, H, r, d_head)
+        phi_q = feature_map(q)
+        phi_k = feature_map(k)
 
-        # Scaled dot-product attention with softmax
-        scale = self.d_head ** -0.5
-        scores = torch.matmul(q, k_proj.transpose(-2, -1)) * scale  # (B, H, T, r)
-        weights = torch.softmax(scores, dim=-1)  # (B, H, T, r)
-        weights = self.attn_dropout(weights)
+        # Prefix state summarizing all completed chunks.
+        kv_state = x.new_zeros(B, self.n_head, self.d_head, self.d_head)
+        k_state = x.new_zeros(B, self.n_head, self.d_head)
+        chunks: list[torch.Tensor] = []
 
-        # Weighted sum of projected values
-        output = torch.matmul(weights, v_proj)  # (B, H, T, d_head)
+        for start in range(0, T, self.chunk_size):
+            stop = min(start + self.chunk_size, T)
+            q_chunk = phi_q[:, :, start:stop, :]
+            k_chunk = phi_k[:, :, start:stop, :]
+            v_chunk = v[:, :, start:stop, :]
+            chunk_len = stop - start
 
-        # Reshape and output projection
+            # Contribution from every token in earlier chunks.
+            history_num = torch.einsum("bhld,bhde->bhle", q_chunk, kv_state)
+            history_den = torch.einsum("bhld,bhd->bhl", q_chunk, k_state)
+
+            # Exact causal contribution from tokens in the current chunk.
+            local_scores = torch.einsum("bhld,bhmd->bhlm", q_chunk, k_chunk)
+            mask = self.chunk_causal_mask[:chunk_len, :chunk_len]
+            local_scores = local_scores * mask
+            numerator = history_num + torch.matmul(local_scores, v_chunk)
+            denominator = history_den + local_scores.sum(dim=-1)
+            chunks.append(numerator / denominator.clamp_min(1e-6).unsqueeze(-1))
+
+            # State updates occur after computing this chunk so local causality is
+            # governed solely by the triangular mask above.
+            kv_state = kv_state + torch.einsum("bhld,bhle->bhde", k_chunk, v_chunk)
+            k_state = k_state + k_chunk.sum(dim=2)
+
+        output = torch.cat(chunks, dim=2)
         output = output.transpose(1, 2).contiguous().view(B, T, C)
         output = self.resid_dropout(self.out_proj(output))
 
         return output, None
+
+
+# Temporary import compatibility for code that used the original V5 class name.
+LinearAttention = CausalLinearAttention

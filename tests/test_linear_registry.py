@@ -1,13 +1,15 @@
-"""Registry and YAML config tests for Linformer attention variant."""
-import pytest
-import yaml
+"""Registry and YAML config tests for causal linear attention."""
+
 from pathlib import Path
 
+import pytest
+import yaml
+
 from src.models import registry
-from src.models.registry import VARIANTS, VariantSpec
 from src.models.config import ModelConfig
+from src.models.linear_attention import CausalLinearAttention
 from src.models.modern_transformer import ModernTransformer
-from src.models.linear_attention import LinformerAttention
+from src.models.registry import VARIANTS
 
 
 class TestRegistryEntry:
@@ -23,7 +25,7 @@ class TestRegistryEntry:
         assert spec.variant == "linear"
         assert spec.attention_type == "linear"
         assert spec.model_class == ModernTransformer
-        assert spec.attention_class == LinformerAttention
+        assert spec.attention_class == CausalLinearAttention
         assert spec.norm_type == "rmsnorm"
         assert spec.position_encoding == "rope"
         assert spec.ffn_type == "swiglu"
@@ -40,10 +42,10 @@ class TestRegistryBuild:
         assert isinstance(model, ModernTransformer)
         assert isinstance(config, ModelConfig)
 
-    def test_build_config_has_projection_rank(self):
-        """build('linear', 'debug') produces config with projection_rank == 64."""
+    def test_build_config_has_no_projection_rank(self):
+        """Causal linear V5 does not use Linformer's projection rank."""
         _, config = registry.build("linear", "debug")
-        assert config.projection_rank == 64
+        assert config.projection_rank is None
 
     def test_build_invalid_scale_raises(self):
         """build('linear', 'invalid') raises ValueError listing available scales."""
@@ -93,7 +95,7 @@ class TestYAMLConfig:
         assert model["variant_id"] == "V5"
         assert model["norm_type"] == "rmsnorm"
         assert model["position_encoding"] == "rope"
-        assert model["projection_rank"] == 64
+        assert "projection_rank" not in model
         assert model["ffn_type"] == "swiglu"
         assert model["attention_type"] == "linear"
 
@@ -105,11 +107,14 @@ class TestYAMLConfig:
         assert model["bias"] is False
         assert model["tie_embeddings"] is True
 
-    @pytest.mark.parametrize("scale,expected", [
-        ("debug", {"n_layer": 4, "d_model": 256, "n_head": 4, "seq_len": 512}),
-        ("main", {"n_layer": 8, "d_model": 512, "n_head": 8, "seq_len": 1024}),
-        ("stretch", {"n_layer": 12, "d_model": 768, "n_head": 12, "seq_len": 1024}),
-    ])
+    @pytest.mark.parametrize(
+        "scale,expected",
+        [
+            ("debug", {"n_layer": 4, "d_model": 256, "n_head": 4, "seq_len": 512}),
+            ("main", {"n_layer": 8, "d_model": 512, "n_head": 8, "seq_len": 1024}),
+            ("stretch", {"n_layer": 12, "d_model": 768, "n_head": 12, "seq_len": 1024}),
+        ],
+    )
     def test_scale_fields(self, yaml_config, scale, expected):
         """Each scale has correct dimension fields."""
         model = yaml_config["model"]
