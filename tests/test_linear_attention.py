@@ -5,7 +5,8 @@ import torch
 
 from src.models import registry
 from src.models.config import ModelConfig
-from src.models.linear_attention import CausalLinearAttention
+from src.models.linear_attention import CausalLinearAttention, feature_map
+from src.models.rope import apply_rope
 
 
 @pytest.fixture
@@ -24,6 +25,46 @@ def config():
         dropout=0.0,
         bias=False,
     )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_feature_map_large_positive_backward_is_finite(dtype):
+    """ELU+1 must remain positive and finite through both autograd branches."""
+    x = torch.tensor([90.0], dtype=dtype, requires_grad=True)
+
+    feature_map(x).sum().backward()
+
+    assert x.grad is not None
+    assert torch.isfinite(x.grad).all()
+    torch.testing.assert_close(x.grad.float(), torch.ones(1))
+
+
+def _published_roformer_linear_reference(
+    attn: CausalLinearAttention, x: torch.Tensor
+) -> torch.Tensor:
+    """Dense reference for RoFormer linear-attention equation 19."""
+    batch, length, channels = x.shape
+    q = attn.q_proj(x).view(batch, length, attn.n_head, attn.d_head).transpose(1, 2)
+    k = attn.k_proj(x).view(batch, length, attn.n_head, attn.d_head).transpose(1, 2)
+    v = attn.v_proj(x).view(batch, length, attn.n_head, attn.d_head).transpose(1, 2)
+
+    phi_q = feature_map(q)
+    phi_k = feature_map(k)
+    rotated_phi_q = apply_rope(phi_q, attn.rope_cos[:length], attn.rope_sin[:length])
+    rotated_phi_k = apply_rope(phi_k, attn.rope_cos[:length], attn.rope_sin[:length])
+
+    numerator_scores = torch.einsum("bhld,bhmd->bhlm", rotated_phi_q, rotated_phi_k)
+    denominator_scores = torch.einsum("bhld,bhmd->bhlm", phi_q, phi_k)
+    mask = torch.ones(length, length, dtype=torch.bool).tril()
+    numerator_scores = numerator_scores.masked_fill(~mask, 0.0)
+    denominator_scores = denominator_scores.masked_fill(~mask, 0.0)
+
+    numerator = torch.matmul(numerator_scores, v)
+    denominator = denominator_scores.sum(dim=-1).clamp_min(1e-6).unsqueeze(-1)
+    output = (numerator / denominator).transpose(1, 2).contiguous().view(
+        batch, length, channels
+    )
+    return attn.out_proj(output)
 
 
 class TestCausalLinearAttentionConstructor:
@@ -98,6 +139,18 @@ class TestCausalLinearAttentionForward:
         assert output.shape == (B, T, config.d_model)
         assert kv_out is None
 
+    def test_matches_published_roformer_linear_equation(self, config):
+        """Chunked V5 matches RoFormer equation 19 with an unrotated denominator."""
+        torch.manual_seed(7)
+        attn = CausalLinearAttention(config).eval()
+        x = torch.randn(1, 70, config.d_model)
+
+        with torch.no_grad():
+            actual, _ = attn(x)
+            expected = _published_roformer_linear_reference(attn, x)
+
+        torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
+
 
 class TestCausalLinearFullModel:
     """Integration tests via registry."""
@@ -141,3 +194,21 @@ class TestCausalLinearBfloat16:
             output, _ = attn(x)
         assert output.dtype == torch.bfloat16
         assert torch.isfinite(output).all()
+
+
+    def test_bfloat16_autocast_backward_finite(self, config):
+        """FP32 recurrence reductions keep a BF16-autocast backward pass finite."""
+        attn = CausalLinearAttention(config)
+        x = torch.randn(1, 70, config.d_model, requires_grad=True)
+
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            output, _ = attn(x)
+            loss = output.square().mean()
+        loss.backward()
+
+        assert x.grad is not None
+        assert torch.isfinite(x.grad).all()
+        assert all(
+            parameter.grad is None or torch.isfinite(parameter.grad).all()
+            for parameter in attn.parameters()
+        )

@@ -10,8 +10,10 @@ causal attention matrix handles local contributions; accumulated prefix state
 handles all earlier chunks. This is mathematically equivalent to the token-wise
 recurrence but substantially faster on GPU and under torch.compile.
 
-RoPE is applied before the feature map for positional parity with V1. Recurrent
-generation state is not yet exposed through the shared KV-cache interface.
+Following RoFormer equation 19, RoPE rotates the positive query and key features
+used by the numerator, while the normalization denominator remains unrotated.
+Critical prefix-state reductions run in float32. Recurrent generation state is not
+yet exposed through the shared KV-cache interface.
 """
 
 import torch
@@ -23,17 +25,19 @@ from src.models.rope import apply_rope, precompute_rope_frequencies
 
 def feature_map(x: torch.Tensor) -> torch.Tensor:
     """Apply the strictly positive ELU+1 feature map."""
-    return torch.where(x >= 0, x + 1.0, torch.exp(x))
+    negative_branch = torch.exp(x.clamp_max(0.0))
+    return torch.where(x >= 0, x + 1.0, negative_branch)
 
 
 class CausalLinearAttention(nn.Module):
     """ELU+1 causal linear attention with RoPE.
 
-    For each position i, the normalized output is::
+    Following RoFormer equation 19, the numerator rotates the positive
+    query/key features while the denominator remains unrotated::
 
-        φ(Q_i)^T Σ_{j<=i}(φ(K_j) V_j^T)
-        ---------------------------------
-             φ(Q_i)^T Σ_{j<=i}φ(K_j)
+        (R_i φ(Q_i))^T Σ_{j<=i}((R_j φ(K_j)) V_j^T)
+        ------------------------------------------------
+                  φ(Q_i)^T Σ_{j<=i}φ(K_j)
 
     The prefix sums make the computation linear in sequence length. Chunking
     preserves the same equation while avoiding a Python loop per token.
@@ -92,43 +96,70 @@ class CausalLinearAttention(nn.Module):
         k = self.k_proj(x).view(B, T, self.n_head, self.d_head).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_head, self.d_head).transpose(1, 2)
 
-        q = apply_rope(q, self.rope_cos[:T], self.rope_sin[:T])
-        k = apply_rope(k, self.rope_cos[:T], self.rope_sin[:T])
+        # The feature map and recurrent reductions are stability-sensitive. Keep
+        # them in float32 even when the surrounding model runs under autocast.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            phi_q = feature_map(q.float())
+            phi_k = feature_map(k.float())
+            rotated_phi_q = apply_rope(phi_q, self.rope_cos[:T], self.rope_sin[:T])
+            rotated_phi_k = apply_rope(phi_k, self.rope_cos[:T], self.rope_sin[:T])
+            v_float = v.float()
 
-        phi_q = feature_map(q)
-        phi_k = feature_map(k)
+            # Prefix states summarize completed chunks. RoPE appears only in the
+            # numerator state; the positive denominator state is unrotated.
+            kv_state = torch.zeros(
+                B,
+                self.n_head,
+                self.d_head,
+                self.d_head,
+                device=x.device,
+                dtype=phi_q.dtype,
+            )
+            k_state = torch.zeros(
+                B, self.n_head, self.d_head, device=x.device, dtype=phi_q.dtype
+            )
+            chunks: list[torch.Tensor] = []
 
-        # Prefix state summarizing all completed chunks.
-        kv_state = x.new_zeros(B, self.n_head, self.d_head, self.d_head)
-        k_state = x.new_zeros(B, self.n_head, self.d_head)
-        chunks: list[torch.Tensor] = []
+            for start in range(0, T, self.chunk_size):
+                stop = min(start + self.chunk_size, T)
+                q_chunk = phi_q[:, :, start:stop, :]
+                k_chunk = phi_k[:, :, start:stop, :]
+                rotated_q_chunk = rotated_phi_q[:, :, start:stop, :]
+                rotated_k_chunk = rotated_phi_k[:, :, start:stop, :]
+                v_chunk = v_float[:, :, start:stop, :]
+                chunk_len = stop - start
 
-        for start in range(0, T, self.chunk_size):
-            stop = min(start + self.chunk_size, T)
-            q_chunk = phi_q[:, :, start:stop, :]
-            k_chunk = phi_k[:, :, start:stop, :]
-            v_chunk = v[:, :, start:stop, :]
-            chunk_len = stop - start
+                # Contribution from every token in earlier chunks.
+                history_num = torch.einsum(
+                    "bhld,bhde->bhle", rotated_q_chunk, kv_state
+                )
+                history_den = torch.einsum("bhld,bhd->bhl", q_chunk, k_state)
 
-            # Contribution from every token in earlier chunks.
-            history_num = torch.einsum("bhld,bhde->bhle", q_chunk, kv_state)
-            history_den = torch.einsum("bhld,bhd->bhl", q_chunk, k_state)
+                # RoFormer rotates feature maps in the numerator but leaves the
+                # normalization denominator unrotated (equation 19).
+                local_num_scores = torch.einsum(
+                    "bhld,bhmd->bhlm", rotated_q_chunk, rotated_k_chunk
+                )
+                local_den_scores = torch.einsum(
+                    "bhld,bhmd->bhlm", q_chunk, k_chunk
+                )
+                mask = self.chunk_causal_mask[:chunk_len, :chunk_len]
+                local_num_scores = local_num_scores * mask
+                local_den_scores = local_den_scores * mask
+                numerator = history_num + torch.matmul(local_num_scores, v_chunk)
+                denominator = history_den + local_den_scores.sum(dim=-1)
+                chunks.append(numerator / denominator.clamp_min(1e-6).unsqueeze(-1))
 
-            # Exact causal contribution from tokens in the current chunk.
-            local_scores = torch.einsum("bhld,bhmd->bhlm", q_chunk, k_chunk)
-            mask = self.chunk_causal_mask[:chunk_len, :chunk_len]
-            local_scores = local_scores * mask
-            numerator = history_num + torch.matmul(local_scores, v_chunk)
-            denominator = history_den + local_scores.sum(dim=-1)
-            chunks.append(numerator / denominator.clamp_min(1e-6).unsqueeze(-1))
+                # Update after computing this chunk so the triangular local mask
+                # remains the sole source of within-chunk causality.
+                kv_state = kv_state + torch.einsum(
+                    "bhld,bhle->bhde", rotated_k_chunk, v_chunk
+                )
+                k_state = k_state + k_chunk.sum(dim=2)
 
-            # State updates occur after computing this chunk so local causality is
-            # governed solely by the triangular mask above.
-            kv_state = kv_state + torch.einsum("bhld,bhle->bhde", k_chunk, v_chunk)
-            k_state = k_state + k_chunk.sum(dim=2)
-
-        output = torch.cat(chunks, dim=2)
+            output = torch.cat(chunks, dim=2)
         output = output.transpose(1, 2).contiguous().view(B, T, C)
+        output = output.to(self.out_proj.weight.dtype)
         output = self.resid_dropout(self.out_proj(output))
 
         return output, None

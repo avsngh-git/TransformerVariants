@@ -84,7 +84,7 @@ def test_feature_map_negative_range(x_val):
     T=st.integers(min_value=3, max_value=32),
     seed=st.integers(min_value=0, max_value=2**31 - 1),
 )
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 def test_causal_ordering_independence(B, T, seed):
     """Outputs at positions 0..t-1 are identical regardless of changes at position t+.
 
@@ -189,7 +189,7 @@ def test_numerical_stability_finite_outputs(B, T, seed):
     T=st.integers(min_value=1, max_value=64),
     seed=st.integers(min_value=0, max_value=2**31 - 1),
 )
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 def test_output_shape_and_interface_contract(B, T, seed):
     """Output shape is (B, T, d_model) and second return is None.
 

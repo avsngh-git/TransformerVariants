@@ -97,7 +97,7 @@ SWA isolates the variable "attention span" while keeping all other components (R
 
 An autoregressive attention mechanism using the positive feature map `phi(x) = ELU(x) + 1`. Instead of materializing a T-by-T matrix, each position reads cumulative key and key-value statistics from its prefix. The result is strictly causal and has O(T * d_head^2) complexity instead of O(T^2 * d_head).
 
-RoPE is applied to Q and K before the feature map. The implementation processes fixed-size chunks: a small triangular matrix handles causal interactions within each chunk, while accumulated state summarizes all earlier chunks. This is algebraically equivalent to the token-wise recurrence.
+ELU+1 is applied first. Following RoFormer equation 19, RoPE rotates the positive Q and K features used by the numerator, while the denominator uses unrotated positive features. Stability-sensitive recurrence products and prefix states use float32. The implementation processes fixed-size chunks: a small triangular matrix handles causal interactions within each chunk, while accumulated state summarizes all earlier chunks. This is algebraically equivalent to the token-wise recurrence.
 
 V5 uses `ModernTransformer` as its model shell (RMSNorm, SwiGLU) and `CausalLinearAttention`. Recurrent generation state is not yet exposed through the shared KV-cache interface, so V5 currently remains a training-comparison-only variant.
 

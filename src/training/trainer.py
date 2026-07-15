@@ -21,6 +21,7 @@ The training loop follows the standard recipe:
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,12 +31,12 @@ import torch
 import torch.nn as nn
 
 from src.training.protocols import DataLoader
-from src.training.scheduler import get_lr
 from src.training.run_logger import RunLogger
+from src.training.scheduler import get_lr
 
 if TYPE_CHECKING:
     from src.training.checkpoint import AsyncCheckpointWriter
-    from src.training.health_monitor import Action, HealthMonitor
+    from src.training.health_monitor import HealthMonitor
 
 
 @dataclass
@@ -178,7 +179,10 @@ class Trainer:
         print(f"  Micro batch size: {self.config.micro_batch_size}")
         print(f"  Grad accumulation: {self.config.grad_accum_steps}")
         # Note: seq_len is determined by the data loader, not TrainConfig
-        print(f"  Effective batch size: {self.config.micro_batch_size * self.config.grad_accum_steps}")
+        effective_batch_size = (
+            self.config.micro_batch_size * self.config.grad_accum_steps
+        )
+        print(f"  Effective batch size: {effective_batch_size}")
         print(f"  Precision: {self.config.dtype}")
         print(f"  Device: {self.device}")
         print()
@@ -299,41 +303,77 @@ class Trainer:
             total_aux_loss += aux_loss.item() if torch.is_tensor(aux_loss) else aux_loss
             self.tokens_processed += x.numel()
 
-        # Gradient clipping (prevents exploding gradients)
-        if self.config.grad_clip > 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.config.grad_clip
-            ).item()
-        else:
-            grad_norm = 0.0
-
         avg_loss = total_loss / self.config.grad_accum_steps
         avg_aux = total_aux_loss / self.config.grad_accum_steps
 
-        # Health check: after backward/clip, before optimizer step
+        # clip_grad_norm_ returns the pre-clip norm. Reject non-finite norms
+        # before it can multiply otherwise finite gradients by a NaN coefficient.
+        max_grad_norm = self.config.grad_clip if self.config.grad_clip > 0 else float("inf")
+        clip_error = None
+        try:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(),
+                max_grad_norm,
+                error_if_nonfinite=True,
+            ).item()
+        except RuntimeError as error:
+            grad_norm = float("nan")
+            clip_error = error
+
+        metrics = {
+            "loss": avg_loss,
+            "lr": lr,
+            "grad_norm": grad_norm,
+            "aux_loss": avg_aux,
+        }
+        nonfinite_reason = None
+        if clip_error is not None:
+            nonfinite_reason = f"Non-finite gradient norm at step {self.step}"
+        elif not math.isfinite(avg_loss):
+            nonfinite_reason = f"Non-finite loss at step {self.step}"
+
+        if nonfinite_reason is not None:
+            self.optimizer.zero_grad(set_to_none=True)
+            if self.health_monitor is not None:
+                from src.training.health_monitor import Action
+
+                action = self.health_monitor.check(self.step, avg_loss, grad_norm)
+                if action == Action.ROLLBACK:
+                    if self.checkpoint_manager is not None:
+                        self.checkpoint_manager.wait()
+                        rollback_path = self.checkpoint_manager.rollback()
+                        if rollback_path is not None:
+                            self.load_checkpoint(rollback_path)
+                    self.health_monitor.reset()
+                    return metrics
+            raise FloatingPointError(
+                f"{nonfinite_reason}; optimizer step aborted"
+            ) from clip_error
+
+        # Health check uses the same unclipped norm that is reported in logs.
         if self.health_monitor is not None:
             from src.training.health_monitor import Action
 
             action = self.health_monitor.check(self.step, avg_loss, grad_norm)
 
             if action == Action.SKIP_STEP:
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
                 self._skipped_steps += 1
-                return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm, "aux_loss": avg_aux}
+                return metrics
 
             if action == Action.ROLLBACK:
+                self.optimizer.zero_grad(set_to_none=True)
                 if self.checkpoint_manager is not None:
                     self.checkpoint_manager.wait()
                     rollback_path = self.checkpoint_manager.rollback()
                     if rollback_path is not None:
                         self.load_checkpoint(rollback_path)
                 self.health_monitor.reset()
-                return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm, "aux_loss": avg_aux}
+                return metrics
 
-        # Optimizer step (update weights)
         self.optimizer.step()
 
-        return {"loss": avg_loss, "lr": lr, "grad_norm": grad_norm, "aux_loss": avg_aux}
+        return metrics
 
     @torch.no_grad()
     def _evaluate(self) -> float:

@@ -1424,7 +1424,79 @@ A linear asymptotic expression does not guarantee a faster training run. Matrix-
 
 \subsubsection{Position and causality}
 
-The recurrence is causal by construction because $(\mS_i,\vz_i)$ contains only indices $j\leq i$. Therefore the model is order-sensitive even without an explicit positional embedding: changing token order changes every subsequent prefix state. However, causality alone does not provide a rich representation of relative distance. Applying RoPE before a nonlinear $\varphi$ remains computationally possible, but the clean rotation identity in \cref{eq:rope_relative} is generally lost after the nonlinear feature map. The project's no-position version should therefore be interpreted as an architectural ablation, not a theorem that linear attention never needs position information.
+The recurrence is causal by construction because $(\mS_i,\vz_i)$ contains only indices $j\leq i$. Therefore the model is order-sensitive even without an explicit positional embedding: changing token order changes every subsequent prefix state. However, causality alone does not provide a rich representation of relative distance. The published linear-RoPE construction applies rotation after the nonlinear feature map in the numerator and leaves the positive normalization denominator unrotated; the exact corrected equation is given in \cref{sec:v5-failure-correction}.
+
+\subsection{V5 numerical failure, literature audit, and correction}
+\label{sec:v5-failure-correction}
+
+\subsubsection{Observed failure}
+
+The first corrected causal V5 retraining attempt still failed in all three seeds. The transition was abrupt: ordinary losses and global gradient norms were followed by non-finite values within one logging interval.
+\begin{table}[H]
+\centering
+\caption{First observed non-finite V5 training step. Logging occurred every ten optimizer steps.}
+\label{tab:v5-nan-steps}
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+Seed & Last finite step & First non-finite step & Learning rate \\
+\midrule
+42   & 1620 & 1630 & $2.96\times10^{-4}$ \\
+137  & 1690 & 1700 & $2.95\times10^{-4}$ \\
+2024 & 1670 & 1680 & $2.96\times10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+The preceding gradient norms were approximately $0.65$--$0.85$, but the first saved checkpoints were already entirely non-finite. Because there was no checkpoint or tensor-level trace between the last finite and first non-finite log entries, the precise first activation in those runs cannot be reconstructed.
+
+\subsubsection{Confirmed implementation defects}
+
+The intended feature map was
+\begin{equation}
+    \varphi(x)=\ELU(x)+1.
+\end{equation}
+The original implementation expanded it as
+\begin{equation}
+    \operatorname{where}(x\geq0,\;x+1,\;e^x).
+\end{equation}
+These expressions are equal in the finite forward pass, but they are not equivalent computational graphs. For a large positive input, approximately $x\geq89$ in float32 or bfloat16, the unused exponential branch overflows. Its backward path can then form $0\cdot\infty$, producing a NaN gradient even though the selected forward branch is $x+1$. A deterministic regression reproduced this at $x=90$ in both precisions. The corrected implementation evaluates the negative branch as $\exp(\min(x,0))$ before selection. It therefore preserves $e^x$ for negative inputs, never evaluates an overflowing exponential for positive inputs, and retains derivative one on the selected positive branch. This branch-safe algebraic form also avoids the cancellation to exactly zero that \texttt{F.elu(x) + 1} can exhibit in the far negative float32 tail.
+
+A second defect expanded the blast radius. The trainer passed a non-finite gradient set directly to \texttt{clip\_grad\_norm\_}. A single NaN makes the global norm and clipping coefficient NaN, so clipping can turn every otherwise finite gradient into NaN before AdamW runs. This explains an entirely corrupted checkpoint without requiring every layer to fail independently.
+
+The positional construction was also not the one derived in RoFormer \cite{su2021roformer}. V5 had applied rotation before the nonlinear map, computing $\varphi(\mR_i\vq_i)$ and $\varphi(\mR_j\vk_j)$ in both numerator and denominator. Since $\varphi$ is nonlinear,
+\begin{equation}
+    \varphi(\mR_i\vq_i)\neq\mR_i\varphi(\vq_i)
+\end{equation}
+in general. Thus the implementation was neither the original non-rotary linear Transformer \cite{katharopoulos2020linear} nor the linear-RoPE equation proposed by RoFormer.
+
+\subsubsection{Corrected formulation}
+
+Define positive, unrotated features
+\begin{equation}
+    \bm{a}_i=\varphi(\vq_i),\qquad \bm{b}_j=\varphi(\vk_j).
+\end{equation}
+The corrected causal mechanism follows RoFormer equation 19:
+\begin{align}
+    \bm{n}_i
+    &=\bigl(\mR_i\bm{a}_i\bigr)^\top
+      \sum_{j\leq i}\bigl(\mR_j\bm{b}_j\bigr)\vv_j^\top,\\
+    d_i
+    &=\bm{a}_i^\top\sum_{j\leq i}\bm{b}_j,\\
+    \vo_i&=\frac{\bm{n}_i}{\max(d_i,\varepsilon)}.
+\end{align}
+Rotation therefore affects only the numerator. The denominator retains positive unrotated features, as required to preserve a stable normalization term. The chunked implementation maintains separate numerator and denominator prefix states and is still exactly causal.
+
+The implementation correction has four parts:
+\begin{enumerate}
+    \item use a branch-safe algebraic implementation of $\ELU(x)+1$ that caps the unused exponential input at zero;
+    \item apply RoPE after the feature map in the numerator and leave the denominator unrotated;
+    \item evaluate feature maps, prefix-state updates, numerator, and denominator reductions in float32 even under bfloat16 autocast; and
+    \item measure gradient finiteness before clipping, abort or roll back before the optimizer step, and call clipping with non-finite rejection enabled.
+\end{enumerate}
+Focused tests now cover the large-positive feature-map backward pass in float32 and bfloat16, equality between the chunked code and a dense implementation of RoFormer equation 19, and the guarantee that one NaN gradient cannot update or contaminate model parameters.
+
+\subsubsection{Residual theoretical risk}
+
+The row-sum denominator itself remains the normalized mechanism proposed by Katharopoulos et al. Subsequent analysis proves that normalized kernel attention can have unbounded gradients and reports higher gradient variability for the $\ELU(x)+1$ feature map \cite{qin2022devil}. Qin et al. propose NormAttention, which removes row-sum division and applies RMSNorm after the unnormalized attention output. That is a literature-backed alternative, but it changes the V5 architecture and therefore must be introduced as an explicit new experimental decision rather than folded silently into this repair. The present correction removes the confirmed implementation defects while preserving the intended normalized-attention comparison.
 
 \subsection{Attention entropy as a routing diagnostic}
 \label{sec:attention-entropy}
@@ -2822,6 +2894,11 @@ Tri Dao.
 Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and Fran\c{c}ois Fleuret.
 \newblock Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention.
 \newblock \emph{ICML}, 2020.
+
+\bibitem{qin2022devil}
+Zhen Qin, Weixuan Sun, Hui Deng, Dongxu Li, Yunshen Wei, Baohong Lv, Junjie Yan, Lingpeng Kong, and Yiran Zhong.
+\newblock The Devil in Linear Transformer.
+\newblock \emph{EMNLP}, 2022.
 
 \bibitem{jiang2023mistral}
 Albert Q. Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, Devendra Singh Chaplot, Diego de Las Casas, Florian Bressand, Gianna Lengyel, Guillaume Lample, Lucile Saulnier, L\'{e}lio Renard Lavaud, Marie-Anne Lachaux, Pierre Stock, Teven Le Scao, Thibaut Lavril, Thomas Wang, Timoth\'{e}e Lacroix, and William El Sayed.

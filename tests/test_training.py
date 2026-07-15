@@ -8,7 +8,6 @@ Tests verify:
 """
 
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -16,12 +15,12 @@ import torch
 
 from src.data.dataloader import ShardedDataLoader
 from src.models.config import ModelConfig
-from src.models.vanilla_transformer import VanillaTransformer
 from src.models.modern_transformer import ModernTransformer
+from src.models.vanilla_transformer import VanillaTransformer
+from src.training.run_logger import RunLogger
 from src.training.scheduler import get_lr
 from src.training.synthetic_loader import SyntheticLoader
-from src.training.trainer import Trainer, TrainConfig
-from src.training.run_logger import RunLogger
+from src.training.trainer import TrainConfig, Trainer
 
 
 class TestScheduler:
@@ -254,3 +253,57 @@ class TestModernTrainingIntegration:
 
         # Loss should decrease
         assert results["final_train_loss"] < initial_loss
+
+
+class _FiniteForwardNaNBackward(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, value):
+        return value.clone()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return torch.full_like(grad_output, float("nan"))
+
+
+class _NonFiniteGradientModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.bad = torch.nn.Parameter(torch.tensor(1.0))
+        self.good = torch.nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, x, targets):
+        logits = torch.zeros((*x.shape, 2), device=x.device)
+        loss = _FiniteForwardNaNBackward.apply(self.bad) + self.good
+        return logits, loss, None
+
+
+def test_nonfinite_gradient_fails_before_optimizer_step(tmp_path):
+    """A single NaN gradient must not contaminate or update model parameters."""
+    batch = (torch.zeros(1, 2, dtype=torch.long), torch.zeros(1, 2, dtype=torch.long))
+    loader = SyntheticLoader([batch])
+    model = _NonFiniteGradientModel()
+    before = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    config = TrainConfig(
+        max_steps=1,
+        warmup_steps=1,
+        micro_batch_size=1,
+        grad_accum_steps=1,
+        dtype="float32",
+        checkpoint_dir=str(tmp_path / "ckpts"),
+    )
+    logger = RunLogger(tmp_path / "run", config={"variant": "test", "scale": "debug"})
+    trainer = Trainer(
+        model,
+        config,
+        train_loader=loader,
+        val_loader=loader,
+        run_logger=logger,
+        device="cpu",
+    )
+
+    with pytest.raises(FloatingPointError, match="Non-finite gradient norm"):
+        trainer._training_step()
+
+    for name, parameter in model.named_parameters():
+        assert torch.isfinite(parameter).all()
+        torch.testing.assert_close(parameter, before[name])
