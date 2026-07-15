@@ -8,7 +8,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.evaluation.comparison import VariantData, aggregate_pareto_variants
+from src.evaluation.comparison import (
+    VariantData,
+    aggregate_comparison_axes,
+    aggregate_pareto_variants,
+)
+from src.evaluation.metrics import MetricsResult
 from src.evaluation.pipeline import EvaluationPipeline, ProbeResults
 from src.evaluation.probes import CKAResult, MQARResult, StableRankResult
 from src.models.config import ModelConfig
@@ -120,7 +125,118 @@ def test_probe_results_retain_each_seed_and_publish_an_aggregate() -> None:
     assert len(payload["per_seed"]["linear"]) == 3
     assert payload["per_seed"]["linear"][0]["checkpoint_dir"] == "linear_main_s42"
     assert payload["aggregated"]["linear"]["mqar"]["accuracy"] == pytest.approx(0.2)
+    assert payload["aggregated"]["linear"]["mqar"]["accuracy_std"] == pytest.approx(0.1)
+    assert payload["aggregated"]["linear"]["mqar"]["accuracy_by_distance_std"][
+        "8"
+    ] == pytest.approx(0.1)
     assert payload["aggregated"]["linear"]["stable_rank"]["per_layer"] == pytest.approx([5.0, 6.0])
+    assert payload["aggregated"]["linear"]["stable_rank"]["per_layer_std"] == pytest.approx(
+        [1.0, 1.0]
+    )
+    assert payload["aggregated"]["linear"]["cka"]["adjacent_curve_std"] == pytest.approx([0.1])
+
+
+def test_duplicate_training_logs_do_not_create_fake_historical_error_bars() -> None:
+    config = ModelConfig(
+        n_layer=1,
+        d_model=32,
+        n_head=4,
+        seq_len=16,
+        vocab_size=128,
+        variant="vanilla",
+    )
+    seeds = []
+    for seed, fresh_loss in zip((42, 137, 2024), (3.0, 3.2, 2.8), strict=True):
+        seeds.append(
+            VariantData(
+                name="vanilla",
+                checkpoint_dir=Path(f"vanilla_main_s{seed}"),
+                log_entries=[
+                    {
+                        "step": 1,
+                        "tokens_seen": 100,
+                        "elapsed_time": 1.0,
+                        "val_loss": 4.0,
+                    }
+                ],
+                config=config,
+                metrics=MetricsResult(
+                    val_loss=fresh_loss,
+                    perplexity=float(np.exp(fresh_loss)),
+                    per_position_loss=None,
+                    icl_exponent=None,
+                    icl_fit_params=None,
+                ),
+                independent_training_log=False,
+            )
+        )
+
+    fixed_data, fixed_wallclock, _ = aggregate_comparison_axes({"vanilla": seeds})
+
+    assert fixed_data["vanilla"] == pytest.approx((3.0, 0.2))
+    assert fixed_wallclock["vanilla"][1.0][0] == pytest.approx(4.0)
+    assert np.isnan(fixed_wallclock["vanilla"][1.0][1])
+
+
+def test_duplicate_history_slice_before_endpoint_has_no_fake_std() -> None:
+    config = ModelConfig(
+        n_layer=1,
+        d_model=32,
+        n_head=4,
+        seq_len=16,
+        vocab_size=128,
+        variant="vanilla",
+    )
+    seeds = [
+        VariantData(
+            name="vanilla",
+            checkpoint_dir=Path(f"vanilla_main_s{seed}"),
+            log_entries=[
+                {
+                    "step": 1,
+                    "tokens_seen": 100,
+                    "elapsed_time": 1.0,
+                    "val_loss": 4.0,
+                },
+                {
+                    "step": 2,
+                    "tokens_seen": 200,
+                    "elapsed_time": 2.0,
+                    "val_loss": 3.8,
+                },
+            ],
+            config=config,
+            metrics=MetricsResult(
+                val_loss=fresh_loss,
+                perplexity=float(np.exp(fresh_loss)),
+                per_position_loss=None,
+                icl_exponent=None,
+                icl_fit_params=None,
+            ),
+            independent_training_log=False,
+        )
+        for seed, fresh_loss in zip((42, 137, 2024), (3.0, 3.2, 2.8), strict=True)
+    ]
+    budget_limiter = VariantData(
+        name="modern",
+        checkpoint_dir=Path("modern_main_s42"),
+        log_entries=[
+            {
+                "step": 1,
+                "tokens_seen": 100,
+                "elapsed_time": 1.0,
+                "val_loss": 4.1,
+            }
+        ],
+        config=config,
+    )
+
+    fixed_data, _, fixed_flops = aggregate_comparison_axes(
+        {"vanilla": seeds, "modern": [budget_limiter]}
+    )
+
+    assert np.isnan(fixed_data["vanilla"][1])
+    assert np.isnan(fixed_flops["vanilla"][1])
 
 
 def test_pareto_points_average_loss_time_and_memory_across_seeds() -> None:

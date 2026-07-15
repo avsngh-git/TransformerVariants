@@ -96,7 +96,7 @@ def test_checkpoint_loader_builds_required_variant_in_bfloat16(tmp_path: Path, m
         ),
     )
 
-    loaded = EvaluationPipeline(device="cpu")._load_model_from_checkpoint(variant)
+    loaded = EvaluationPipeline(device="cpu").load_model_from_checkpoint(variant)
 
     assert loaded is not None
     assert build_args["dtype"] == "bfloat16"
@@ -123,7 +123,7 @@ def test_checkpoint_loader_returns_none_when_no_weights_load(tmp_path: Path, mon
         config=ModelConfig(variant="vanilla"),
     )
 
-    loaded = EvaluationPipeline(device="cpu")._load_model_from_checkpoint(variant)
+    loaded = EvaluationPipeline(device="cpu").load_model_from_checkpoint(variant)
 
     assert loaded is None
 
@@ -157,5 +157,5 @@ def test_checkpoint_loader_rejects_unexpected_architecture_keys(tmp_path: Path, 
         ),
     )
 
-    loaded = EvaluationPipeline(device="cpu")._load_model_from_checkpoint(variant)
+    loaded = EvaluationPipeline(device="cpu").load_model_from_checkpoint(variant)
     assert loaded is None

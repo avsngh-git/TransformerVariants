@@ -39,6 +39,7 @@ class VariantData:
     config: ModelConfig
     metrics: MetricsResult | None = None
     flop_breakdown: FLOPBreakdown | None = None
+    independent_training_log: bool = True
 
 
 @dataclass
@@ -852,6 +853,25 @@ def aggregate_comparison_axes(
     representative seed. This keeps the comparison invariant while exposing
     sample variability at the report boundary.
     """
+
+    def estimate(values: list[float], *, independent: bool = True) -> tuple[float, float]:
+        mean = float(np.mean(values))
+        if len(values) < 3 or not independent:
+            return mean, float("nan")
+        return mean, float(np.std(values, ddof=1))
+
+    def final_metric_at_budget(seed: VariantData, budget: float, budget_key: str) -> float | None:
+        if seed.metrics is None:
+            return None
+        values = [
+            float(entry[budget_key])
+            for entry in seed.log_entries
+            if entry.get(budget_key) is not None
+        ]
+        if values and budget == max(values):
+            return seed.metrics.val_loss
+        return None
+
     all_variants = [variant for seeds in seed_groups.values() for variant in seeds]
     if not all_variants:
         return {}, {}, {}
@@ -898,14 +918,17 @@ def aggregate_comparison_axes(
     for variant_name, seeds in seed_groups.items():
         if token_budget is not None:
             values: list[float] = []
+            independent_values: list[bool] = []
             for seed in seeds:
-                value = slice_fixed_data([seed], token_budget).get(variant_name)
+                value = final_metric_at_budget(seed, token_budget, "tokens_seen")
+                is_fresh = value is not None
+                if value is None:
+                    value = slice_fixed_data([seed], token_budget).get(variant_name)
                 if value is not None:
                     values.append(value)
+                    independent_values.append(is_fresh or seed.independent_training_log)
             if values:
-                fixed_data[variant_name] = aggregate_across_seeds(
-                    [{"value": value} for value in values]
-                )["value"]
+                fixed_data[variant_name] = estimate(values, independent=all(independent_values))
 
         if time_budget is not None:
             fraction_values: dict[float, list[float]] = {fraction: [] for fraction in fractions}
@@ -914,7 +937,10 @@ def aggregate_comparison_axes(
                 for fraction, value in sliced.items():
                     fraction_values[fraction].append(value)
             estimates = {
-                fraction: aggregate_across_seeds([{"value": value} for value in values])["value"]
+                fraction: estimate(
+                    values,
+                    independent=all(seed.independent_training_log for seed in seeds),
+                )
                 for fraction, values in fraction_values.items()
                 if values
             }
@@ -923,14 +949,23 @@ def aggregate_comparison_axes(
 
         if flop_budget is not None:
             values = []
+            independent_values = []
             for seed in seeds:
-                value = slice_fixed_flops([seed], flop_budget).get(variant_name)
+                step_flops = (
+                    seed.flop_breakdown.total
+                    if seed.flop_breakdown is not None
+                    else compute_step_flops(seed.config).total
+                )
+                step_budget = flop_budget / step_flops
+                value = final_metric_at_budget(seed, step_budget, "step")
+                is_fresh = value is not None
+                if value is None:
+                    value = slice_fixed_flops([seed], flop_budget).get(variant_name)
                 if value is not None:
                     values.append(value)
+                    independent_values.append(is_fresh or seed.independent_training_log)
             if values:
-                fixed_flops[variant_name] = aggregate_across_seeds(
-                    [{"value": value} for value in values]
-                )["value"]
+                fixed_flops[variant_name] = estimate(values, independent=all(independent_values))
 
     return fixed_data, fixed_wallclock, fixed_flops
 

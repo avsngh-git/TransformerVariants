@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-07-15T14:04:17+00:00",
+  "generated_at": "2026-07-15T15:16:36+00:00",
   "hardware": "NVIDIA L4-24Q",
   "software_versions": {
-    "python": "3.13.11",
+    "python": "3.11.15",
     "torch": "2.10.0+cu128"
   },
   "settings": {
@@ -25,103 +25,15 @@
     "Unsupported cache paths are reported explicitly rather than emulated."
   ],
   "variants": {
-    "vanilla": {
-      "checkpoint_dir": "checkpoints/vanilla_main_1B_s42",
-      "status": "ok",
-      "generation": {
-        "uncached": {
-          "status": "ok",
-          "tokens_per_second": 484.2536028368908,
-          "seconds_mean": 0.016520269447937608,
-          "peak_memory_bytes": 288752128,
-          "repeats": 2
-        },
-        "kv_cache": {
-          "status": "ok",
-          "bytes": 3145728
-        },
-        "cached": {
-          "status": "ok",
-          "tokens_per_second": 528.2126239873663,
-          "seconds_mean": 0.01514541613869369,
-          "peak_memory_bytes": 270374400,
-          "repeats": 2
-        }
-      },
-      "long_context": {
-        "1024": {
-          "status": "ok",
-          "val_loss": 4.294600486755371,
-          "perplexity": 73.3029231056239,
-          "seconds": 0.02129535097628832,
-          "tokens_per_second": 48085.61273022411
-        },
-        "2048": {
-          "status": "unsupported",
-          "reason": "position encoding 'learned' has no declared extrapolation path"
-        },
-        "4096": {
-          "status": "unsupported",
-          "reason": "position encoding 'learned' has no declared extrapolation path"
-        }
-      }
-    },
-    "modern": {
-      "checkpoint_dir": "checkpoints/modern_main_1B_s42",
-      "status": "ok",
-      "generation": {
-        "uncached": {
-          "status": "ok",
-          "tokens_per_second": 338.3928858676753,
-          "seconds_mean": 0.02364115894306451,
-          "peak_memory_bytes": 256941056,
-          "repeats": 2
-        },
-        "kv_cache": {
-          "status": "ok",
-          "bytes": 4194304
-        },
-        "cached": {
-          "status": "ok",
-          "tokens_per_second": 339.13467655770944,
-          "seconds_mean": 0.023589448537677526,
-          "peak_memory_bytes": 237995520,
-          "repeats": 2
-        }
-      },
-      "long_context": {
-        "1024": {
-          "status": "ok",
-          "val_loss": 4.131227493286133,
-          "perplexity": 62.25429277985584,
-          "seconds": 0.01461666589602828,
-          "tokens_per_second": 70057.01623639402
-        },
-        "2048": {
-          "status": "ok",
-          "val_loss": 4.918875694274902,
-          "perplexity": 136.84866692166003,
-          "seconds": 0.032948432955890894,
-          "tokens_per_second": 62157.736082372176
-        },
-        "4096": {
-          "status": "ok",
-          "val_loss": 5.925472259521484,
-          "perplexity": 374.4552336591111,
-          "seconds": 0.0840856519062072,
-          "tokens_per_second": 48712.23457444151
-        }
-      }
-    },
     "alibi": {
       "checkpoint_dir": "checkpoints/alibi_main_1B_s42",
       "status": "ok",
       "generation": {
         "uncached": {
           "status": "ok",
-          "tokens_per_second": 394.7876666221876,
-          "seconds_mean": 0.020264057558961213,
-          "peak_memory_bytes": 129254400,
+          "tokens_per_second": 374.07628928127616,
+          "seconds_mean": 0.021386011969298124,
+          "peak_memory_bytes": 127451136,
           "repeats": 2
         },
         "kv_cache": {
@@ -136,24 +48,27 @@
       "long_context": {
         "1024": {
           "status": "ok",
-          "val_loss": 4.40625,
-          "perplexity": 81.9615307508321,
-          "seconds": 0.005716466810554266,
-          "tokens_per_second": 179131.626918466
+          "val_loss": 3.359375,
+          "perplexity": 28.771203256660744,
+          "prefill_seconds": 0.004736718954518437,
+          "prefill_tokens_per_second": 216183.3982198139,
+          "validation_seconds": 0.01664112787693739
         },
         "2048": {
           "status": "ok",
-          "val_loss": 4.5,
-          "perplexity": 90.01713130052181,
-          "seconds": 0.008282447000965476,
-          "tokens_per_second": 247269.91911463687
+          "val_loss": 3.46875,
+          "perplexity": 32.09659661306934,
+          "prefill_seconds": 0.0067945560440421104,
+          "prefill_tokens_per_second": 301417.7801647267,
+          "validation_seconds": 0.00818574195727706
         },
         "4096": {
           "status": "ok",
-          "val_loss": 4.71875,
-          "perplexity": 112.02812994692015,
-          "seconds": 0.01728500216268003,
-          "tokens_per_second": 236968.44012224974
+          "val_loss": 3.546875,
+          "perplexity": 34.70469568042362,
+          "prefill_seconds": 0.01408847514539957,
+          "prefill_tokens_per_second": 290734.089937157,
+          "validation_seconds": 0.017747831996530294
         }
       }
     },
@@ -163,9 +78,9 @@
       "generation": {
         "uncached": {
           "status": "ok",
-          "tokens_per_second": 246.09402348736094,
-          "seconds_mean": 0.032507900381460786,
-          "peak_memory_bytes": 122533888,
+          "tokens_per_second": 267.50854307805554,
+          "seconds_mean": 0.02990558696910739,
+          "peak_memory_bytes": 123451392,
           "repeats": 2
         },
         "kv_cache": {
@@ -180,168 +95,39 @@
       "long_context": {
         "1024": {
           "status": "ok",
-          "val_loss": 4.5,
-          "perplexity": 90.01713130052181,
-          "seconds": 0.007324259961023927,
-          "tokens_per_second": 139809.34667109296
+          "val_loss": 3.4375,
+          "perplexity": 31.10908815096766,
+          "prefill_seconds": 0.0059813628904521465,
+          "prefill_tokens_per_second": 171198.44068223608,
+          "validation_seconds": 0.006125529995188117
         },
         "2048": {
           "status": "ok",
-          "val_loss": 5.125,
-          "perplexity": 168.17414165184545,
-          "seconds": 0.009120517875999212,
-          "tokens_per_second": 224548.65259234287
+          "val_loss": 4.125,
+          "perplexity": 61.867809250367884,
+          "prefill_seconds": 0.007354170083999634,
+          "prefill_tokens_per_second": 278481.4569975483,
+          "validation_seconds": 0.008719367906451225
         },
         "4096": {
           "status": "ok",
-          "val_loss": 6.03125,
-          "perplexity": 416.23499808144635,
-          "seconds": 0.01747086294926703,
-          "tokens_per_second": 234447.4919123467
+          "val_loss": 4.96875,
+          "perplexity": 143.8469662358426,
+          "prefill_seconds": 0.01402964093722403,
+          "prefill_tokens_per_second": 291953.30217841297,
+          "validation_seconds": 0.01819430710747838
         }
       }
     },
-    "swa": {
-      "checkpoint_dir": "checkpoints/swa_main_1B_s42",
+    "modern": {
+      "checkpoint_dir": "checkpoints/modern_main_1B_s42",
       "status": "ok",
       "generation": {
         "uncached": {
           "status": "ok",
-          "tokens_per_second": 257.1096032238078,
-          "seconds_mean": 0.03111513494513929,
-          "peak_memory_bytes": 130298880,
-          "repeats": 2
-        },
-        "kv_cache": {
-          "status": "unsupported",
-          "reason": "model did not return a reusable prompt cache"
-        },
-        "cached": {
-          "status": "unsupported",
-          "reason": "model did not return a reusable prompt cache"
-        }
-      },
-      "long_context": {
-        "1024": {
-          "status": "ok",
-          "val_loss": 4.46875,
-          "perplexity": 87.24759532868651,
-          "seconds": 0.008192510809749365,
-          "tokens_per_second": 124992.20614776673
-        },
-        "2048": {
-          "status": "ok",
-          "val_loss": 4.59375,
-          "perplexity": 98.86447768050158,
-          "seconds": 0.008728600107133389,
-          "tokens_per_second": 234630.9803248159
-        },
-        "4096": {
-          "status": "ok",
-          "val_loss": 4.78125,
-          "perplexity": 119.2533235714264,
-          "seconds": 0.016300764167681336,
-          "tokens_per_second": 251276.56334792712
-        }
-      }
-    },
-    "swa_interleaved": {
-      "checkpoint_dir": "checkpoints/swa_interleaved_main_1B_s42",
-      "status": "ok",
-      "generation": {
-        "uncached": {
-          "status": "ok",
-          "tokens_per_second": 270.4066699224843,
-          "seconds_mean": 0.02958506904542446,
-          "peak_memory_bytes": 130298880,
-          "repeats": 2
-        },
-        "kv_cache": {
-          "status": "unsupported",
-          "reason": "model did not return a reusable prompt cache"
-        },
-        "cached": {
-          "status": "unsupported",
-          "reason": "model did not return a reusable prompt cache"
-        }
-      },
-      "long_context": {
-        "1024": {
-          "status": "ok",
-          "val_loss": 4.40625,
-          "perplexity": 81.9615307508321,
-          "seconds": 0.006651121890172362,
-          "tokens_per_second": 153958.98871031866
-        },
-        "2048": {
-          "status": "ok",
-          "val_loss": 4.78125,
-          "perplexity": 119.2533235714264,
-          "seconds": 0.008803667966276407,
-          "tokens_per_second": 232630.30907629977
-        },
-        "4096": {
-          "status": "ok",
-          "val_loss": 5.15625,
-          "perplexity": 173.5125619611118,
-          "seconds": 0.01711270189844072,
-          "tokens_per_second": 239354.3710577475
-        }
-      }
-    },
-    "linear": {
-      "checkpoint_dir": "checkpoints/linear_main_1B_fixed_s42",
-      "status": "ok",
-      "generation": {
-        "uncached": {
-          "status": "ok",
-          "tokens_per_second": 133.2619759713835,
-          "seconds_mean": 0.060032128007151186,
-          "peak_memory_bytes": 248369664,
-          "repeats": 2
-        },
-        "kv_cache": {
-          "status": "unsupported",
-          "reason": "model did not return a reusable prompt cache"
-        },
-        "cached": {
-          "status": "unsupported",
-          "reason": "model did not return a reusable prompt cache"
-        }
-      },
-      "long_context": {
-        "1024": {
-          "status": "ok",
-          "val_loss": 4.552778244018555,
-          "perplexity": 94.89568579247975,
-          "seconds": 0.03450933005660772,
-          "tokens_per_second": 29673.134723863703
-        },
-        "2048": {
-          "status": "ok",
-          "val_loss": 5.768198013305664,
-          "perplexity": 319.960648023657,
-          "seconds": 0.0632060409989208,
-          "tokens_per_second": 32401.966135404182
-        },
-        "4096": {
-          "status": "ok",
-          "val_loss": 7.003779888153076,
-          "perplexity": 1100.7861530952664,
-          "seconds": 0.12087020999751985,
-          "tokens_per_second": 33887.58901042735
-        }
-      }
-    },
-    "moe": {
-      "checkpoint_dir": "checkpoints/moe_main_1B_s42",
-      "status": "ok",
-      "generation": {
-        "uncached": {
-          "status": "ok",
-          "tokens_per_second": 45.53934943897218,
-          "seconds_mean": 0.17567225045058876,
-          "peak_memory_bytes": 760388608,
+          "tokens_per_second": 326.17361173589563,
+          "seconds_mean": 0.02452681551221758,
+          "peak_memory_bytes": 256809984,
           "repeats": 2
         },
         "kv_cache": {
@@ -350,80 +136,36 @@
         },
         "cached": {
           "status": "ok",
-          "tokens_per_second": 88.79773839948567,
-          "seconds_mean": 0.09009238460566849,
-          "peak_memory_bytes": 741443072,
+          "tokens_per_second": 329.75322383136444,
+          "seconds_mean": 0.024260566453449428,
+          "peak_memory_bytes": 237864448,
           "repeats": 2
         }
       },
       "long_context": {
         "1024": {
           "status": "ok",
-          "val_loss": 3.9432716369628906,
-          "perplexity": 51.58709977975315,
-          "seconds": 0.03540667286142707,
-          "tokens_per_second": 28921.102076088366
+          "val_loss": 3.0750627517700195,
+          "perplexity": 21.651240522549895,
+          "prefill_seconds": 0.012847736943513155,
+          "prefill_tokens_per_second": 79702.75267170841,
+          "validation_seconds": 0.014938015025109053
         },
         "2048": {
           "status": "ok",
-          "val_loss": 4.833552360534668,
-          "perplexity": 125.65654610140079,
-          "seconds": 0.05595190403982997,
-          "tokens_per_second": 36602.86517760163
+          "val_loss": 4.083508491516113,
+          "perplexity": 59.3533456811248,
+          "prefill_seconds": 0.03202895610593259,
+          "prefill_tokens_per_second": 63942.140144263314,
+          "validation_seconds": 0.03898778115399182
         },
         "4096": {
           "status": "ok",
-          "val_loss": 5.943169593811035,
-          "perplexity": 381.1410794322408,
-          "seconds": 0.1101450021378696,
-          "tokens_per_second": 37187.34323390358
-        }
-      }
-    },
-    "moe_interleaved": {
-      "checkpoint_dir": "checkpoints/moe_interleaved_main_1B_s42",
-      "status": "ok",
-      "generation": {
-        "uncached": {
-          "status": "ok",
-          "tokens_per_second": 77.96714171644656,
-          "seconds_mean": 0.10260732693132013,
-          "peak_memory_bytes": 508664832,
-          "repeats": 2
-        },
-        "kv_cache": {
-          "status": "ok",
-          "bytes": 4194304
-        },
-        "cached": {
-          "status": "ok",
-          "tokens_per_second": 135.18649023116333,
-          "seconds_mean": 0.059177510906010866,
-          "peak_memory_bytes": 489719296,
-          "repeats": 2
-        }
-      },
-      "long_context": {
-        "1024": {
-          "status": "ok",
-          "val_loss": 3.9617958068847656,
-          "perplexity": 52.551613812252484,
-          "seconds": 0.0247333450242877,
-          "tokens_per_second": 41401.5976809627
-        },
-        "2048": {
-          "status": "ok",
-          "val_loss": 4.820536136627197,
-          "perplexity": 124.03157082508599,
-          "seconds": 0.044891878962516785,
-          "tokens_per_second": 45620.72355469931
-        },
-        "4096": {
-          "status": "ok",
-          "val_loss": 5.864665985107422,
-          "perplexity": 352.36444147851483,
-          "seconds": 0.09879841282963753,
-          "tokens_per_second": 41458.15588214878
+          "val_loss": 4.983827590942383,
+          "perplexity": 146.0322650728337,
+          "prefill_seconds": 0.07757808011956513,
+          "prefill_tokens_per_second": 52798.41926594664,
+          "validation_seconds": 0.08820199593901634
         }
       }
     },
@@ -433,9 +175,9 @@
       "generation": {
         "uncached": {
           "status": "ok",
-          "tokens_per_second": 80.80235355719743,
-          "seconds_mean": 0.09900701709557325,
-          "peak_memory_bytes": 508664832,
+          "tokens_per_second": 81.32185220188727,
+          "seconds_mean": 0.09837454243097454,
+          "peak_memory_bytes": 508533760,
           "repeats": 2
         },
         "kv_cache": {
@@ -444,33 +186,319 @@
         },
         "cached": {
           "status": "ok",
-          "tokens_per_second": 139.62465740649327,
-          "seconds_mean": 0.05729647004045546,
-          "peak_memory_bytes": 489719296,
+          "tokens_per_second": 138.34978481431645,
+          "seconds_mean": 0.05782444844953716,
+          "peak_memory_bytes": 489588224,
           "repeats": 2
         }
       },
       "long_context": {
         "1024": {
           "status": "ok",
-          "val_loss": 4.004053115844727,
-          "perplexity": 54.81989172896708,
-          "seconds": 0.024623424047604203,
-          "tokens_per_second": 41586.41779552314
+          "val_loss": 2.992628574371338,
+          "perplexity": 19.938022246251133,
+          "prefill_seconds": 0.02292576991021633,
+          "prefill_tokens_per_second": 44665.893621469106,
+          "validation_seconds": 0.025496368063613772
         },
         "2048": {
           "status": "ok",
-          "val_loss": 4.915224552154541,
-          "perplexity": 136.34992403438352,
-          "seconds": 0.044712940929457545,
-          "tokens_per_second": 45803.29446973924
+          "val_loss": 4.118350982666016,
+          "perplexity": 61.45781365861632,
+          "prefill_seconds": 0.04395418404601514,
+          "prefill_tokens_per_second": 46593.97152853462,
+          "validation_seconds": 0.049692772096022964
         },
         "4096": {
           "status": "ok",
-          "val_loss": 5.938312530517578,
-          "perplexity": 379.29434157756634,
-          "seconds": 0.09816856402903795,
-          "tokens_per_second": 41724.15111204454
+          "val_loss": 4.990614414215088,
+          "perplexity": 147.02673106329038,
+          "prefill_seconds": 0.092911435989663,
+          "prefill_tokens_per_second": 44084.99294377181,
+          "validation_seconds": 0.1000776148866862
+        }
+      }
+    },
+    "moe_interleaved": {
+      "checkpoint_dir": "checkpoints/moe_interleaved_main_1B_s42",
+      "status": "ok",
+      "generation": {
+        "uncached": {
+          "status": "ok",
+          "tokens_per_second": 80.80378138895851,
+          "seconds_mean": 0.09900526760611683,
+          "peak_memory_bytes": 508533760,
+          "repeats": 2
+        },
+        "kv_cache": {
+          "status": "ok",
+          "bytes": 4194304
+        },
+        "cached": {
+          "status": "ok",
+          "tokens_per_second": 139.43859410429616,
+          "seconds_mean": 0.05737292498815805,
+          "peak_memory_bytes": 489588224,
+          "repeats": 2
+        }
+      },
+      "long_context": {
+        "1024": {
+          "status": "ok",
+          "val_loss": 3.0047407150268555,
+          "perplexity": 20.18098279197694,
+          "prefill_seconds": 0.02280603814870119,
+          "prefill_tokens_per_second": 44900.38968291022,
+          "validation_seconds": 0.024833797942847013
+        },
+        "2048": {
+          "status": "ok",
+          "val_loss": 4.00742769241333,
+          "perplexity": 55.00519814057419,
+          "prefill_seconds": 0.042512746062129736,
+          "prefill_tokens_per_second": 48173.78762141065,
+          "validation_seconds": 0.05007564486004412
+        },
+        "4096": {
+          "status": "ok",
+          "val_loss": 4.922316551208496,
+          "perplexity": 137.3203546456997,
+          "prefill_seconds": 0.08998019807040691,
+          "prefill_tokens_per_second": 45521.126734962265,
+          "validation_seconds": 0.10435339505784214
+        }
+      }
+    },
+    "moe": {
+      "checkpoint_dir": "checkpoints/moe_main_1B_s42",
+      "status": "ok",
+      "generation": {
+        "uncached": {
+          "status": "ok",
+          "tokens_per_second": 45.53615007701274,
+          "seconds_mean": 0.17568459315225482,
+          "peak_memory_bytes": 760257536,
+          "repeats": 2
+        },
+        "kv_cache": {
+          "status": "ok",
+          "bytes": 4194304
+        },
+        "cached": {
+          "status": "ok",
+          "tokens_per_second": 89.72496155516603,
+          "seconds_mean": 0.08916136447805911,
+          "peak_memory_bytes": 741312000,
+          "repeats": 2
+        }
+      },
+      "long_context": {
+        "1024": {
+          "status": "ok",
+          "val_loss": 2.9251275062561035,
+          "perplexity": 18.63660218178063,
+          "prefill_seconds": 0.03264384111389518,
+          "prefill_tokens_per_second": 31368.857495269578,
+          "validation_seconds": 0.035059256944805384
+        },
+        "2048": {
+          "status": "ok",
+          "val_loss": 4.03380823135376,
+          "perplexity": 56.47557429717766,
+          "prefill_seconds": 0.053101341938599944,
+          "prefill_tokens_per_second": 38567.76354857591,
+          "validation_seconds": 0.05963077209889889
+        },
+        "4096": {
+          "status": "ok",
+          "val_loss": 4.96148681640625,
+          "perplexity": 142.80596438086417,
+          "prefill_seconds": 0.10664050001651049,
+          "prefill_tokens_per_second": 38409.422305464075,
+          "validation_seconds": 0.11910964199341834
+        }
+      }
+    },
+    "swa_interleaved": {
+      "checkpoint_dir": "checkpoints/swa_interleaved_main_1B_s42",
+      "status": "ok",
+      "generation": {
+        "uncached": {
+          "status": "ok",
+          "tokens_per_second": 264.4435819964038,
+          "seconds_mean": 0.030252199503593147,
+          "peak_memory_bytes": 128857088,
+          "repeats": 2
+        },
+        "kv_cache": {
+          "status": "unsupported",
+          "reason": "model did not return a reusable prompt cache"
+        },
+        "cached": {
+          "status": "unsupported",
+          "reason": "model did not return a reusable prompt cache"
+        }
+      },
+      "long_context": {
+        "1024": {
+          "status": "ok",
+          "val_loss": 3.4375,
+          "perplexity": 31.10908815096766,
+          "prefill_seconds": 0.0072305959183722734,
+          "prefill_tokens_per_second": 141620.4157389173,
+          "validation_seconds": 0.006096184020861983
+        },
+        "2048": {
+          "status": "ok",
+          "val_loss": 3.59375,
+          "perplexity": 36.37020880080945,
+          "prefill_seconds": 0.007012371905148029,
+          "prefill_tokens_per_second": 292055.24574309745,
+          "validation_seconds": 0.008816972840577364
+        },
+        "4096": {
+          "status": "ok",
+          "val_loss": 3.796875,
+          "perplexity": 44.5617113320772,
+          "prefill_seconds": 0.014299819944426417,
+          "prefill_tokens_per_second": 286437.1730496146,
+          "validation_seconds": 0.01904082717373967
+        }
+      }
+    },
+    "swa": {
+      "checkpoint_dir": "checkpoints/swa_main_1B_s42",
+      "status": "ok",
+      "generation": {
+        "uncached": {
+          "status": "ok",
+          "tokens_per_second": 264.30336303321405,
+          "seconds_mean": 0.030268248985521495,
+          "peak_memory_bytes": 128857088,
+          "repeats": 2
+        },
+        "kv_cache": {
+          "status": "unsupported",
+          "reason": "model did not return a reusable prompt cache"
+        },
+        "cached": {
+          "status": "unsupported",
+          "reason": "model did not return a reusable prompt cache"
+        }
+      },
+      "long_context": {
+        "1024": {
+          "status": "ok",
+          "val_loss": 3.421875,
+          "perplexity": 30.62678644311483,
+          "prefill_seconds": 0.005906451027840376,
+          "prefill_tokens_per_second": 173369.7604827875,
+          "validation_seconds": 0.006118295015767217
+        },
+        "2048": {
+          "status": "ok",
+          "val_loss": 3.484375,
+          "perplexity": 32.60204446315635,
+          "prefill_seconds": 0.007021560100838542,
+          "prefill_tokens_per_second": 291673.0713100953,
+          "validation_seconds": 0.00864013796672225
+        },
+        "4096": {
+          "status": "ok",
+          "val_loss": 3.546875,
+          "perplexity": 34.70469568042362,
+          "prefill_seconds": 0.013160045025870204,
+          "prefill_tokens_per_second": 311245.1357079725,
+          "validation_seconds": 0.018436330137774348
+        }
+      }
+    },
+    "vanilla": {
+      "checkpoint_dir": "checkpoints/vanilla_main_1B_s42",
+      "status": "ok",
+      "generation": {
+        "uncached": {
+          "status": "ok",
+          "tokens_per_second": 477.20314230662296,
+          "seconds_mean": 0.01676434895489365,
+          "peak_memory_bytes": 290456064,
+          "repeats": 2
+        },
+        "kv_cache": {
+          "status": "ok",
+          "bytes": 3145728
+        },
+        "cached": {
+          "status": "ok",
+          "tokens_per_second": 516.1815334740414,
+          "seconds_mean": 0.015498423483222723,
+          "peak_memory_bytes": 272078336,
+          "repeats": 2
+        }
+      },
+      "long_context": {
+        "1024": {
+          "status": "ok",
+          "val_loss": 3.1702146530151367,
+          "perplexity": 23.81259525324368,
+          "prefill_seconds": 0.019322552951052785,
+          "prefill_tokens_per_second": 52995.067607989535,
+          "validation_seconds": 0.021451517939567566
+        },
+        "2048": {
+          "status": "unsupported",
+          "reason": "position encoding 'learned' has no declared extrapolation path"
+        },
+        "4096": {
+          "status": "unsupported",
+          "reason": "position encoding 'learned' has no declared extrapolation path"
+        }
+      }
+    },
+    "linear": {
+      "checkpoint_dir": "checkpoints/linear_main_1B_fixed_s42",
+      "status": "ok",
+      "generation": {
+        "uncached": {
+          "status": "ok",
+          "tokens_per_second": 94.02005980588757,
+          "seconds_mean": 0.08508822496514767,
+          "peak_memory_bytes": 248500736,
+          "repeats": 2
+        },
+        "kv_cache": {
+          "status": "unsupported",
+          "reason": "model did not return a reusable prompt cache"
+        },
+        "cached": {
+          "status": "unsupported",
+          "reason": "model did not return a reusable prompt cache"
+        }
+      },
+      "long_context": {
+        "1024": {
+          "status": "ok",
+          "val_loss": 3.3071846961975098,
+          "perplexity": 27.308136448626318,
+          "prefill_seconds": 0.03364146500825882,
+          "prefill_tokens_per_second": 30438.626847808588,
+          "validation_seconds": 0.03531654691323638
+        },
+        "2048": {
+          "status": "ok",
+          "val_loss": 4.664470672607422,
+          "perplexity": 106.10940374007852,
+          "prefill_seconds": 0.06071674590930343,
+          "prefill_tokens_per_second": 33730.39792118029,
+          "validation_seconds": 0.06361542805097997
+        },
+        "4096": {
+          "status": "ok",
+          "val_loss": 5.660566329956055,
+          "perplexity": 287.3113094914057,
+          "prefill_seconds": 0.11591287003830075,
+          "prefill_tokens_per_second": 35336.8870829147,
+          "validation_seconds": 0.12258666288107634
         }
       }
     }

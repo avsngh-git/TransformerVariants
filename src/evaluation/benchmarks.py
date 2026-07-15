@@ -38,9 +38,7 @@ def _cache_tensors(value: object) -> Iterable[torch.Tensor]:
 def _cache_is_reusable(cache: object) -> bool:
     if not isinstance(cache, (list, tuple)) or not cache:
         return False
-    return all(
-        item is not None and next(_cache_tensors(item), None) is not None for item in cache
-    )
+    return all(item is not None and next(_cache_tensors(item), None) is not None for item in cache)
 
 
 def _cache_bytes(cache: object) -> int:
@@ -92,9 +90,7 @@ def _decode_once(
     started = time.perf_counter()
     for _ in range(new_tokens):
         input_ids = idx[:, -1:] if use_cache and cache is not None else idx
-        logits, _, new_cache = model(
-            input_ids, kv_cache=cache if use_cache else None
-        )
+        logits, _, new_cache = model(input_ids, kv_cache=cache if use_cache else None)
         if use_cache:
             cache = new_cache
         next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
@@ -133,8 +129,7 @@ def benchmark_generation(
         for _ in range(warmups):
             _decode_once(model, prompt, new_tokens, use_cache=use_cache)
         samples = [
-            _decode_once(model, prompt, new_tokens, use_cache=use_cache)
-            for _ in range(repeats)
+            _decode_once(model, prompt, new_tokens, use_cache=use_cache) for _ in range(repeats)
         ]
         seconds = [sample[0] for sample in samples]
         return {
@@ -214,9 +209,14 @@ def evaluate_long_context(
         try:
             _synchronize(device)
             started = time.perf_counter()
+            model(inputs, targets=None, kv_cache=None)
+            _synchronize(device)
+            prefill_elapsed = time.perf_counter() - started
+            _synchronize(device)
+            validation_started = time.perf_counter()
             _, loss, _ = model(inputs, targets=targets, kv_cache=None)
             _synchronize(device)
-            elapsed = time.perf_counter() - started
+            validation_elapsed = time.perf_counter() - validation_started
             if loss is None or not torch.isfinite(loss):
                 raise RuntimeError("non-finite or missing validation loss")
             val_loss = float(loss.item())
@@ -224,8 +224,9 @@ def evaluate_long_context(
                 "status": "ok",
                 "val_loss": val_loss,
                 "perplexity": math.exp(val_loss),
-                "seconds": elapsed,
-                "tokens_per_second": context_length / elapsed,
+                "prefill_seconds": prefill_elapsed,
+                "prefill_tokens_per_second": context_length / prefill_elapsed,
+                "validation_seconds": validation_elapsed,
             }
         except (AssertionError, NotImplementedError, RuntimeError) as exc:
             results[str(context_length)] = {

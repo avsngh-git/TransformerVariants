@@ -75,7 +75,7 @@ A size configuration that determines the model's width and depth. Applies to any
 | main | Primary benchmark (~51M params) | Yes |
 | stretch | Near-memory-limit exploration (~124M params) | Yes |
 
-Parameter counts across variants at the same scale need not be identical — the ±5% tolerance rule applies. Dimensions (d_model, n_layer, n_head) are fixed per scale; parameter count is whatever falls out of the variant's architecture.
+Dense variants at the same scale target active-parameter counts within ±5%. Dimensions (d_model, n_layer, n_head) remain fixed; inherent reducers such as GQA and capacity expanders such as the completed MoE recipes are labeled non-conforming when they fall outside tolerance, with active and total counts reported rather than silently compensated.
 
 ### Run
 
@@ -99,7 +99,7 @@ An autoregressive attention mechanism using the positive feature map `phi(x) = E
 
 ELU+1 is applied first. Following RoFormer equation 19, RoPE rotates the positive Q and K features used by the numerator, while the denominator uses unrotated positive features. Stability-sensitive recurrence products and prefix states use float32. The implementation processes fixed-size chunks: a small triangular matrix handles causal interactions within each chunk, while accumulated state summarizes all earlier chunks. This is algebraically equivalent to the token-wise recurrence.
 
-V5 uses `ModernTransformer` as its model shell (RMSNorm, SwiGLU) and `CausalLinearAttention`. Recurrent generation state is not yet exposed through the shared KV-cache interface, so V5 currently remains a training-comparison-only variant.
+V5 uses `ModernTransformer` as its model shell (RMSNorm, SwiGLU) and `CausalLinearAttention`. It supports full-sequence validation, long-context diagnostics, and uncached generation. Recurrent generation state is not yet exposed through the shared KV-cache interface, so reusable cached serving remains unsupported.
 
 ### Shard
 
@@ -138,8 +138,8 @@ Simulating a larger effective batch size by accumulating gradients over multiple
 ## Invariants
 
 - All variants in a comparison share: same tokenized data in same order, same token budget, same optimizer hyperparameters, same effective batch size, same precision (bf16).
-- Parameter counts across compared variants must be within ±5%. Exception: variants whose mechanism inherently reduces parameters (e.g., GQA) may exceed this tolerance — the difference is noted in results rather than compensated.
-- Results are reported as mean ± standard deviation over 3+ random seeds. Additional seeds may be added selectively for pairs with overlapping intervals.
+- Dense comparison recipes target active parameter counts within ±5%. Mechanisms that inherently reduce or expand active parameters are explicitly labeled non-conforming when outside tolerance; active and total counts are reported and the mismatch is not compensated post hoc.
+- Primary training and checkpoint-quality results are reported as mean ± sample standard deviation over 3+ random seeds. Clearly labeled representative-checkpoint serving and long-context diagnostics are capability measurements, not statistical main results.
 - Comparisons happen at main and stretch scale only. Debug scale is never part of formal comparisons.
 - All three comparison axes (fixed-data, fixed-compute/wall-clock, fixed-compute/FLOPs) are reported for every experiment.
 

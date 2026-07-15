@@ -251,7 +251,9 @@ Install: `pip install -e ".[data]"`
 
 ## What's Next
 
-- Regenerate the final seed-aware report after any checkpoint or evaluator change.
+- Regenerate the final seed-aware report after any checkpoint or evaluator change;
+  fresh checkpoint validation supplies final seed losses, while duplicate historical
+  seed logs are flagged and do not produce artificial error bars.
 - Review explicit unsupported inference/cache statuses before making serving claims.
 - Treat long-context measurements as one-sample diagnostics until repeated across
   validation windows and seeds.

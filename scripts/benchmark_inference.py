@@ -35,9 +35,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _validation_tokens(
-    data_dir: str, max_context: int, device: str
-) -> torch.Tensor:
+def _validation_tokens(data_dir: str, max_context: int, device: str) -> torch.Tensor:
     loader = ShardedDataLoader(
         data_dir=data_dir,
         batch_size=1,
@@ -54,15 +52,13 @@ def main() -> None:
     variants = load_variant_data([Path(path) for path in args.checkpoints])
     if not variants:
         raise SystemExit("No valid checkpoint directories were loaded.")
-    tokens = _validation_tokens(
-        args.data_dir, max(args.context_lengths), args.device
-    )
+    tokens = _validation_tokens(args.data_dir, max(args.context_lengths), args.device)
     pipeline = EvaluationPipeline(device=args.device, data_dir=args.data_dir)
     results: dict[str, dict] = {}
 
     for variant in variants:
         print(f"Benchmarking {variant.name}: {variant.checkpoint_dir}", flush=True)
-        model = pipeline._load_model_from_checkpoint(variant)
+        model = pipeline.load_model_from_checkpoint(variant)
         if model is None:
             results[variant.name] = {
                 "checkpoint_dir": str(variant.checkpoint_dir),
@@ -85,9 +81,7 @@ def main() -> None:
                 "kv_cache": {"status": "unsupported", "reason": str(exc)},
             }
 
-        long_context = evaluate_long_context(
-            model, tokens, context_lengths=args.context_lengths
-        )
+        long_context = evaluate_long_context(model, tokens, context_lengths=args.context_lengths)
         results[variant.name] = {
             "checkpoint_dir": str(variant.checkpoint_dir),
             "status": "ok",

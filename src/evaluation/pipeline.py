@@ -42,7 +42,6 @@ from src.evaluation.metrics import (
     MetricsResult,
     compute_per_position_loss,
     compute_perplexity,
-    compute_val_loss,
     fit_icl_decay,
 )
 from src.evaluation.probes import (
@@ -70,6 +69,22 @@ from src.evaluation.visualizations import (
 from src.viz.html_dashboard import build_dashboard
 
 logger = logging.getLogger(__name__)
+
+
+def _sample_std_or_none(values: list[float]) -> float | None:
+    """Return a JSON-safe sample standard deviation."""
+    if len(values) < 2:
+        return None
+    return float(np.asarray(values, dtype=np.float64).std(ddof=1))
+
+
+def _sample_std_array_or_none(
+    values: list[np.ndarray],
+) -> list | None:
+    """Return JSON-safe elementwise sample standard deviations."""
+    if len(values) < 2:
+        return None
+    return np.stack(values).std(axis=0, ddof=1).tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +135,10 @@ class ProbeResults:
         )
         seeds = self.per_seed[variant]
 
+        def sample_std(values: list[float] | np.ndarray) -> float:
+            array = np.asarray(values, dtype=np.float64)
+            return float(array.std(ddof=1)) if array.shape[0] >= 2 else float("nan")
+
         distances = sorted(
             {distance for seed in seeds for distance in seed.mqar.accuracy_by_distance}
         )
@@ -144,7 +163,7 @@ class ProbeResults:
         self.stable_rank[variant] = StableRankResult(
             per_layer=stable_layers.mean(axis=0),
             mean=float(stable_means.mean()),
-            std=float(stable_means.std(ddof=1)) if len(seeds) >= 2 else float("nan"),
+            std=sample_std(stable_means),
         )
 
         self.cka[variant] = CKAResult(
@@ -184,7 +203,9 @@ class ProbeResults:
                 "full_matrix": result.full_matrix.tolist(),
             }
 
-        def entropy_dict(result: AttentionEntropyResult | None) -> dict | None:
+        def entropy_dict(
+            result: AttentionEntropyResult | None,
+        ) -> dict | None:
             if result is None:
                 return None
             return {
@@ -194,12 +215,52 @@ class ProbeResults:
 
         aggregated = {}
         for variant, mqar in self.mqar.items():
+            seeds = self.per_seed.get(variant, [])
+            mqar_payload = mqar_dict(mqar)
+            mqar_payload["accuracy_std"] = _sample_std_or_none(
+                [seed.mqar.accuracy for seed in seeds]
+            )
+            distances = mqar.accuracy_by_distance
+            mqar_payload["accuracy_by_distance_std"] = {
+                str(distance): _sample_std_or_none(
+                    [
+                        seed.mqar.accuracy_by_distance[distance]
+                        for seed in seeds
+                        if distance in seed.mqar.accuracy_by_distance
+                    ]
+                )
+                for distance in distances
+            }
+
+            stable_rank_payload = stable_rank_dict(self.stable_rank[variant])
+            stable_rank_payload["per_layer_std"] = _sample_std_array_or_none(
+                [seed.stable_rank.per_layer for seed in seeds]
+            )
+
+            cka_payload = cka_dict(self.cka[variant])
+            cka_payload["adjacent_curve_std"] = _sample_std_array_or_none(
+                [seed.cka.adjacent_curve for seed in seeds]
+            )
+            cka_payload["full_matrix_std"] = _sample_std_array_or_none(
+                [seed.cka.full_matrix for seed in seeds]
+            )
+
+            entropy_seeds = [seed.attention_entropy for seed in seeds if seed.attention_entropy]
+            entropy_payload = entropy_dict(self.attention_entropy.get(variant))
+            if entropy_payload is not None:
+                entropy_payload["per_layer_std"] = _sample_std_array_or_none(
+                    [seed.per_layer for seed in entropy_seeds]
+                )
+                entropy_payload["per_head_std"] = _sample_std_array_or_none(
+                    [seed.per_head for seed in entropy_seeds]
+                )
+
             aggregated[variant] = {
-                "mqar": mqar_dict(mqar),
-                "stable_rank": stable_rank_dict(self.stable_rank[variant]),
-                "cka": cka_dict(self.cka[variant]),
-                "attention_entropy": entropy_dict(self.attention_entropy.get(variant)),
-                "n": len(self.per_seed.get(variant, [])),
+                "mqar": mqar_payload,
+                "stable_rank": stable_rank_payload,
+                "cka": cka_payload,
+                "attention_entropy": entropy_payload,
+                "n": len(seeds),
             }
 
         per_seed = {
@@ -332,6 +393,9 @@ class EvaluationPipeline:
 
         logger.info("Loaded %d variant(s): %s", len(variants), [v.name for v in variants])
 
+        seed_groups = self._detect_seed_groups(variants)
+        self._mark_duplicate_seed_logs(seed_groups, warnings)
+
         # ─── Step 2: Compute FLOPs ────────────────────────────────────────
         self._compute_flops(variants, warnings)
 
@@ -339,7 +403,6 @@ class EvaluationPipeline:
         probe_results = self._run_probes(variants, warnings, skipped_steps)
 
         # ─── Step 4: Detect seed groups ───────────────────────────────────
-        seed_groups = self._detect_seed_groups(variants)
         pareto_variants = aggregate_pareto_variants(seed_groups)
         representative_variants = [seeds[0] for seeds in seed_groups.values()]
 
@@ -411,6 +474,30 @@ class EvaluationPipeline:
             groups.setdefault(v.name, []).append(v)
         return groups
 
+    @staticmethod
+    def _mark_duplicate_seed_logs(
+        seed_groups: dict[str, list[VariantData]], warnings: list[str]
+    ) -> None:
+        """Flag copied histories so they are not presented as independent uncertainty."""
+        for variant_name, seeds in seed_groups.items():
+            if len(seeds) < 2:
+                continue
+            histories = [
+                json.dumps(seed.log_entries, sort_keys=True, separators=(",", ":"))
+                for seed in seeds
+            ]
+            if len(set(histories)) == len(histories):
+                continue
+            for seed in seeds:
+                seed.independent_training_log = False
+            message = (
+                f"{variant_name}: duplicate seed metrics.jsonl histories detected; "
+                "historical wall-clock uncertainty is unavailable. Final loss "
+                "statistics use fresh checkpoint validation."
+            )
+            warnings.append(message)
+            logger.warning(message)
+
     def _compute_flops(self, variants: list[VariantData], warnings: list[str]) -> None:
         """Compute FLOP breakdowns for all variants with configs."""
         logger.info("Computing FLOP breakdowns...")
@@ -450,7 +537,7 @@ class EvaluationPipeline:
                 warnings.append(f"Skipping probes for {v.name}: could not create val_loader.")
                 continue
 
-            model = self._load_model_from_checkpoint(v)
+            model = self.load_model_from_checkpoint(v)
             if model is None:
                 warnings.append(f"Skipping probes for {v.name}: could not load model.")
                 continue
@@ -482,7 +569,11 @@ class EvaluationPipeline:
         per_pos_loss = compute_per_position_loss(model, val_loader, v.config.seq_len, self._device)
         icl_params = fit_icl_decay(per_pos_loss)
 
-        val_loss_value = compute_val_loss(v.log_entries) if v.log_entries else 0.0
+        val_loss_value = float(np.mean(per_pos_loss))
+        for entry in reversed(v.log_entries):
+            if entry.get("val_loss") is not None:
+                entry["val_loss"] = val_loss_value
+                break
         v.metrics = MetricsResult(
             val_loss=val_loss_value,
             perplexity=compute_perplexity(val_loss_value),
@@ -760,7 +851,7 @@ class EvaluationPipeline:
     # File I/O helpers
     # ═══════════════════════════════════════════════════════════════════════
 
-    def _load_model_from_checkpoint(self, variant_data: VariantData):
+    def load_model_from_checkpoint(self, variant_data: VariantData):
         """Load a model from checkpoint weights using the registry."""
         from src.models.registry import SCALES, VARIANTS
         from src.models.registry import build as registry_build

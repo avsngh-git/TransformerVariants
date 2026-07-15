@@ -65,7 +65,7 @@ TransformerVariants/
 | 08 | Evaluation framework (plots, statistics) | ✅ Done |
 | 09 | Self-contained offline HTML dashboard | ✅ Done |
 | 10 | Large-scale data pipeline | ✅ Done |
-| 11 | Fault-tolerant training (resume, corruption fallback) | ✅ Done |
+| 11 | Fault-tolerant training (resume, corruption fallback) | Partial |
 | 12 | Main benchmark runs and controlled experiments | ✅ Done |
 | 13 | Final report, packaging, demo assets | In progress |
 
@@ -92,7 +92,8 @@ All variants in a comparison set share:
 - Active parameters per token within ±5% where possible
 - Total stored parameters reported separately for sparse MoE variants
 - Any parity exception documented rather than hidden by an unplanned retrain
-- Results reported over 3+ random seeds
+- Primary training and checkpoint-quality results reported over 3+ random seeds
+- Representative-checkpoint inference diagnostics labeled separately
 
 See `reports/experiment_contract.md` for full details.
 

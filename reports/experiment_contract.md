@@ -81,7 +81,9 @@ To ensure meaningful comparisons between variants:
    parameters. A completed recipe outside tolerance is retained only as a documented
    limitation; changing its width, depth, routing, or token budget constitutes a new
    experiment.
-8. **Multiple seeds.** Main results reported over at least 3 random seeds.
+8. **Multiple seeds.** Primary training and checkpoint-quality results are reported
+   over at least 3 random seeds. Representative-checkpoint serving and long-context
+   diagnostics are labeled as capability measurements, not statistical main results.
 9. **Reproducibility.** Every run is fully specified by:
    `model_config + data_config + train_config + code_version + dataset_manifest`
 

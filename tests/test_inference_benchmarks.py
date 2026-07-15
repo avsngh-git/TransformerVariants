@@ -22,9 +22,15 @@ class CacheModel(nn.Module):
         self.config = SimpleNamespace(seq_len=32, position_encoding="none")
         self.embedding = nn.Embedding(16, 8)
         self.head = nn.Linear(8, 16)
+        self.targeted_calls = 0
+        self.target_free_calls = 0
         self.supports_cache = supports_cache
 
     def forward(self, idx, targets=None, kv_cache=None):
+        if targets is None:
+            self.target_free_calls += 1
+        else:
+            self.targeted_calls += 1
         hidden = self.embedding(idx)
         logits = self.head(hidden)
         loss = (
@@ -60,9 +66,7 @@ def test_inspect_kv_cache_reports_bytes_or_explicit_unsupported() -> None:
 
 
 def test_generation_benchmark_keeps_cached_and_uncached_results_separate() -> None:
-    result = benchmark_generation(
-        CacheModel(), prompt_length=4, new_tokens=2, repeats=1, warmups=0
-    )
+    result = benchmark_generation(CacheModel(), prompt_length=4, new_tokens=2, repeats=1, warmups=0)
 
     assert result["uncached"]["status"] == "ok"
     assert result["uncached"]["tokens_per_second"] > 0
@@ -77,9 +81,12 @@ def test_long_context_records_native_result_and_unsupported_extension() -> None:
     result = evaluate_long_context(model, tokens, context_lengths=[8, 64])
 
     assert result["8"]["status"] == "ok"
-    assert result["8"]["tokens_per_second"] > 0
+    assert result["8"]["prefill_tokens_per_second"] > 0
+    assert result["8"]["validation_seconds"] > 0
     assert result["8"]["perplexity"] > 0
     assert result["64"] == {
         "status": "unsupported",
         "reason": "position encoding 'none' has no declared extrapolation path",
     }
+    assert model.target_free_calls == 1
+    assert model.targeted_calls == 1
