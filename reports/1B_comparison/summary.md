@@ -24,6 +24,8 @@ Validation loss at the same token budget.
 
 Validation loss at fractions of the dynamic wall-clock budget.
 
+Entries without an error range are incomplete historical diagnostics; copied seed histories cannot support independent variability.
+
 | Variant | 25% | 50% | 75% | 100% |
 |---------|-----|-----|-----|------|
 | alibi | 4.1792 | 4.0428 | 3.9385 | 3.8408 |
@@ -53,6 +55,9 @@ Validation loss at the same cumulative FLOP budget.
 | swa | 3.9029 |
 | swa_interleaved | 3.8829 |
 | vanilla | 3.6984 ± 0.0035 |
+
+Entries without an error range are incomplete historical diagnostics; copied seed histories cannot support independent variability.
+
 
 ## Parameter Parity
 

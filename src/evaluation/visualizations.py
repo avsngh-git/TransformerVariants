@@ -339,9 +339,7 @@ def plot_learning_curves(
         color = COLORBLIND_PALETTE[i % len(COLORBLIND_PALETTE)]
 
         # Filter to entries with non-None val_loss
-        entries = [
-            e for e in variant.log_entries if e.get("val_loss") is not None
-        ]
+        entries = [e for e in variant.log_entries if e.get("val_loss") is not None]
         if not entries:
             continue
 
@@ -485,9 +483,7 @@ def plot_flop_breakdown(
 
     # Extract component values (in TFLOPs for readability)
     qkv = np.array([breakdowns[v].qkv_proj for v in variant_names], dtype=np.float64)
-    attn_score = np.array(
-        [breakdowns[v].attention_score for v in variant_names], dtype=np.float64
-    )
+    attn_score = np.array([breakdowns[v].attention_score for v in variant_names], dtype=np.float64)
     attn_output = np.array(
         [breakdowns[v].attention_output for v in variant_names], dtype=np.float64
     )
@@ -505,9 +501,7 @@ def plot_flop_breakdown(
     y_pos = np.arange(n_variants)
 
     # Stacked horizontal bars
-    ax.barh(
-        y_pos, qkv_t, color=COMPONENT_COLORS["qkv_proj"], label="QKV Projections"
-    )
+    ax.barh(y_pos, qkv_t, color=COMPONENT_COLORS["qkv_proj"], label="QKV Projections")
     ax.barh(
         y_pos,
         attn_score_t,
@@ -792,9 +786,7 @@ def plot_roofline(
     ax.set_yscale("log")
     ax.set_xlabel("Arithmetic Intensity (FLOPs/byte)")
     ax.set_ylabel("Achieved TFLOPS")
-    ax.set_title(
-        f"Roofline Diagram (L4: {peak_tflops} TFLOPS, {bandwidth_gbs} GB/s)"
-    )
+    ax.set_title(f"Roofline Diagram (L4: {peak_tflops} TFLOPS, {bandwidth_gbs} GB/s)")
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(0.1, peak_tflops * 2)
     ax.legend(loc="lower right")
@@ -814,9 +806,7 @@ def plot_roofline(
 # ---------------------------------------------------------------------------
 
 
-def _get_metric_value_for_pareto(
-    variant: VariantData, metric: str
-) -> float | None:
+def _get_metric_value_for_pareto(variant: VariantData, metric: str) -> float | None:
     """Extract a metric value from a variant for Pareto plotting.
 
     Args:
@@ -974,6 +964,10 @@ def generate_summary_md(comparison: ComparisonResult, output_dir: Path) -> Path:
 
     # Title and overview
     lines.append("# Evaluation Summary Report")
+
+    def std_unavailable(value: float | tuple[float, float]) -> bool:
+        return isinstance(value, tuple) and len(value) == 2 and bool(np.isnan(value[1]))
+
     lines.append("")
     lines.append("Automated comparison of Transformer variant architectures across")
     lines.append("controlled evaluation axes: fixed-data, fixed-wallclock, and fixed-FLOPs.")
@@ -1006,14 +1000,22 @@ def generate_summary_md(comparison: ComparisonResult, output_dir: Path) -> Path:
             if isinstance(frac_dict, dict):
                 all_fractions.update(frac_dict.keys())
         fractions_sorted = sorted(all_fractions)
+        if any(
+            std_unavailable(value)
+            for fractions in comparison.fixed_wallclock.values()
+            for value in fractions.values()
+        ):
+            lines.append(
+                "Entries without an error range are incomplete historical diagnostics; "
+                "copied seed histories cannot support independent variability."
+            )
+            lines.append("")
 
         if fractions_sorted:
             # Build header
             frac_headers = [f"{int(f * 100)}%" for f in fractions_sorted]
             header = "| Variant | " + " | ".join(frac_headers) + " |"
-            separator = "|---------|" + "|".join(
-                ["-" * (len(h) + 2) for h in frac_headers]
-            ) + "|"
+            separator = "|---------|" + "|".join(["-" * (len(h) + 2) for h in frac_headers]) + "|"
             lines.append(header)
             lines.append(separator)
 
@@ -1042,6 +1044,14 @@ def generate_summary_md(comparison: ComparisonResult, output_dir: Path) -> Path:
         lines.append("|---------|----------|")
         for variant, val_loss in sorted(comparison.fixed_flops.items()):
             lines.append(f"| {variant} | {_format_metric(val_loss)} |")
+        if any(std_unavailable(value) for value in comparison.fixed_flops.values()):
+            lines.append("")
+            lines.append(
+                "Entries without an error range are incomplete historical diagnostics; "
+                "copied seed histories cannot support independent variability."
+            )
+            lines.append("")
+
     else:
         lines.append("No fixed-FLOPs comparison results available.")
     lines.append("")

@@ -268,6 +268,7 @@ class TestWriteMetadata:
         assert "timestamp" in data
         assert "software_versions" in data
         assert "hardware" in data
+        assert data["warnings"] == []
         assert "evaluated_checkpoints" in data
 
     def test_software_versions_present(self, make_variant, tmp_path):
@@ -311,6 +312,19 @@ class TestWriteMetadata:
             data = json.load(f)
 
         assert len(data["evaluated_checkpoints"]) == 2
+
+    def test_warnings_are_persisted(self, make_variant, tmp_path):
+        output_dir = tmp_path / "report"
+        output_dir.mkdir()
+        pipeline = EvaluationPipeline(device="cpu")
+        pipeline._write_metadata(
+            output_dir,
+            [make_variant("vanilla", seed=0)],
+            ["duplicate seed histories detected"],
+        )
+
+        data = json.loads((output_dir / "metadata.json").read_text())
+        assert data["warnings"] == ["duplicate seed histories detected"]
 
 
 # ---------------------------------------------------------------------------

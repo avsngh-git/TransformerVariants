@@ -66,7 +66,7 @@ main{padding-top:30px}.metric{grid-column:span 6}.wide,.side{grid-column:1/-1}}@
 <header id="overview"><div class="eyebrow">Controlled architecture study</div><h1>Transformer variants,<br>measured honestly.</h1>
 <p class="lede">A serverless view of fixed-data, wall-clock, FLOP, representation, and retrieval results. Every value is embedded in this file.</p>
 <div class="grid" id="headline"></div></header>
-<section class="section" id="comparisons"><h2>Comparison axes</h2><p class="section-intro">Lower validation loss is better. Error ranges are sample standard deviations across seeds.</p>
+<section class="section" id="comparisons"><h2>Comparison axes</h2><p class="section-intro">Lower validation loss is better. Error ranges are sample standard deviations across seeds; missing ranges mark incomplete historical diagnostics whose copied logs cannot support independent variability.</p>
 <section class="section" id="benchmarks"><h2>Inference & long context</h2><p class="section-intro">Generation throughput, persistent cache storage, and held-out context extrapolation. Unsupported paths remain visible.</p>
 <div class="card full" style="overflow:auto"><table><thead><tr><th>Variant</th><th>Uncached tok/s</th><th>Cached tok/s</th><th>KV cache</th><th>1K PPL</th><th>2K PPL</th><th>4K PPL</th><th>4K prefill tok/s</th></tr></thead><tbody id="benchmarkRows"></tbody></table></div>
 <div class="meta" id="benchmarkLimitations" style="margin-top:14px"></div></section>
@@ -150,15 +150,11 @@ def build_dashboard(report_dir: str | Path, output_path: str | Path | None = Non
 
     metadata_path = report_dir / "metadata.json"
     metadata = (
-        json.loads(metadata_path.read_text(encoding="utf-8"))
-        if metadata_path.is_file()
-        else {}
+        json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
     )
     benchmarks_path = report_dir / "raw" / "benchmarks.json"
     if benchmarks_path.is_file():
-        metrics["benchmarks"] = json.loads(
-            benchmarks_path.read_text(encoding="utf-8")
-        )
+        metrics["benchmarks"] = json.loads(benchmarks_path.read_text(encoding="utf-8"))
     plots = _embedded_plots(report_dir / "plots")
     html = (
         _HTML.replace("__REPORT_JSON__", _safe_json(metrics))

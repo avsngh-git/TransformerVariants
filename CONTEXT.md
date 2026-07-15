@@ -139,7 +139,7 @@ Simulating a larger effective batch size by accumulating gradients over multiple
 
 - All variants in a comparison share: same tokenized data in same order, same token budget, same optimizer hyperparameters, same effective batch size, same precision (bf16).
 - Dense comparison recipes target active parameter counts within ±5%. Mechanisms that inherently reduce or expand active parameters are explicitly labeled non-conforming when outside tolerance; active and total counts are reported and the mismatch is not compensated post hoc.
-- Primary training and checkpoint-quality results are reported as mean ± sample standard deviation over 3+ random seeds. Clearly labeled representative-checkpoint serving and long-context diagnostics are capability measurements, not statistical main results.
+- Primary training and checkpoint-quality results are reported as mean ± sample standard deviation over 3+ independent random-seed records. An axis whose authentic per-seed history is unavailable must be labeled incomplete/non-statistical, not presented as a primary result. Clearly labeled representative-checkpoint serving and long-context diagnostics are capability measurements, not statistical main results.
 - Comparisons happen at main and stretch scale only. Debug scale is never part of formal comparisons.
 - All three comparison axes (fixed-data, fixed-compute/wall-clock, fixed-compute/FLOPs) are reported for every experiment.
 

@@ -4,7 +4,6 @@ import math
 import tempfile
 from pathlib import Path
 
-import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
@@ -15,7 +14,6 @@ from src.evaluation.metrics import MetricsResult
 from src.evaluation.probes import CKAResult, MQARResult, StableRankResult
 from src.evaluation.visualizations import COLORBLIND_PALETTE
 from src.models.config import ModelConfig
-
 
 # ---------------------------------------------------------------------------
 # Fixtures for efficiency plot tests (task 6.3)
@@ -205,9 +203,7 @@ class TestPlotRoofline:
         """Custom peak_tflops and bandwidth_gbs are accepted."""
         from src.evaluation.visualizations import plot_roofline
 
-        result = plot_roofline(
-            sample_variants, tmp_path, peak_tflops=100.0, bandwidth_gbs=200.0
-        )
+        result = plot_roofline(sample_variants, tmp_path, peak_tflops=100.0, bandwidth_gbs=200.0)
         assert result.exists()
 
     def test_creates_plots_directory(self, tmp_path: Path, sample_variants):
@@ -231,7 +227,7 @@ class TestGenerateSummaryMd:
     def _skip_if_not_implemented(self):
         """Skip these tests if generate_summary_md is not yet implemented."""
         try:
-            from src.evaluation.visualizations import generate_summary_md
+            from src.evaluation.visualizations import generate_summary_md  # noqa: F401
         except ImportError:
             pytest.skip("generate_summary_md not yet implemented (task 6.4)")
 
@@ -327,6 +323,18 @@ class TestGenerateSummaryMd:
         assert "## Fixed-FLOPs Comparison" in content
         assert "| Variant | Val Loss |" in content
         assert "| swa | 2.4500 |" in content
+
+    def test_missing_comparison_std_is_labeled_incomplete(self, tmp_path: Path) -> None:
+        from src.evaluation.visualizations import generate_summary_md
+
+        comparison = ComparisonResult(
+            fixed_wallclock={"vanilla": {1.0: (3.5, float("nan"))}},
+            fixed_flops={"vanilla": (3.4, float("nan"))},
+        )
+
+        content = generate_summary_md(comparison, tmp_path).read_text()
+
+        assert "Entries without an error range are incomplete historical diagnostics" in content
 
     def test_parameter_parity_pass(self, tmp_path: Path) -> None:
         """Parameter parity PASS is shown when valid."""
@@ -446,7 +454,7 @@ class TestFormatMetric:
     def _skip_if_not_implemented(self):
         """Skip these tests if _format_metric is not yet implemented."""
         try:
-            from src.evaluation.visualizations import _format_metric
+            from src.evaluation.visualizations import _format_metric  # noqa: F401
         except ImportError:
             pytest.skip("_format_metric not yet implemented (task 6.4)")
 
@@ -474,6 +482,7 @@ class TestFormatMetric:
         from src.evaluation.visualizations import _format_metric
 
         assert _format_metric(0.0001) == "0.0001"
+
 
 # ---------------------------------------------------------------------------
 # Task 6.5: Additional tests for complete coverage
@@ -515,12 +524,20 @@ class TestColorblindSafePalette:
 
         configs = [
             ModelConfig(
-                n_layer=2, d_model=64, n_head=2, seq_len=128,
-                variant="v0", attention_type="full",
+                n_layer=2,
+                d_model=64,
+                n_head=2,
+                seq_len=128,
+                variant="v0",
+                attention_type="full",
             ),
             ModelConfig(
-                n_layer=2, d_model=64, n_head=2, seq_len=128,
-                variant="v1", attention_type="full",
+                n_layer=2,
+                d_model=64,
+                n_head=2,
+                seq_len=128,
+                variant="v1",
+                attention_type="full",
             ),
         ]
         variants = []
@@ -556,12 +573,21 @@ class TestPlotLearningCurves:
         """Create sample VariantData with log entries for learning curve tests."""
         configs = [
             ModelConfig(
-                n_layer=2, d_model=64, n_head=2, seq_len=128,
-                variant="vanilla", attention_type="full",
+                n_layer=2,
+                d_model=64,
+                n_head=2,
+                seq_len=128,
+                variant="vanilla",
+                attention_type="full",
             ),
             ModelConfig(
-                n_layer=2, d_model=64, n_head=2, seq_len=128,
-                variant="swa", attention_type="sliding_window", window_size=64,
+                n_layer=2,
+                d_model=64,
+                n_head=2,
+                seq_len=128,
+                variant="swa",
+                attention_type="sliding_window",
+                window_size=64,
             ),
         ]
         variants = []
@@ -573,9 +599,24 @@ class TestPlotLearningCurves:
                     name=cfg.variant,
                     checkpoint_dir=Path(f"/tmp/fake_{cfg.variant}"),
                     log_entries=[
-                        {"step": 1, "tokens_seen": 1000, "elapsed_time": 1.0, "val_loss": 5.0 - i * 0.2},
-                        {"step": 50, "tokens_seen": 50000, "elapsed_time": 25.0, "val_loss": 4.0 - i * 0.1},
-                        {"step": 100, "tokens_seen": 100000, "elapsed_time": 50.0, "val_loss": 3.5 - i * 0.1},
+                        {
+                            "step": 1,
+                            "tokens_seen": 1000,
+                            "elapsed_time": 1.0,
+                            "val_loss": 5.0 - i * 0.2,
+                        },
+                        {
+                            "step": 50,
+                            "tokens_seen": 50000,
+                            "elapsed_time": 25.0,
+                            "val_loss": 4.0 - i * 0.1,
+                        },
+                        {
+                            "step": 100,
+                            "tokens_seen": 100000,
+                            "elapsed_time": 50.0,
+                            "val_loss": 3.5 - i * 0.1,
+                        },
                     ],
                     config=cfg,
                     flop_breakdown=compute_step_flops(cfg),
@@ -633,8 +674,12 @@ class TestPlotPerPositionLoss:
         from src.evaluation.visualizations import plot_per_position_loss
 
         cfg = ModelConfig(
-            n_layer=2, d_model=64, n_head=2, seq_len=32,
-            variant="vanilla", attention_type="full",
+            n_layer=2,
+            d_model=64,
+            n_head=2,
+            seq_len=32,
+            variant="vanilla",
+            attention_type="full",
         )
         # Create synthetic per-position loss with power-law shape
         positions = np.arange(1, 33)
@@ -667,8 +712,12 @@ class TestPlotPerPositionLoss:
         from src.evaluation.visualizations import plot_per_position_loss
 
         cfg = ModelConfig(
-            n_layer=2, d_model=64, n_head=2, seq_len=32,
-            variant="vanilla", attention_type="full",
+            n_layer=2,
+            d_model=64,
+            n_head=2,
+            seq_len=32,
+            variant="vanilla",
+            attention_type="full",
         )
 
         from src.evaluation.flops import compute_step_flops

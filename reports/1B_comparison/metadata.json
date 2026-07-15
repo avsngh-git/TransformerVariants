@@ -37,5 +37,16 @@
     "checkpoints/linear_main_1B_fixed_s137",
     "checkpoints/linear_main_1B_fixed_s2024",
     "checkpoints/linear_main_1B_fixed_s42"
+  ],
+  "warnings": [
+    "alibi: duplicate seed metrics.jsonl histories detected; historical wall-clock and pre-endpoint fixed-FLOP axes are incomplete/non-statistical. Final loss statistics use fresh checkpoint validation.",
+    "gqa: duplicate seed metrics.jsonl histories detected; historical wall-clock and pre-endpoint fixed-FLOP axes are incomplete/non-statistical. Final loss statistics use fresh checkpoint validation.",
+    "modern: duplicate seed metrics.jsonl histories detected; historical wall-clock and pre-endpoint fixed-FLOP axes are incomplete/non-statistical. Final loss statistics use fresh checkpoint validation.",
+    "moe_deep: duplicate seed metrics.jsonl histories detected; historical wall-clock and pre-endpoint fixed-FLOP axes are incomplete/non-statistical. Final loss statistics use fresh checkpoint validation.",
+    "moe_interleaved: duplicate seed metrics.jsonl histories detected; historical wall-clock and pre-endpoint fixed-FLOP axes are incomplete/non-statistical. Final loss statistics use fresh checkpoint validation.",
+    "moe: duplicate seed metrics.jsonl histories detected; historical wall-clock and pre-endpoint fixed-FLOP axes are incomplete/non-statistical. Final loss statistics use fresh checkpoint validation.",
+    "swa_interleaved: duplicate seed metrics.jsonl histories detected; historical wall-clock and pre-endpoint fixed-FLOP axes are incomplete/non-statistical. Final loss statistics use fresh checkpoint validation.",
+    "swa: duplicate seed metrics.jsonl histories detected; historical wall-clock and pre-endpoint fixed-FLOP axes are incomplete/non-statistical. Final loss statistics use fresh checkpoint validation.",
+    "vanilla: duplicate seed metrics.jsonl histories detected; historical wall-clock and pre-endpoint fixed-FLOP axes are incomplete/non-statistical. Final loss statistics use fresh checkpoint validation."
   ]
 }

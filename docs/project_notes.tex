@@ -2912,7 +2912,8 @@ unsupported rather than benchmarked through a semantically incorrect fallback.
 
 The final evaluator no longer treats a copied training log as an independent
 checkpoint result.  It detects byte-equivalent parsed \texttt{metrics.jsonl}
-histories within a recipe and emits an explicit warning.  Historical wall-clock
+histories within a recipe and persists an explicit warning in report metadata,
+which the HTML dashboard renders in its provenance section.  Historical wall-clock
 and pre-endpoint fixed-FLOP curves from such logs retain their mean for reference
 but expose no standard deviation.  Endpoint fixed-data, Pareto, and aggregate
 quality values instead use a fresh 50-batch held-out validation pass over each

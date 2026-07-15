@@ -833,7 +833,7 @@ class EvaluationPipeline:
 
         # metadata.json
         try:
-            metadata_path = self._write_metadata(output_dir, variants)
+            metadata_path = self._write_metadata(output_dir, variants, warnings)
             generated_files.append(metadata_path)
         except Exception as e:
             warnings.append(f"Failed to write metadata.json: {e}")
@@ -951,7 +951,12 @@ class EvaluationPipeline:
             logger.warning("Could not create validation loader: %s", e)
             return None
 
-    def _write_metadata(self, output_dir: Path, variants: list[VariantData]) -> Path:
+    def _write_metadata(
+        self,
+        output_dir: Path,
+        variants: list[VariantData],
+        warnings: list[str] | None = None,
+    ) -> Path:
         """Write metadata.json with run information."""
         if self._device.startswith("cuda") and torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)
@@ -968,6 +973,7 @@ class EvaluationPipeline:
             },
             "hardware": hardware,
             "evaluated_checkpoints": [str(v.checkpoint_dir) for v in variants],
+            "warnings": list(warnings or []),
         }
 
         metadata_path = output_dir / "metadata.json"
