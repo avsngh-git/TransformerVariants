@@ -13,7 +13,6 @@ Usage:
 
 import argparse
 import logging
-import sys
 
 from src.evaluation.pipeline import EvaluationPipeline
 

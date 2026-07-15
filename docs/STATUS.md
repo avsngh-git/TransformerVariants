@@ -251,14 +251,12 @@ Install: `pip install -e ".[data]"`
 
 ## What's Next
 
-- **Commit architecture refactors** — 4 candidates implemented, all tests pass
-- Train V2 (ALiBi), V3 (GQA), V4 (SWA), V4-interleaved, V5 (Linear) at main + stretch scale
-- Run evaluation pipeline on V0/V1 checkpoints to validate end-to-end
-- Phase 9: Visualization dashboard (Streamlit/Plotly or interactive HTML)
-- Phase 10: Large-scale data pipeline
-- Phase 11: Fault-tolerant training (fault injection tests)
-- Phase 12: Main controlled benchmarks (3+ seeds per variant)
-- Phase 13: Final report and packaging (includes live inference demo page for dashboard — type a prompt, see attention patterns)
+- Regenerate the final seed-aware report after any checkpoint or evaluator change.
+- Review explicit unsupported inference/cache statuses before making serving claims.
+- Treat long-context measurements as one-sample diagnostics until repeated across
+  validation windows and seeds.
+- Complete Phase 13 packaging: freeze the report schema, archive commands and
+  environment metadata, and prepare publication/demo assets.
 
 ---
 

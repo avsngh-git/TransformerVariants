@@ -49,14 +49,18 @@ class ComparisonResult:
         fixed_data: Variant name → val_loss at token budget.
         fixed_wallclock: Variant name → {time_fraction → val_loss}.
         fixed_flops: Variant name → val_loss at FLOP budget.
+        total_parameter_counts: Variant name → all stored trainable parameters.
         pareto_front: List of Pareto-optimal variant names.
-        parameter_counts: Variant name → total trainable param count.
+        parameter_counts: Variant name → active trainable parameters per token.
         parameter_parity_valid: True if all variants within ±5% of mean.
     """
 
-    fixed_data: dict[str, float] = field(default_factory=dict)
-    fixed_wallclock: dict[str, dict] = field(default_factory=dict)
-    fixed_flops: dict[str, float] = field(default_factory=dict)
+    fixed_data: dict[str, float | tuple[float, float]] = field(default_factory=dict)
+    fixed_wallclock: dict[str, dict[float, float | tuple[float, float]]] = field(
+        default_factory=dict
+    )
+    fixed_flops: dict[str, float | tuple[float, float]] = field(default_factory=dict)
+    total_parameter_counts: dict[str, int] = field(default_factory=dict)
     pareto_front: list[str] = field(default_factory=list)
     parameter_counts: dict[str, int] = field(default_factory=dict)
     parameter_parity_valid: bool = False
@@ -76,9 +80,7 @@ def _infer_variant_name(directory: Path) -> str:
     dir_name = directory.name
 
     # Known variant names from the registry
-    known_variants = [
-        "vanilla", "modern", "alibi", "gqa", "swa", "swa_interleaved", "linear"
-    ]
+    known_variants = ["vanilla", "modern", "alibi", "gqa", "swa", "swa_interleaved", "linear"]
 
     # Try matching known variant names at the start of the directory name
     for variant in sorted(known_variants, key=len, reverse=True):
@@ -122,9 +124,7 @@ def _load_config_from_dir(checkpoint_dir: Path) -> ModelConfig | None:
                     run_config = json.load(f)
                 return _run_config_to_model_config(run_config)
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-                logger.warning(
-                    f"Failed to parse run_config.json in {config_dir}: {e}"
-                )
+                logger.warning(f"Failed to parse run_config.json in {config_dir}: {e}")
 
         # Try config.json (direct serialization)
         config_path = config_dir / "config.json"
@@ -134,9 +134,7 @@ def _load_config_from_dir(checkpoint_dir: Path) -> ModelConfig | None:
                     config_dict = json.load(f)
                 return _dict_to_model_config(config_dict)
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-                logger.warning(
-                    f"Failed to parse config.json in {config_dir}: {e}"
-                )
+                logger.warning(f"Failed to parse config.json in {config_dir}: {e}")
 
     return None
 
@@ -175,9 +173,7 @@ def _run_config_to_model_config(run_config: dict) -> ModelConfig:
     return ModelConfig(**merged)
 
 
-def _config_from_variant_name(
-    variant_name: str, scale: str | None = None
-) -> ModelConfig | None:
+def _config_from_variant_name(variant_name: str, scale: str | None = None) -> ModelConfig | None:
     """Attempt to create a default ModelConfig from a known variant name.
 
     Uses the registry's known defaults. Returns None if the variant is unknown.
@@ -237,24 +233,18 @@ def load_variant_data(checkpoint_dirs: list[Path]) -> list[VariantData]:
         checkpoint_dir = Path(checkpoint_dir)
 
         if not checkpoint_dir.exists():
-            logger.warning(
-                f"Checkpoint directory does not exist, skipping: {checkpoint_dir}"
-            )
+            logger.warning(f"Checkpoint directory does not exist, skipping: {checkpoint_dir}")
             continue
 
         if not checkpoint_dir.is_dir():
-            logger.warning(
-                f"Path is not a directory, skipping: {checkpoint_dir}"
-            )
+            logger.warning(f"Path is not a directory, skipping: {checkpoint_dir}")
             continue
 
         # Load metrics.jsonl
         try:
             log_entries = load_metrics_log(checkpoint_dir)
         except FileNotFoundError:
-            logger.warning(
-                f"metrics.jsonl not found in {checkpoint_dir}, skipping variant"
-            )
+            logger.warning(f"metrics.jsonl not found in {checkpoint_dir}, skipping variant")
             continue
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(
@@ -290,9 +280,7 @@ def load_variant_data(checkpoint_dirs: list[Path]) -> list[VariantData]:
         try:
             flop_breakdown = compute_step_flops(config)
         except Exception as e:
-            logger.warning(
-                f"Failed to compute FLOPs for {variant_name} in {checkpoint_dir}: {e}"
-            )
+            logger.warning(f"Failed to compute FLOPs for {variant_name} in {checkpoint_dir}: {e}")
             flop_breakdown = None
 
         variant_data = VariantData(
@@ -363,7 +351,6 @@ def aggregate_across_seeds(
     return aggregated
 
 
-
 def _get_x_metric_value(variant: VariantData, x_metric: str) -> float | None:
     """Extract the x-axis metric value for a variant.
 
@@ -404,8 +391,7 @@ def _get_x_metric_value(variant: VariantData, x_metric: str) -> float | None:
 
     else:
         raise ValueError(
-            f"Unsupported x_metric: {x_metric!r}. "
-            f"Supported: 'flops', 'wallclock', 'peak_memory'"
+            f"Unsupported x_metric: {x_metric!r}. Supported: 'flops', 'wallclock', 'peak_memory'"
         )
 
 
@@ -432,9 +418,7 @@ def _get_y_metric_value(variant: VariantData, y_metric: str) -> float | None:
                 return float(val_loss)
         return None
     else:
-        raise ValueError(
-            f"Unsupported y_metric: {y_metric!r}. Supported: 'val_loss'"
-        )
+        raise ValueError(f"Unsupported y_metric: {y_metric!r}. Supported: 'val_loss'")
 
 
 def compute_pareto_front(
@@ -522,7 +506,65 @@ def compute_pareto_front(
     return pareto_names
 
 
-def _estimate_parameter_count(config: ModelConfig) -> int:
+def _swiglu_hidden_dim(config: ModelConfig) -> int:
+    """Return the exact hidden width used by ``SwiGLUFeedForward``."""
+    hidden_dim = int(8 * config.d_model / 3)
+    return ((hidden_dim + 63) // 64) * 64
+
+
+def _ffn_parameter_count(config: ModelConfig) -> int:
+    """Count one dense FFN/expert, including linear biases."""
+    if config.ffn_type == "swiglu":
+        hidden_dim = _swiglu_hidden_dim(config)
+        weights = 3 * config.d_model * hidden_dim
+        biases = 2 * hidden_dim + config.d_model if config.bias else 0
+    else:
+        weights = 2 * config.d_model * config.d_ff
+        biases = config.d_ff + config.d_model if config.bias else 0
+    return weights + biases
+
+
+def _moe_layer_count(config: ModelConfig, variant_name: str | None = None) -> int:
+    """Return how many blocks contain MoE FFNs for a registered recipe."""
+    variant = variant_name or config.variant
+    if config.num_experts is None:
+        return 0
+    if variant == "moe_interleaved":
+        return config.n_layer // 2
+    if variant == "moe_deep":
+        return config.n_layer - config.n_layer // 2
+    return config.n_layer if variant == "moe" else 0
+
+
+def _base_parameter_count(config: ModelConfig) -> int:
+    """Count embeddings, attention, normalization, and optional biases."""
+    d_model = config.d_model
+    params = config.vocab_size * d_model
+    if config.position_encoding == "learned":
+        params += config.seq_len * d_model
+
+    for _ in range(config.n_layer):
+        if config.n_kv_head is not None and config.n_kv_head < config.n_head:
+            kv_dim = config.n_kv_head * config.d_head
+            params += d_model * d_model + 2 * d_model * kv_dim
+            if config.bias:
+                params += d_model + 2 * kv_dim
+        else:
+            params += 3 * d_model * d_model
+            if config.bias:
+                params += 3 * d_model
+        params += d_model * d_model
+        if config.bias:
+            params += d_model
+        params += 4 * d_model if config.bias else 2 * d_model
+
+    params += 2 * d_model if config.bias else d_model
+    if not config.tie_embeddings:
+        params += config.vocab_size * d_model
+    return params
+
+
+def _estimate_parameter_count(config: ModelConfig, variant_name: str | None = None) -> int:
     """Estimate total trainable parameter count from model config.
 
     Accounts for:
@@ -542,75 +584,27 @@ def _estimate_parameter_count(config: ModelConfig) -> int:
     Returns:
         Estimated total trainable parameter count.
     """
-    d_model = config.d_model
-    n_layer = config.n_layer
-    vocab_size = config.vocab_size
-    d_ff = config.d_ff
+    moe_layers = _moe_layer_count(config, variant_name)
+    dense_layers = config.n_layer - moe_layers
+    expert_params = _ffn_parameter_count(config)
+    params = _base_parameter_count(config) + dense_layers * expert_params
+    if moe_layers:
+        assert config.num_experts is not None
+        router_params = config.d_model * config.num_experts
+        params += moe_layers * (config.num_experts * expert_params + router_params)
+    return params
 
-    # Token embeddings
-    params = vocab_size * d_model
 
-    # Position embeddings (only for learned position encoding)
-    if config.position_encoding == "learned":
-        params += config.seq_len * d_model
-
-    # Per-layer parameters
-    for _ in range(n_layer):
-        # QKV projections
-        if config.n_kv_head is not None and config.n_kv_head < config.n_head:
-            # Grouped Query Attention: Q uses n_head, K/V use n_kv_head
-            q_params = d_model * d_model  # Q projection
-            kv_dim = config.n_kv_head * config.d_head
-            kv_params = 2 * d_model * kv_dim  # K and V projections
-            params += q_params + kv_params
-        else:
-            # Standard MHA: all 3 projections are d_model × d_model
-            params += 3 * d_model * d_model
-
-        # Output projection
-        params += d_model * d_model
-
-        # FFN
-        if config.ffn_type == "swiglu":
-            # gate + up + down: 3 × d_model × d_ff
-            params += 3 * d_model * d_ff
-        else:
-            # up + down: 2 × d_model × d_ff
-            params += 2 * d_model * d_ff
-
-        # Layer norms (2 per layer: pre-attention and pre-FFN)
-        if config.bias:
-            params += 2 * 2 * d_model  # weight + bias for 2 norms
-        else:
-            params += 2 * d_model  # weight only for 2 norms
-
-    # Final layer norm
-    if config.bias:
-        params += 2 * d_model
-    else:
-        params += d_model
-
-    # Output head (unembedding)
-    if not config.tie_embeddings:
-        params += vocab_size * d_model
-
-    # Bias terms for linear layers (if applicable)
-    if config.bias:
-        for _ in range(n_layer):
-            # QKV bias
-            if config.n_kv_head is not None and config.n_kv_head < config.n_head:
-                kv_dim = config.n_kv_head * config.d_head
-                params += d_model + 2 * kv_dim  # Q bias + K/V bias
-            else:
-                params += 3 * d_model
-            # Output projection bias
-            params += d_model
-            # FFN biases
-            if config.ffn_type == "swiglu":
-                params += 2 * d_ff + d_model  # gate_bias + up_bias + down_bias
-            else:
-                params += d_ff + d_model  # up_bias + down_bias
-
+def _estimate_active_parameter_count(config: ModelConfig, variant_name: str | None = None) -> int:
+    """Estimate parameters active per token, counting only routed experts."""
+    moe_layers = _moe_layer_count(config, variant_name)
+    dense_layers = config.n_layer - moe_layers
+    expert_params = _ffn_parameter_count(config)
+    params = _base_parameter_count(config) + dense_layers * expert_params
+    if moe_layers:
+        assert config.num_experts is not None
+        router_params = config.d_model * config.num_experts
+        params += moe_layers * (config.moe_top_k * expert_params + router_params)
     return params
 
 
@@ -620,7 +614,7 @@ def validate_parameter_parity(
 ) -> tuple[bool, dict[str, int]]:
     """Check that all variants have parameter counts within ±tolerance of mean.
 
-    Computes the total trainable parameter count for each variant using the
+    Computes the active-per-token parameter count for each variant using the
     model config, then checks whether all counts fall within ±tolerance
     (default 5%) of the mean count.
 
@@ -641,7 +635,7 @@ def validate_parameter_parity(
     # Compute parameter counts for each variant
     param_counts: dict[str, int] = {}
     for v in variants:
-        count = _estimate_parameter_count(v.config)
+        count = _estimate_active_parameter_count(v.config, v.name)
         param_counts[v.name] = count
 
     # Single variant is always valid
@@ -657,9 +651,7 @@ def validate_parameter_parity(
         return (True, param_counts)
 
     # Check each variant is within ±tolerance of mean
-    valid = all(
-        abs(count - mean_count) / mean_count <= tolerance for count in counts
-    )
+    valid = all(abs(count - mean_count) / mean_count <= tolerance for count in counts)
 
     return (valid, param_counts)
 
@@ -689,10 +681,7 @@ def _interpolate_val_loss(
         Interpolated val_loss, or None if interpolation is not possible.
     """
     # Filter to entries that have both the budget key and a non-None val_loss
-    valid = [
-        e for e in entries
-        if e.get(budget_key) is not None and e.get("val_loss") is not None
-    ]
+    valid = [e for e in entries if e.get(budget_key) is not None and e.get("val_loss") is not None]
 
     if not valid:
         return None
@@ -761,8 +750,7 @@ def slice_fixed_data(
         max_tokens_per_variant: list[int] = []
         for v in variants:
             tokens_values = [
-                e["tokens_seen"] for e in v.log_entries
-                if e.get("tokens_seen") is not None
+                e["tokens_seen"] for e in v.log_entries if e.get("tokens_seen") is not None
             ]
             if tokens_values:
                 max_tokens_per_variant.append(max(tokens_values))
@@ -789,6 +777,7 @@ def slice_fixed_data(
 def slice_fixed_wallclock(
     variants: list[VariantData],
     time_fractions: list[float] | None = None,
+    time_budget: float | None = None,
 ) -> dict[str, dict[float, float]]:
     """Compare val_loss at same wall-clock budgets across variants.
 
@@ -817,8 +806,7 @@ def slice_fixed_wallclock(
     max_times: list[float] = []
     for v in variants:
         time_values = [
-            e["elapsed_time"] for e in v.log_entries
-            if e.get("elapsed_time") is not None
+            e["elapsed_time"] for e in v.log_entries if e.get("elapsed_time") is not None
         ]
         if time_values:
             max_times.append(max(time_values))
@@ -826,16 +814,14 @@ def slice_fixed_wallclock(
     if not max_times:
         return {}
 
-    dynamic_budget = min(max_times)
+    dynamic_budget = min(max_times) if time_budget is None else time_budget
 
     results: dict[str, dict[float, float]] = {}
     for v in variants:
         fraction_results: dict[float, float] = {}
         for frac in time_fractions:
             target_time = dynamic_budget * frac
-            val_loss = _interpolate_val_loss(
-                v.log_entries, target_time, "elapsed_time"
-            )
+            val_loss = _interpolate_val_loss(v.log_entries, target_time, "elapsed_time")
             if val_loss is not None:
                 fraction_results[frac] = val_loss
             else:
@@ -850,6 +836,166 @@ def slice_fixed_wallclock(
             results[v.name] = fraction_results
 
     return results
+
+
+def aggregate_comparison_axes(
+    seed_groups: dict[str, list[VariantData]],
+    time_fractions: list[float] | None = None,
+) -> tuple[
+    dict[str, tuple[float, float]],
+    dict[str, dict[float, tuple[float, float]]],
+    dict[str, tuple[float, float]],
+]:
+    """Slice every run at shared budgets, then aggregate each variant's seeds.
+
+    The shared budgets are computed across all runs, not from one arbitrary
+    representative seed. This keeps the comparison invariant while exposing
+    sample variability at the report boundary.
+    """
+    all_variants = [variant for seeds in seed_groups.values() for variant in seeds]
+    if not all_variants:
+        return {}, {}, {}
+
+    fractions = time_fractions or [0.25, 0.50, 0.75, 1.00]
+    max_tokens = [
+        max(
+            entry["tokens_seen"]
+            for entry in variant.log_entries
+            if entry.get("tokens_seen") is not None
+        )
+        for variant in all_variants
+        if any(entry.get("tokens_seen") is not None for entry in variant.log_entries)
+    ]
+    max_times = [
+        max(
+            entry["elapsed_time"]
+            for entry in variant.log_entries
+            if entry.get("elapsed_time") is not None
+        )
+        for variant in all_variants
+        if any(entry.get("elapsed_time") is not None for entry in variant.log_entries)
+    ]
+    max_flops: list[int] = []
+    for variant in all_variants:
+        steps = [entry["step"] for entry in variant.log_entries if entry.get("step") is not None]
+        if not steps:
+            continue
+        step_flops = (
+            variant.flop_breakdown.total
+            if variant.flop_breakdown is not None
+            else compute_step_flops(variant.config).total
+        )
+        max_flops.append(max(steps) * step_flops)
+
+    token_budget = min(max_tokens) if max_tokens else None
+    time_budget = min(max_times) if max_times else None
+    flop_budget = min(max_flops) if max_flops else None
+
+    fixed_data: dict[str, tuple[float, float]] = {}
+    fixed_wallclock: dict[str, dict[float, tuple[float, float]]] = {}
+    fixed_flops: dict[str, tuple[float, float]] = {}
+
+    for variant_name, seeds in seed_groups.items():
+        if token_budget is not None:
+            values: list[float] = []
+            for seed in seeds:
+                value = slice_fixed_data([seed], token_budget).get(variant_name)
+                if value is not None:
+                    values.append(value)
+            if values:
+                fixed_data[variant_name] = aggregate_across_seeds(
+                    [{"value": value} for value in values]
+                )["value"]
+
+        if time_budget is not None:
+            fraction_values: dict[float, list[float]] = {fraction: [] for fraction in fractions}
+            for seed in seeds:
+                sliced = slice_fixed_wallclock([seed], fractions, time_budget).get(variant_name, {})
+                for fraction, value in sliced.items():
+                    fraction_values[fraction].append(value)
+            estimates = {
+                fraction: aggregate_across_seeds([{"value": value} for value in values])["value"]
+                for fraction, values in fraction_values.items()
+                if values
+            }
+            if estimates:
+                fixed_wallclock[variant_name] = estimates
+
+        if flop_budget is not None:
+            values = []
+            for seed in seeds:
+                value = slice_fixed_flops([seed], flop_budget).get(variant_name)
+                if value is not None:
+                    values.append(value)
+            if values:
+                fixed_flops[variant_name] = aggregate_across_seeds(
+                    [{"value": value} for value in values]
+                )["value"]
+
+    return fixed_data, fixed_wallclock, fixed_flops
+
+
+def aggregate_pareto_variants(
+    seed_groups: dict[str, list[VariantData]],
+) -> list[VariantData]:
+    """Create one Pareto point per variant using means across seed runs."""
+    aggregated: list[VariantData] = []
+    for variant_name, seeds in seed_groups.items():
+        if not seeds:
+            continue
+        representative = seeds[0]
+        losses: list[float] = []
+        elapsed_times: list[float] = []
+        peak_memories: list[float] = []
+        for seed in seeds:
+            if seed.metrics is not None:
+                losses.append(seed.metrics.val_loss)
+            else:
+                for entry in reversed(seed.log_entries):
+                    if entry.get("val_loss") is not None:
+                        losses.append(float(entry["val_loss"]))
+                        break
+            times = [
+                float(entry["elapsed_time"])
+                for entry in seed.log_entries
+                if entry.get("elapsed_time") is not None
+            ]
+            memories = [
+                float(entry["peak_memory_mb"])
+                for entry in seed.log_entries
+                if entry.get("peak_memory_mb") is not None
+            ]
+            if times:
+                elapsed_times.append(max(times))
+            if memories:
+                peak_memories.append(max(memories))
+
+        log_entry: dict[str, float] = {}
+        if elapsed_times:
+            log_entry["elapsed_time"] = float(np.mean(elapsed_times))
+        if peak_memories:
+            log_entry["peak_memory_mb"] = float(np.mean(peak_memories))
+        metrics = None
+        if losses:
+            mean_loss = float(np.mean(losses))
+            metrics = MetricsResult(
+                val_loss=mean_loss,
+                perplexity=float(np.exp(mean_loss)),
+                per_position_loss=None,
+                icl_exponent=None,
+                icl_fit_params=None,
+            )
+        aggregated.append(
+            VariantData(
+                name=variant_name,
+                checkpoint_dir=representative.checkpoint_dir,
+                log_entries=[log_entry] if log_entry else [],
+                config=representative.config,
+                metrics=metrics,
+                flop_breakdown=representative.flop_breakdown,
+            )
+        )
+    return aggregated
 
 
 def slice_fixed_flops(
@@ -901,9 +1047,7 @@ def slice_fixed_flops(
 
         # Track max cumulative flops for this variant
         if annotated:
-            max_flops_per_variant.append(
-                max(ae["cumulative_flops"] for ae in annotated)
-            )
+            max_flops_per_variant.append(max(ae["cumulative_flops"] for ae in annotated))
 
     if not max_flops_per_variant:
         return {}

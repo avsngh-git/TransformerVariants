@@ -19,7 +19,6 @@ import numpy as np
 
 from src.evaluation.comparison import ComparisonResult, VariantData, compute_pareto_front
 from src.evaluation.flops import FLOPBreakdown, compute_arithmetic_intensity, compute_step_flops
-from src.evaluation.metrics import MetricsResult
 from src.evaluation.probes import CKAResult, MQARResult, StableRankResult
 
 logger = logging.getLogger(__name__)
@@ -506,24 +505,24 @@ def plot_flop_breakdown(
     y_pos = np.arange(n_variants)
 
     # Stacked horizontal bars
-    bars_qkv = ax.barh(
+    ax.barh(
         y_pos, qkv_t, color=COMPONENT_COLORS["qkv_proj"], label="QKV Projections"
     )
-    bars_attn = ax.barh(
+    ax.barh(
         y_pos,
         attn_score_t,
         left=qkv_t,
         color=COMPONENT_COLORS["attention_score"],
         label="Attention Score",
     )
-    bars_out = ax.barh(
+    ax.barh(
         y_pos,
         attn_output_t,
         left=qkv_t + attn_score_t,
         color=COMPONENT_COLORS["attention_output"],
         label="Attention Output",
     )
-    bars_ffn = ax.barh(
+    ax.barh(
         y_pos,
         ffn_t,
         left=qkv_t + attn_score_t + attn_output_t,
@@ -622,7 +621,6 @@ def plot_pareto(
         # Plot dominated points
         dom_x = [x for x, p in zip(x_vals, is_pareto) if not p]
         dom_y = [y for y, p in zip(y_vals, is_pareto) if not p]
-        dom_names = [n for n, p in zip(names, is_pareto) if not p]
         if dom_x:
             ax.scatter(
                 dom_x,
@@ -638,7 +636,6 @@ def plot_pareto(
         # Plot Pareto-optimal points
         par_x = [x for x, p in zip(x_vals, is_pareto) if p]
         par_y = [y for y, p in zip(y_vals, is_pareto) if p]
-        par_names = [n for n, p in zip(names, is_pareto) if p]
         if par_x:
             ax.scatter(
                 par_x,
@@ -1053,16 +1050,22 @@ def generate_summary_md(comparison: ComparisonResult, output_dir: Path) -> Path:
     lines.append("## Parameter Parity")
     lines.append("")
     if comparison.parameter_parity_valid:
-        lines.append("✅ **PASS** — All variants are within ±5% of mean parameter count.")
+        lines.append("✅ **PASS** — Active parameters are within ±5% of their mean.")
     else:
-        lines.append("❌ **FAIL** — Parameter counts exceed ±5% tolerance.")
+        lines.append("❌ **FAIL** — Active parameters exceed the ±5% tolerance.")
     lines.append("")
 
     if comparison.parameter_counts:
-        lines.append("| Variant | Parameters |")
-        lines.append("|---------|------------|")
+        lines.append(
+            "Parity is assessed on active parameters per token; total parameters include "
+            "all stored MoE experts."
+        )
+        lines.append("")
+        lines.append("| Variant | Active parameters | Total parameters |")
+        lines.append("|---------|------------------:|-----------------:|")
         for variant, count in sorted(comparison.parameter_counts.items()):
-            lines.append(f"| {variant} | {count:,} |")
+            total = comparison.total_parameter_counts.get(variant, count)
+            lines.append(f"| {variant} | {count:,} | {total:,} |")
     lines.append("")
 
     # --- Pareto Front ---

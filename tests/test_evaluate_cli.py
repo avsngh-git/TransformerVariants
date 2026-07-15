@@ -7,16 +7,13 @@ and raw data (CSV/JSON) output.
 import csv
 import json
 import math
-from pathlib import Path
 
-import numpy as np
 import pytest
 
 from src.evaluation.comparison import ComparisonResult, VariantData
 from src.evaluation.flops import FLOPBreakdown
 from src.evaluation.pipeline import EvaluationPipeline
 from src.models.config import ModelConfig
-
 
 # ---------------------------------------------------------------------------
 # Helpers — thin wrappers exposing pipeline internals for testing
@@ -79,10 +76,38 @@ def sample_flop_breakdown():
 def sample_log_entries():
     """Synthetic metrics.jsonl entries for testing."""
     return [
-        {"step": 1, "train_loss": 8.0, "val_loss": 7.5, "tokens_seen": 1024, "elapsed_time": 1.0, "peak_memory_mb": 512.0},
-        {"step": 10, "train_loss": 6.0, "val_loss": 5.5, "tokens_seen": 10240, "elapsed_time": 10.0, "peak_memory_mb": 520.0},
-        {"step": 50, "train_loss": 4.0, "val_loss": 3.8, "tokens_seen": 51200, "elapsed_time": 50.0, "peak_memory_mb": 530.0},
-        {"step": 100, "train_loss": 3.5, "val_loss": 3.2, "tokens_seen": 102400, "elapsed_time": 100.0, "peak_memory_mb": 540.0},
+        {
+            "step": 1,
+            "train_loss": 8.0,
+            "val_loss": 7.5,
+            "tokens_seen": 1024,
+            "elapsed_time": 1.0,
+            "peak_memory_mb": 512.0,
+        },
+        {
+            "step": 10,
+            "train_loss": 6.0,
+            "val_loss": 5.5,
+            "tokens_seen": 10240,
+            "elapsed_time": 10.0,
+            "peak_memory_mb": 520.0,
+        },
+        {
+            "step": 50,
+            "train_loss": 4.0,
+            "val_loss": 3.8,
+            "tokens_seen": 51200,
+            "elapsed_time": 50.0,
+            "peak_memory_mb": 530.0,
+        },
+        {
+            "step": 100,
+            "train_loss": 3.5,
+            "val_loss": 3.2,
+            "tokens_seen": 102400,
+            "elapsed_time": 100.0,
+            "peak_memory_mb": 540.0,
+        },
     ]
 
 
@@ -401,7 +426,8 @@ class TestWriteRawData:
         assert data["aggregated"]["vanilla"]["val_loss"]["std"] == pytest.approx(0.1)
 
         # Check comparison section
-        assert data["comparison"]["fixed_data"] == {"vanilla": 3.2}
+        assert data["schema_version"] == 2
+        assert data["comparison"]["fixed_data"] == {"vanilla": {"mean": 3.2, "std": None, "n": 3}}
         assert data["comparison"]["pareto_front"] == ["vanilla"]
 
     def test_json_nan_std_is_null(self, make_variant, tmp_path):

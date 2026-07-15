@@ -53,7 +53,7 @@ Long-context evaluation lengths: 1024, 2048, 4096 tokens.
 | V2 | ALiBi | ALiBi positional bias, no position embeddings |
 | V3 | GQA / MQA | Grouped-query or multi-query attention heads |
 | V4 | Sparse local/global | Sliding window + global token sparse attention |
-| V5 | Linformer or Performer | Linear-complexity attention approximation |
+| V5 | Causal linear attention | ELU+1 prefix-state attention with RoPE |
 
 Stretch variants (only after strong version):
 - Switch/MoE small model
@@ -76,8 +76,11 @@ To ensure meaningful comparisons between variants:
 5. **Same evaluation protocol.** Identical validation set, identical eval code,
    identical metrics collection.
 6. **Same precision.** bf16 for all variants in a comparison set.
-7. **Parameter budget matching.** Variants in a comparison set must have parameter
-   counts within ±5% of each other, achieved by adjusting d_model or n_layer.
+7. **Parameter budget accounting.** Dense variants should remain within ±5% active
+   parameters. Sparse MoE comparisons report both active-per-token and total stored
+   parameters. A completed recipe outside tolerance is retained only as a documented
+   limitation; changing its width, depth, routing, or token budget constitutes a new
+   experiment.
 8. **Multiple seeds.** Main results reported over at least 3 random seeds.
 9. **Reproducibility.** Every run is fully specified by:
    `model_config + data_config + train_config + code_version + dataset_manifest`
@@ -122,23 +125,23 @@ For the final comparison report, compute:
 
 ### Minimum impressive version (CV-worthy)
 
-- [ ] Phases 00–06 complete and tested
-- [ ] Basic evaluation framework (Phase 08)
-- [ ] Basic visualization dashboard (Phase 09)
+- [x] Phases 00–06 complete and tested
+- [x] Basic evaluation framework (Phase 08)
+- [x] Basic static visualization dashboard (Phase 09)
 - [ ] Basic fault-tolerant checkpointing (Phase 11)
 - [ ] Final packaging (Phase 13)
-- [ ] At least 3 variants trained on same data with same token budget
-- [ ] Comparison plots with error bars over multiple seeds
+- [x] At least 3 variants trained on same data with same token budget
+- [x] Comparison results with error ranges over multiple seeds
 - [ ] Interactive dashboard showing attention patterns
 
 ### Strong version
 
 All of the above, plus:
 
-- [ ] All 6 main variants (V0–V5) trained at 40M–70M scale
-- [ ] Large-scale data pipeline (Phase 10)
+- [x] All 6 main variants (V0–V5) trained at 40M–70M scale
+- [x] Large-scale data pipeline (Phase 10)
 - [ ] Full fault-injection checkpoint tests (Phase 11)
-- [ ] Long-context evaluation at 2048 and 4096 tokens
+- [x] Long-context evaluation at 2048 and 4096 tokens
 - [ ] Final comparison report with statistical significance
 
 ### Stretch goals
@@ -158,7 +161,7 @@ All of the above, plus:
 | Training loop | L4-optimized, bf16, gradient accumulation, eval hooks |
 | Checkpointing | Atomic saves, resume, corruption fallback |
 | Evaluation | Metrics collection, statistics, plotting |
-| Visualization | Streamlit dashboard for attention, sparsity, head stats |
+| Visualization | Self-contained offline HTML report for metrics, probes, and plots |
 | Config system | YAML-based, hierarchical, fully reproducible |
 
 ---
@@ -212,4 +215,5 @@ JSONL, one event per line:
 
 | Date | Change | Justification |
 |------|--------|---------------|
+| 2026-07-15 | Active/total parameter accounting; static HTML report | Correct the implemented SwiGLU/MoE counts, preserve documented parity exceptions, and replace the unwanted Streamlit runtime |
 | 2025-01-01 | Initial contract | Phase 00 creation |

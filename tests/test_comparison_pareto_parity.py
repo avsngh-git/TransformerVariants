@@ -1,18 +1,15 @@
 """Tests for compute_pareto_front and validate_parameter_parity in comparison module."""
 
-import pytest
 from pathlib import Path
 
 from src.evaluation.comparison import (
     VariantData,
+    _estimate_active_parameter_count,
+    _estimate_parameter_count,
     compute_pareto_front,
     validate_parameter_parity,
-    _estimate_parameter_count,
-    _get_x_metric_value,
-    _get_y_metric_value,
 )
 from src.models.config import ModelConfig
-
 
 # --- Helpers ---
 
@@ -97,8 +94,10 @@ class TestComputeParetoFront:
         """Test with 3 variants where one is dominated."""
         v0 = _make_variant("V0", val_loss=2.0, flop_total=500)   # Pareto
         v1 = _make_variant("V1", val_loss=1.5, flop_total=1000)  # Pareto
-        v2 = _make_variant("V2", val_loss=2.5, flop_total=800)   # Dominated by V0 (V0 better on both)
-        result = compute_pareto_front([v0, v1, v2], x_metric="flops", y_metric="val_loss")
+        v2 = _make_variant("V2", val_loss=2.5, flop_total=800)  # Dominated by V0
+        result = compute_pareto_front(
+            [v0, v1, v2], x_metric="flops", y_metric="val_loss"
+        )
         assert "V0" in result
         assert "V1" in result
         assert "V2" not in result
@@ -235,10 +234,30 @@ class TestValidateParameterParity:
         assert count > 3_000_000  # At least 3M (dominated by vocab embedding)
         assert count < 5_000_000  # But not excessively large
 
-    def test_swiglu_has_more_params_than_standard(self):
-        """SwiGLU FFN has more parameters than standard FFN."""
+    def test_swiglu_is_parameter_matched_to_standard(self):
+        """Rounded 8/3-width SwiGLU stays close to a standard 4x FFN."""
         config_std = ModelConfig(n_layer=4, d_model=256, ffn_type="standard")
         config_swiglu = ModelConfig(n_layer=4, d_model=256, ffn_type="swiglu")
         count_std = _estimate_parameter_count(config_std)
         count_swiglu = _estimate_parameter_count(config_swiglu)
-        assert count_swiglu > count_std
+        assert abs(count_swiglu - count_std) / count_std < 0.01
+
+    def test_swiglu_and_moe_counts_match_saved_main_run_metadata(self):
+        """Estimator reflects the actual rounded SwiGLU and MoE modules."""
+        dense = ModelConfig(
+            n_layer=8,
+            d_model=512,
+            n_head=8,
+            vocab_size=50257,
+            seq_len=1024,
+            variant="modern",
+            norm_type="rmsnorm",
+            position_encoding="rope",
+            ffn_type="swiglu",
+            activation="swiglu",
+        )
+        moe = ModelConfig(**{**vars(dense), "variant": "moe", "num_experts": 8})
+
+        assert _estimate_parameter_count(dense) == 51_430_400
+        assert _estimate_parameter_count(moe, "moe") == 172_573_696
+        assert _estimate_active_parameter_count(moe, "moe") == 68_764_672

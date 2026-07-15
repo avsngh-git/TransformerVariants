@@ -29,12 +29,12 @@ import torch
 from src.evaluation.comparison import (
     ComparisonResult,
     VariantData,
+    _estimate_parameter_count,
     aggregate_across_seeds,
+    aggregate_comparison_axes,
+    aggregate_pareto_variants,
     compute_pareto_front,
     load_variant_data,
-    slice_fixed_data,
-    slice_fixed_flops,
-    slice_fixed_wallclock,
     validate_parameter_parity,
 )
 from src.evaluation.flops import compute_step_flops
@@ -67,6 +67,7 @@ from src.evaluation.visualizations import (
     plot_roofline,
     plot_stable_rank,
 )
+from src.viz.html_dashboard import build_dashboard
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,17 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class SeedProbeResult:
+    """Probe outputs for one checkpoint, retained for provenance."""
+
+    checkpoint_dir: str
+    mqar: MQARResult
+    stable_rank: StableRankResult
+    cka: CKAResult
+    attention_entropy: AttentionEntropyResult | None
+
+
+@dataclass
 class ProbeResults:
     """Collected probe results for all evaluated variants."""
 
@@ -84,6 +96,126 @@ class ProbeResults:
     stable_rank: dict[str, StableRankResult] = field(default_factory=dict)
     cka: dict[str, CKAResult] = field(default_factory=dict)
     attention_entropy: dict[str, AttentionEntropyResult] = field(default_factory=dict)
+    per_seed: dict[str, list[SeedProbeResult]] = field(default_factory=dict)
+
+    def record(
+        self,
+        *,
+        variant: str,
+        checkpoint_dir: str,
+        mqar: MQARResult,
+        stable_rank: StableRankResult,
+        cka: CKAResult,
+        attention_entropy: AttentionEntropyResult | None,
+    ) -> None:
+        """Retain a seed result and refresh the variant-level aggregate."""
+        self.per_seed.setdefault(variant, []).append(
+            SeedProbeResult(
+                checkpoint_dir=checkpoint_dir,
+                mqar=mqar,
+                stable_rank=stable_rank,
+                cka=cka,
+                attention_entropy=attention_entropy,
+            )
+        )
+        seeds = self.per_seed[variant]
+
+        distances = sorted(
+            {distance for seed in seeds for distance in seed.mqar.accuracy_by_distance}
+        )
+        self.mqar[variant] = MQARResult(
+            accuracy=float(np.mean([seed.mqar.accuracy for seed in seeds])),
+            accuracy_by_distance={
+                distance: float(
+                    np.mean(
+                        [
+                            seed.mqar.accuracy_by_distance[distance]
+                            for seed in seeds
+                            if distance in seed.mqar.accuracy_by_distance
+                        ]
+                    )
+                )
+                for distance in distances
+            },
+        )
+
+        stable_layers = np.stack([seed.stable_rank.per_layer for seed in seeds])
+        stable_means = np.array([seed.stable_rank.mean for seed in seeds])
+        self.stable_rank[variant] = StableRankResult(
+            per_layer=stable_layers.mean(axis=0),
+            mean=float(stable_means.mean()),
+            std=float(stable_means.std(ddof=1)) if len(seeds) >= 2 else float("nan"),
+        )
+
+        self.cka[variant] = CKAResult(
+            adjacent_curve=np.stack([seed.cka.adjacent_curve for seed in seeds]).mean(axis=0),
+            full_matrix=np.stack([seed.cka.full_matrix for seed in seeds]).mean(axis=0),
+        )
+
+        entropy_seeds = [seed.attention_entropy for seed in seeds if seed.attention_entropy]
+        if entropy_seeds:
+            self.attention_entropy[variant] = AttentionEntropyResult(
+                per_layer=np.stack([seed.per_layer for seed in entropy_seeds]).mean(axis=0),
+                per_head=np.stack([seed.per_head for seed in entropy_seeds]).mean(axis=0),
+            )
+
+    def to_dict(self) -> dict:
+        """Return JSON-ready aggregate and per-checkpoint probe data."""
+
+        def mqar_dict(result: MQARResult) -> dict:
+            return {
+                "accuracy": result.accuracy,
+                "accuracy_by_distance": {
+                    str(distance): accuracy
+                    for distance, accuracy in result.accuracy_by_distance.items()
+                },
+            }
+
+        def stable_rank_dict(result: StableRankResult) -> dict:
+            return {
+                "per_layer": result.per_layer.tolist(),
+                "mean": result.mean,
+                "std": None if np.isnan(result.std) else result.std,
+            }
+
+        def cka_dict(result: CKAResult) -> dict:
+            return {
+                "adjacent_curve": result.adjacent_curve.tolist(),
+                "full_matrix": result.full_matrix.tolist(),
+            }
+
+        def entropy_dict(result: AttentionEntropyResult | None) -> dict | None:
+            if result is None:
+                return None
+            return {
+                "per_layer": result.per_layer.tolist(),
+                "per_head": result.per_head.tolist(),
+            }
+
+        aggregated = {}
+        for variant, mqar in self.mqar.items():
+            aggregated[variant] = {
+                "mqar": mqar_dict(mqar),
+                "stable_rank": stable_rank_dict(self.stable_rank[variant]),
+                "cka": cka_dict(self.cka[variant]),
+                "attention_entropy": entropy_dict(self.attention_entropy.get(variant)),
+                "n": len(self.per_seed.get(variant, [])),
+            }
+
+        per_seed = {
+            variant: [
+                {
+                    "checkpoint_dir": seed.checkpoint_dir,
+                    "mqar": mqar_dict(seed.mqar),
+                    "stable_rank": stable_rank_dict(seed.stable_rank),
+                    "cka": cka_dict(seed.cka),
+                    "attention_entropy": entropy_dict(seed.attention_entropy),
+                }
+                for seed in seeds
+            ]
+            for variant, seeds in self.per_seed.items()
+        }
+        return {"aggregated": aggregated, "per_seed": per_seed}
 
 
 @dataclass
@@ -208,17 +340,23 @@ class EvaluationPipeline:
 
         # ─── Step 4: Detect seed groups ───────────────────────────────────
         seed_groups = self._detect_seed_groups(variants)
+        pareto_variants = aggregate_pareto_variants(seed_groups)
         representative_variants = [seeds[0] for seeds in seed_groups.values()]
 
         # ─── Step 5: Comparison analysis ──────────────────────────────────
-        comparison = self._run_comparisons(representative_variants, warnings)
+        comparison = self._run_comparisons(seed_groups, warnings, pareto_variants)
 
         # ─── Step 6: Aggregate across seeds ───────────────────────────────
         seed_aggregated = self._aggregate_seeds(seed_groups, variants, warnings)
 
         # ─── Step 7: Generate visualizations ──────────────────────────────
         self._generate_plots(
-            representative_variants, probe_results, output_dir, warnings, generated_files
+            representative_variants,
+            pareto_variants,
+            probe_results,
+            output_dir,
+            warnings,
+            generated_files,
         )
 
         # ─── Step 8: Generate summary ─────────────────────────────────────
@@ -226,8 +364,21 @@ class EvaluationPipeline:
 
         # ─── Step 9: Write metadata and raw data ──────────────────────────
         self._write_output_files(
-            output_dir, variants, comparison, seed_aggregated, warnings, generated_files
+            output_dir,
+            variants,
+            comparison,
+            seed_aggregated,
+            probe_results,
+            warnings,
+            generated_files,
         )
+
+        # ─── Step 10: Build the offline dashboard ─────────────────────────
+        try:
+            dashboard_path = build_dashboard(output_dir)
+            generated_files.append(dashboard_path)
+        except Exception as e:
+            warnings.append(f"build static dashboard failed: {e}")
 
         logger.info("Evaluation complete. Report written to: %s", output_dir)
 
@@ -343,19 +494,16 @@ class EvaluationPipeline:
         # MQAR
         logger.info("  Running MQAR probe for %s...", v.name)
         mqar_result = run_mqar_probe(model, v.config, device=self._device)
-        probe_results.mqar[v.name] = mqar_result
         logger.info("    MQAR accuracy: %.3f", mqar_result.accuracy)
 
         # Stable rank
         logger.info("  Computing stable rank for %s...", v.name)
         srank_result = compute_stable_rank(model, val_loader, n_batches=50, device=self._device)
-        probe_results.stable_rank[v.name] = srank_result
         logger.info("    Stable rank mean: %.2f ± %.2f", srank_result.mean, srank_result.std)
 
         # CKA
         logger.info("  Computing CKA for %s...", v.name)
         cka_result = compute_cka(model, val_loader, n_batches=25, device=self._device)
-        probe_results.cka[v.name] = cka_result
 
         # Attention entropy
         logger.info("  Computing attention entropy for %s...", v.name)
@@ -363,43 +511,44 @@ class EvaluationPipeline:
             model, val_loader, n_batches=25, device=self._device
         )
         if entropy_result is not None:
-            probe_results.attention_entropy[v.name] = entropy_result
             logger.info("    Attention entropy mean: %.3f", entropy_result.per_layer.mean())
         else:
             logger.info("    Attention entropy: N/A (flash-based variant)")
 
+        probe_results.record(
+            variant=v.name,
+            checkpoint_dir=str(v.checkpoint_dir),
+            mqar=mqar_result,
+            stable_rank=srank_result,
+            cka=cka_result,
+            attention_entropy=entropy_result,
+        )
+
     def _run_comparisons(
         self,
-        representative_variants: list[VariantData],
+        seed_groups: dict[str, list[VariantData]],
         warnings: list[str],
+        pareto_variants: list[VariantData],
     ) -> ComparisonResult:
-        """Run all comparison analyses."""
+        """Run seed-aware comparison analyses at shared global budgets."""
         logger.info("Running comparison analysis...")
 
-        fixed_data: dict[str, float] = {}
+        representative_variants = [seeds[0] for seeds in seed_groups.values()]
+        fixed_data: dict[str, float | tuple[float, float]] = {}
         fixed_wallclock: dict[str, dict] = {}
-        fixed_flops: dict[str, float] = {}
+        fixed_flops: dict[str, float | tuple[float, float]] = {}
         pareto_front: list[str] = []
         parameter_parity_valid = False
         parameter_counts: dict[str, int] = {}
 
+        total_parameter_counts: dict[str, int] = {}
         try:
-            fixed_data = slice_fixed_data(representative_variants)
+            fixed_data, fixed_wallclock, fixed_flops = aggregate_comparison_axes(seed_groups)
         except Exception as e:
-            warnings.append(f"slice_fixed_data failed: {e}")
+            warnings.append(f"aggregate comparison axes failed: {e}")
 
         try:
-            fixed_wallclock = slice_fixed_wallclock(representative_variants)
-        except Exception as e:
-            warnings.append(f"slice_fixed_wallclock failed: {e}")
-
-        try:
-            fixed_flops = slice_fixed_flops(representative_variants)
-        except Exception as e:
-            warnings.append(f"slice_fixed_flops failed: {e}")
-
-        try:
-            pareto_front = compute_pareto_front(representative_variants)
+            pareto_front = compute_pareto_front(pareto_variants)
         except Exception as e:
             warnings.append(f"compute_pareto_front failed: {e}")
 
@@ -409,6 +558,13 @@ class EvaluationPipeline:
             )
         except Exception as e:
             warnings.append(f"validate_parameter_parity failed: {e}")
+        try:
+            total_parameter_counts = {
+                variant.name: _estimate_parameter_count(variant.config, variant.name)
+                for variant in representative_variants
+            }
+        except Exception as e:
+            warnings.append(f"total parameter accounting failed: {e}")
 
         return ComparisonResult(
             fixed_data=fixed_data,
@@ -416,6 +572,7 @@ class EvaluationPipeline:
             fixed_flops=fixed_flops,
             pareto_front=pareto_front,
             parameter_counts=parameter_counts,
+            total_parameter_counts=total_parameter_counts,
             parameter_parity_valid=parameter_parity_valid,
         )
 
@@ -470,6 +627,7 @@ class EvaluationPipeline:
     def _generate_plots(
         self,
         representative_variants: list[VariantData],
+        pareto_variants: list[VariantData],
         probe_results: ProbeResults,
         output_dir: Path,
         warnings: list[str],
@@ -539,7 +697,7 @@ class EvaluationPipeline:
 
         # Pareto
         try:
-            paths = plot_pareto(representative_variants, output_dir)
+            paths = plot_pareto(pareto_variants, output_dir)
             if isinstance(paths, list):
                 generated_files.extend(paths)
             else:
@@ -575,6 +733,7 @@ class EvaluationPipeline:
         variants: list[VariantData],
         comparison: ComparisonResult,
         seed_aggregated: dict[str, dict[str, tuple[float, float]]],
+        probe_results: ProbeResults,
         warnings: list[str],
         generated_files: list[Path],
     ) -> None:
@@ -591,7 +750,7 @@ class EvaluationPipeline:
         # raw/metrics.csv and raw/metrics.json
         try:
             csv_path, json_path = self._write_raw_data(
-                output_dir, variants, comparison, seed_aggregated
+                output_dir, variants, comparison, seed_aggregated, probe_results
             )
             generated_files.extend([csv_path, json_path])
         except Exception as e:
@@ -731,6 +890,7 @@ class EvaluationPipeline:
         variants: list[VariantData],
         comparison: ComparisonResult,
         seed_aggregated: dict[str, dict[str, tuple[float, float]]],
+        probe_results: ProbeResults | None = None,
     ) -> tuple[Path, Path]:
         """Write raw/metrics.csv and raw/metrics.json."""
         raw_dir = output_dir / "raw"
@@ -740,7 +900,7 @@ class EvaluationPipeline:
         self._write_metrics_csv(csv_path, variants)
 
         json_path = raw_dir / "metrics.json"
-        self._write_metrics_json(json_path, variants, comparison, seed_aggregated)
+        self._write_metrics_json(json_path, variants, comparison, seed_aggregated, probe_results)
 
         return csv_path, json_path
 
@@ -777,7 +937,7 @@ class EvaluationPipeline:
 
         if not rows:
             with open(csv_path, "w", newline="") as f:
-                writer = csv.writer(f)
+                writer = csv.writer(f, lineterminator="\n")
                 writer.writerow(["variant", "seed_index", "checkpoint_dir"])
             return
 
@@ -789,7 +949,9 @@ class EvaluationPipeline:
         fieldnames = fixed_cols + extra_cols
 
         with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer = csv.DictWriter(
+                f, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n"
+            )
             writer.writeheader()
             writer.writerows(rows)
 
@@ -799,6 +961,7 @@ class EvaluationPipeline:
         variants: list[VariantData],
         comparison: ComparisonResult,
         seed_aggregated: dict[str, dict[str, tuple[float, float]]],
+        probe_results: ProbeResults | None = None,
     ) -> None:
         """Write full structured metrics data as JSON."""
         seed_groups = self._detect_seed_groups(variants)
@@ -850,24 +1013,56 @@ class EvaluationPipeline:
                 for metric_name, (mean, std) in metrics.items()
             }
 
-        # Comparison section
+        # Comparison section. Named estimates are unambiguous to non-Python
+        # consumers and carry the sample count used for each variant.
+        seed_counts = {name: len(seeds) for name, seeds in seed_groups.items()}
         comparison_section = {
-            "fixed_data": comparison.fixed_data,
-            "fixed_wallclock": comparison.fixed_wallclock,
-            "fixed_flops": comparison.fixed_flops,
+            "fixed_data": {
+                name: self._estimate_to_json(value, seed_counts.get(name, 1))
+                for name, value in comparison.fixed_data.items()
+            },
+            "fixed_wallclock": {
+                name: {
+                    str(fraction): self._estimate_to_json(value, seed_counts.get(name, 1))
+                    for fraction, value in fractions.items()
+                }
+                for name, fractions in comparison.fixed_wallclock.items()
+            },
+            "fixed_flops": {
+                name: self._estimate_to_json(value, seed_counts.get(name, 1))
+                for name, value in comparison.fixed_flops.items()
+            },
             "pareto_front": comparison.pareto_front,
             "parameter_counts": comparison.parameter_counts,
             "parameter_parity_valid": comparison.parameter_parity_valid,
+            "total_parameter_counts": comparison.total_parameter_counts,
         }
 
         output = {
+            "schema_version": 2,
             "variants": variants_data,
             "aggregated": aggregated_section,
             "comparison": comparison_section,
+            "probes": (
+                probe_results.to_dict() if probe_results is not None else ProbeResults().to_dict()
+            ),
         }
 
         with open(json_path, "w") as f:
             json.dump(output, f, indent=2, default=self._json_default)
+
+    @staticmethod
+    def _estimate_to_json(value, n: int) -> dict[str, float | int | None]:
+        """Serialize a scalar or ``(mean, std)`` as a named estimate."""
+        if isinstance(value, tuple):
+            mean, std = value
+        else:
+            mean, std = value, float("nan")
+        return {
+            "mean": float(mean),
+            "std": None if np.isnan(std) else float(std),
+            "n": n,
+        }
 
     @staticmethod
     def _json_default(obj):

@@ -36,9 +36,7 @@ dev = [
     "pandas>=2.0.0",
 ]
 viz = [
-    "streamlit>=1.28.0",
     "matplotlib>=3.7.0",
-    "plotly>=5.15.0",
 ]
 
 [tool.setuptools.packages.find]

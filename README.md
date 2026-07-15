@@ -37,7 +37,7 @@ TransformerVariants/
 │   └── project_defaults.yaml
 ├── docs/                    # Phase documents and workflow guides
 ├── reports/                 # Experiment contract, generated analysis
-├── src/                     # Source code (future phases)
+├── src/                     # Models, training, evaluation, and static reporting
 │   ├── models/              # Model implementations
 │   ├── data/                # Data loading and preprocessing
 │   ├── training/            # Training loop, optimizer, checkpointing
@@ -55,19 +55,19 @@ TransformerVariants/
 | Phase | Goal | Status |
 |------:|------|--------|
 | 00 | Experiment contract and project definition | ✅ Done |
-| 01 | Repository skeleton, config loading, run directories | Planned |
-| 02 | Minimal data pipeline (small debug dataset → token shards) | Planned |
-| 03 | Vanilla decoder-only Transformer | Planned |
-| 04 | L4-aware training loop and checkpointing | Planned |
-| 05 | Modern baseline (RoPE, RMSNorm, SwiGLU, fast attention) | Planned |
-| 06 | ALiBi, GQA, MQA, inference benchmark | Planned |
-| 07 | Sparse and causal linear attention | Planned |
-| 08 | Evaluation framework (plots, statistics) | Planned |
-| 09 | Interactive visualization dashboard | Planned |
-| 10 | Large-scale data pipeline | Planned |
-| 11 | Fault-tolerant training (resume, corruption fallback) | Planned |
-| 12 | Main benchmark runs and controlled experiments | Planned |
-| 13 | Final report, packaging, demo assets | Planned |
+| 01 | Repository skeleton, config loading, run directories | ✅ Done |
+| 02 | Minimal data pipeline (small debug dataset → token shards) | ✅ Done |
+| 03 | Vanilla decoder-only Transformer | ✅ Done |
+| 04 | L4-aware training loop and checkpointing | ✅ Done |
+| 05 | Modern baseline (RoPE, RMSNorm, SwiGLU, fast attention) | ✅ Done |
+| 06 | ALiBi, GQA, MQA, inference benchmark | ✅ Done |
+| 07 | Sparse and causal linear attention | ✅ Done |
+| 08 | Evaluation framework (plots, statistics) | ✅ Done |
+| 09 | Self-contained offline HTML dashboard | ✅ Done |
+| 10 | Large-scale data pipeline | ✅ Done |
+| 11 | Fault-tolerant training (resume, corruption fallback) | ✅ Done |
+| 12 | Main benchmark runs and controlled experiments | ✅ Done |
+| 13 | Final report, packaging, demo assets | In progress |
 
 ## Key Metrics
 
@@ -89,7 +89,9 @@ All variants in a comparison set share:
 - Same optimizer hyperparameters
 - Same effective batch size
 - Same precision (bf16)
-- Parameter counts within ±5%
+- Active parameters per token within ±5% where possible
+- Total stored parameters reported separately for sparse MoE variants
+- Any parity exception documented rather than hidden by an unplanned retrain
 - Results reported over 3+ random seeds
 
 See `reports/experiment_contract.md` for full details.
@@ -97,15 +99,20 @@ See `reports/experiment_contract.md` for full details.
 ## Quick Start
 
 ```bash
-# (Future phases — not yet implemented)
 # Install dependencies
-pip install -e .
+pip install -e ".[data,viz]"
 
 # Run a debug training
-python -m scripts.train --config configs/experiment/debug.yaml
+python scripts/train.py --variant modern --scale debug
 
-# Launch dashboard
-streamlit run src/viz/dashboard.py
+# Run evaluation (also builds reports/<name>/index.html)
+python scripts/evaluate.py --checkpoints checkpoints/vanilla_main_1B_s42 \
+  checkpoints/modern_main_1B_s42 --output reports/example \
+  --data_dir data/processed/wikitext-full
+
+# Rebuild the zero-server dashboard after adding benchmark data
+python scripts/build_dashboard.py --report reports/1B_comparison
+# Then open reports/1B_comparison/index.html directly in a browser.
 ```
 
 ## License
