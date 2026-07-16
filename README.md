@@ -29,7 +29,7 @@ systems-and-architecture questions under a fixed hardware and training budget:
 | Main experiment | 30 runs: 10 recipes × 3 seeds |
 | Main token budget | Approximately 1B tokens per run |
 | Primary parameter range | 48.3M–68.8M active parameters |
-| Test suite | 715 passing tests |
+| Test suite | 716 passing tests |
 | Report surface | One offline, serverless HTML file |
 
 Open the current report directly in a browser:

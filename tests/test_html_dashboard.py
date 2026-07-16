@@ -123,9 +123,7 @@ def test_build_dashboard_writes_one_offline_html_file(tmp_path: Path) -> None:
             }
         )
     )
-    (report_dir / "plots" / "learning_curves_tokens.png").write_bytes(
-        b"\x89PNG\r\n\x1a\nfixture"
-    )
+    (report_dir / "plots" / "learning_curves_tokens.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
 
     output = build_dashboard(report_dir)
 
@@ -148,5 +146,15 @@ def test_build_dashboard_writes_one_offline_html_file(tmp_path: Path) -> None:
 
     assert 'id="longContextChart"' in html
     assert 'id="longContextSummary"' in html
+    assert 'id="longContextRankings"' in html
+    embedded_report = html.split(
+        '<script type="application/json" id="report-data">',
+        maxsplit=1,
+    )[1].split("</script>", maxsplit=1)[0]
+    dashboard_data = json.loads(embedded_report)
+    rankings = dashboard_data["benchmarks"]["long_context_rankings"]
+    assert [entry["variant"] for entry in rankings["quality"]] == ["modern"]
+    assert [entry["variant"] for entry in rankings["retention"]] == ["modern"]
+    assert [entry["variant"] for entry in rankings["throughput"]] == ["modern"]
     assert "Paired tail-token extrapolation" in html
     assert "12.3" in html

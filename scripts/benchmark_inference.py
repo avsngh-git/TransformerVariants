@@ -16,6 +16,7 @@ from src.evaluation.benchmarks import (
     aggregate_long_context_runs,
     benchmark_generation,
     evaluate_long_context,
+    rank_long_context_variants,
 )
 from src.evaluation.comparison import VariantData, load_variant_data
 from src.evaluation.pipeline import EvaluationPipeline
@@ -202,9 +203,7 @@ def main() -> None:
         },
         "long_context_method": {
             "window_sampling": "fixed non-overlapping windows from the validation split",
-            "target_alignment": (
-                "the same final tail tokens are scored at every context length"
-            ),
+            "target_alignment": ("the same final tail tokens are scored at every context length"),
             "checkpoint_estimate": "mean across held-out windows",
             "uncertainty_unit": "sample standard deviation across checkpoint seeds",
         },
@@ -214,6 +213,10 @@ def main() -> None:
             "Models were trained at 1024 tokens; longer lengths measure extrapolation.",
             "Unsupported cache and context-extension paths are reported rather than emulated.",
         ],
+        "long_context_rankings": rank_long_context_variants(
+            results,
+            context_length=max(args.context_lengths),
+        ),
         "variants": results,
     }
     output_path = Path(args.output)

@@ -184,9 +184,7 @@ def _sample_summary(values: list[float]) -> dict[str, float | int]:
     count = len(values)
     mean = sum(values) / count
     std = (
-        math.sqrt(sum((value - mean) ** 2 for value in values) / (count - 1))
-        if count > 1
-        else 0.0
+        math.sqrt(sum((value - mean) ** 2 for value in values) / (count - 1)) if count > 1 else 0.0
     )
     return {"mean": mean, "std": std, "n": count}
 
@@ -199,11 +197,7 @@ def aggregate_long_context_runs(
     """Aggregate window means across independent checkpoint seeds."""
     run_list = list(runs)
     context_keys = sorted(
-        {
-            int(context)
-            for run in run_list
-            for context in run.get("long_context", {})
-        }
+        {int(context) for run in run_list for context in run.get("long_context", {})}
     )
     baseline_key = str(baseline_context)
     results: dict[str, dict] = {}
@@ -222,9 +216,7 @@ def aggregate_long_context_runs(
                         "seed": run.get("seed"),
                         "checkpoint_dir": run.get("checkpoint_dir"),
                         "status": (
-                            measurement.get("status")
-                            if measurement is not None
-                            else "unavailable"
+                            measurement.get("status") if measurement is not None else "unavailable"
                         ),
                         "reason": (
                             measurement.get("reason", "context result is missing")
@@ -243,22 +235,15 @@ def aggregate_long_context_runs(
             }
             continue
 
-        seed_losses = [
-            float(measurement["val_loss"]["mean"])
-            for _, measurement in supported
-        ]
+        seed_losses = [float(measurement["val_loss"]["mean"]) for _, measurement in supported]
         seed_throughputs = [
-            float(measurement["prefill_tokens_per_second"]["mean"])
-            for _, measurement in supported
+            float(measurement["prefill_tokens_per_second"]["mean"]) for _, measurement in supported
         ]
         aggregate = {
             "status": "ok" if len(supported) == len(run_list) else "partial",
             "supported_checkpoints": len(supported),
             "total_checkpoints": len(run_list),
-            "window_count": sum(
-                int(measurement["val_loss"]["n"])
-                for _, measurement in supported
-            ),
+            "window_count": sum(int(measurement["val_loss"]["n"]) for _, measurement in supported),
             "seeds": [run.get("seed") for run, _ in supported],
             "val_loss": _sample_summary(seed_losses),
             "perplexity": _sample_summary([math.exp(loss) for loss in seed_losses]),
@@ -272,8 +257,7 @@ def aggregate_long_context_runs(
             if baseline is None or baseline.get("status") != "ok":
                 continue
             paired_delta_losses.append(
-                float(measurement["val_loss"]["mean"])
-                - float(baseline["val_loss"]["mean"])
+                float(measurement["val_loss"]["mean"]) - float(baseline["val_loss"]["mean"])
             )
         if paired_delta_losses:
             aggregate["paired_delta_loss"] = _sample_summary(paired_delta_losses)
@@ -284,6 +268,47 @@ def aggregate_long_context_runs(
         results[context_key] = aggregate
 
     return results
+
+
+def rank_long_context_variants(
+    variants: dict[str, dict],
+    *,
+    context_length: int,
+) -> dict[str, list[dict]]:
+    """Rank supported variants on quality, retention, and prefill throughput."""
+    context_key = str(context_length)
+    metric_keys = {
+        "quality": "perplexity",
+        "retention": "perplexity_ratio",
+        "throughput": "prefill_tokens_per_second",
+    }
+    rankings: dict[str, list[dict]] = {name: [] for name in metric_keys}
+
+    for variant_name, variant_benchmark in variants.items():
+        measurement = variant_benchmark.get("long_context", {}).get(context_key, {})
+        if measurement.get("status") not in {"ok", "partial"}:
+            continue
+        for ranking_name, metric_key in metric_keys.items():
+            estimate = measurement.get(metric_key)
+            if not isinstance(estimate, dict) or estimate.get("mean") is None:
+                continue
+            rankings[ranking_name].append(
+                {
+                    "variant": variant_name,
+                    "estimate": estimate,
+                }
+            )
+
+    rankings["quality"].sort(key=lambda entry: float(entry["estimate"]["mean"]))
+    rankings["retention"].sort(key=lambda entry: abs(float(entry["estimate"]["mean"]) - 1.0))
+    rankings["throughput"].sort(
+        key=lambda entry: float(entry["estimate"]["mean"]),
+        reverse=True,
+    )
+    for entries in rankings.values():
+        for rank, entry in enumerate(entries, start=1):
+            entry["rank"] = rank
+    return rankings
 
 
 @torch.no_grad()

@@ -8,6 +8,8 @@ import base64
 import json
 from pathlib import Path
 
+from src.evaluation.benchmarks import rank_long_context_variants
+
 _HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -58,6 +60,8 @@ border:1px dashed var(--line);border-radius:12px}.meta{font:12px/1.7 ui-monospac
 .lc-chart{min-height:430px;overflow:auto}.lc-chart svg{display:block;width:100%;min-width:760px;height:auto}
 .lc-grid{stroke:#294352;stroke-width:1}.lc-axis{fill:var(--muted);font:12px ui-monospace,monospace}
 .lc-legend{fill:var(--text);font:12px ui-monospace,monospace}.lc-summary{margin-bottom:16px}
+.rank-card{grid-column:span 4}.rank-card h4{margin:0 0 4px;font-size:16px}.rank-card ol{margin:14px 0 0;padding-left:24px}
+.rank-card li{padding:5px 0;color:var(--muted)}.rank-card li strong{color:var(--text)}.rank-value{float:right;font:12px ui-monospace,monospace}
 footer{padding-top:72px;color:var(--muted);font-size:12px}@media(max-width:900px){.shell{display:block}aside{position:relative;
 height:auto;border-right:0;border-bottom:1px solid var(--line)}nav{display:flex;overflow:auto;margin-top:18px}.status{display:none}
 main{padding-top:30px}.metric{grid-column:span 6}.wide,.side{grid-column:1/-1}}@media(max-width:580px){.metric{grid-column:1/-1}
@@ -76,6 +80,7 @@ main{padding-top:30px}.metric{grid-column:span 6}.wide,.side{grid-column:1/-1}}@
 <div class="lc-heading"><div><div class="eyebrow">Seed-aware context study</div><h3>Paired tail-token extrapolation</h3></div>
 <p>Each curve scores the same final target tokens at every context length. Error bars show sample standard deviation across independent checkpoint seeds.</p></div>
 <div class="grid lc-summary" id="longContextSummary"></div>
+<div class="grid lc-summary" id="longContextRankings"></div>
 <div class="card full lc-chart" id="longContextChart"></div>
 <div class="card full" style="overflow:auto"><table><thead><tr><th>Variant</th><th>Uncached tok/s</th><th>Cached tok/s</th><th>KV cache</th><th>1K PPL</th><th>2K PPL</th><th>4K PPL</th><th>4K prefill tok/s</th></tr></thead><tbody id="benchmarkRows"></tbody></table></div>
 <div class="meta" id="benchmarkLimitations" style="margin-top:14px"></div></section>
@@ -116,46 +121,49 @@ const probeAgg=data.probes?.aggregated||{};function spark(values){if(!values?.le
 const pts=values.map((v,i)=>`${i*w/Math.max(1,values.length-1)},${h-4-(v-min)*(h-8)/s}`).join(' ');return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline fill="none" stroke="#5de4c7" stroke-width="2" points="${pts}"/></svg>`}
 const average=values=>values?.length?values.flat(Infinity).reduce((a,b)=>a+Number(b),0)/values.flat(Infinity).length:null;
 const benchmarks=data.benchmarks||{},benchVariants=benchmarks.variants||{};const statusValue=(entry,key,d=1)=>entry?.status==='ok'?fmt(entry[key],d):entry?.status||'—';
-document.getElementById('benchmarkRows').innerHTML=Object.keys(benchVariants).length?Object.entries(benchVariants).map(([n,b])=>{const g=b.generation||{},lc=b.long_context||{},cache=g.kv_cache;return `<tr><td><strong>${n}</strong></td><td>${statusValue(g.uncached,'tokens_per_second')}</td><td>${statusValue(g.cached,'tokens_per_second')}</td><td>${cache?.status==='ok'?(cache.bytes/1048576).toFixed(1)+' MiB':cache?.status||'—'}</td><td>${statusValue(lc['1024'],'perplexity',2)}</td><td>${statusValue(lc['2048'],'perplexity',2)}</td><td>${statusValue(lc['4096'],'perplexity',2)}</td><td>${statusValue(lc['4096'],'prefill_tokens_per_second')}</td></tr>`}).join(''):'<tr><td colspan="8"><div class="empty">Run scripts/benchmark_inference.py to populate this section.</div></td></tr>';
-document.getElementById('benchmarkLimitations').textContent=(benchmarks.limitations||[]).join('\n');
-const lcOkay=entry=>entry&&['ok','partial'].includes(entry.status);
-const lcContexts=(benchmarks.settings?.context_lengths||[1024,2048,4096]).map(String);
-const lcLast=lcContexts.at(-1);
-const lcEntries=Object.entries(benchVariants);
-const lcEstimate=(entry,key)=>lcOkay(entry)?estimate(entry[key]):{};
-const lcRank=key=>lcEntries.map(([name,b])=>[name,lcEstimate(b.long_context?.[lcLast],key)])
-.filter(([,e])=>e.mean!=null).sort((a,b)=>a[1].mean-b[1].mean);
-const qualityRank=lcRank('perplexity'),retentionRank=lcRank('perplexity_ratio');
-const lcSettings=benchmarks.settings||{};
-const evidenceSeeds=qualityRank[0]?.[1].n??0;
-const lcCards=[
-['Best '+Number(lcLast).toLocaleString()+'-token quality',qualityRank[0]?metric(qualityRank[0][1],2):'—',qualityRank[0]?.[0]||'no supported result'],
-['Best context retention',retentionRank[0]?metric(retentionRank[0][1],2)+'x':'—',retentionRank[0]?.[0]||'no paired result'],
-['Evidence unit',evidenceSeeds+' seeds',(lcSettings.long_context_windows_per_checkpoint??'—')+' windows per checkpoint']
+const isContextMeasurement=entry=>entry&&['ok','partial'].includes(entry.status);
+const contextLengths=(benchmarks.settings?.context_lengths||[1024,2048,4096]).map(String);
+const longestContext=contextLengths.at(-1);
+const variantBenchmarks=Object.entries(benchVariants);
+const contextEstimate=(measurement,metricKey)=>isContextMeasurement(measurement)?estimate(measurement[metricKey]):{};
+const rankings=benchmarks.long_context_rankings||{};
+const qualityRanking=rankings.quality||[],retentionRanking=rankings.retention||[],throughputRanking=rankings.throughput||[];
+const benchmarkSettings=benchmarks.settings||{},bestQuality=qualityRanking[0],bestRetention=retentionRanking[0];
+const longContextCards=[
+['Best '+Number(longestContext).toLocaleString()+'-token quality',bestQuality?metric(bestQuality.estimate,2):'—',bestQuality?.variant||'no supported result'],
+['Best context retention',bestRetention?metric(bestRetention.estimate,3)+'x':'—',bestRetention?.variant||'no paired result'],
+['Evidence unit',(bestQuality?.estimate.n??0)+' seeds',(benchmarkSettings.long_context_windows_per_checkpoint??'—')+' windows per checkpoint']
 ];
-document.getElementById('longContextSummary').innerHTML=lcCards.map(c=>`<div class="card metric"><div class="label">${c[0]}</div><div class="value">${c[1]}</div><div class="sub">${c[2]}</div></div>`).join('');
+document.getElementById('longContextSummary').innerHTML=longContextCards.map(card=>`<div class="card metric"><div class="label">${card[0]}</div><div class="value">${card[1]}</div><div class="sub">${card[2]}</div></div>`).join('');
+const rankingDefinitions=[
+['4K quality','quality','lower tail perplexity',2,''],
+['Context retention','retention','ratio closest to 1.0',3,'x'],
+['4K prefill','throughput','higher tokens/second',0,' tok/s']
+];
+document.getElementById('longContextRankings').innerHTML=rankingDefinitions.map(([title,rankingKey,subtitle,digits,suffix])=>{const entries=rankings[rankingKey]||[];return `<div class="card rank-card"><h4>${title}</h4><span class="pill">${subtitle}</span><ol>${entries.map(entry=>`<li><strong>${entry.variant}</strong><span class="rank-value">${metric(entry.estimate,digits)}${suffix}</span></li>`).join('')||'<li>No supported results</li>'}</ol></div>`}).join('');
 function renderLongContextChart(){
 const colors=['#5de4c7','#ffc857','#6ea8fe','#ff6b6b','#c792ea','#82aaff','#f78c6c','#89ddff','#c3e88d','#f07178'];
-const series=lcEntries.map(([name,b],index)=>({name,color:colors[index%colors.length],points:lcContexts.map((context,i)=>({i,context,e:lcEstimate(b.long_context?.[context],'val_loss')})).filter(p=>p.e.mean!=null)})).filter(s=>s.points.length);
-const values=series.flatMap(s=>s.points.flatMap(p=>[p.e.mean-(p.e.std||0),p.e.mean+(p.e.std||0)]));
-if(!values.length){document.getElementById('longContextChart').innerHTML='<div class="empty">Run the multi-seed long-context benchmark to populate this chart.</div>';return}
-const width=1050,height=450,left=62,right=220,top=28,bottom=58,plotW=width-left-right,plotH=height-top-bottom;
-const min=Math.min(...values),max=Math.max(...values),pad=Math.max(.05,(max-min)*.08),lo=min-pad,hi=max+pad,span=hi-lo||1;
-const x=i=>left+(lcContexts.length===1?plotW/2:i*plotW/(lcContexts.length-1));
-const y=value=>top+(hi-value)*plotH/span;
-let svg=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Mean tail-token validation loss by context length with seed standard-deviation error bars">`;
-for(let i=0;i<=5;i++){const value=lo+i*span/5,yy=y(value);svg+=`<line class="lc-grid" x1="${left}" x2="${left+plotW}" y1="${yy}" y2="${yy}"/><text class="lc-axis" x="${left-10}" y="${yy+4}" text-anchor="end">${fmt(value,2)}</text>`}
-lcContexts.forEach((context,i)=>{svg+=`<text class="lc-axis" x="${x(i)}" y="${height-24}" text-anchor="middle">${Number(context).toLocaleString()}</text>`});
-svg+=`<text class="lc-axis" x="${left+plotW/2}" y="${height-4}" text-anchor="middle">available context tokens</text><text class="lc-axis" transform="translate(15 ${top+plotH/2}) rotate(-90)" text-anchor="middle">tail validation loss (lower is better)</text>`;
-series.forEach((s,index)=>{if(s.points.length>1)svg+=`<polyline fill="none" stroke="${s.color}" stroke-width="2.5" points="${s.points.map(p=>x(p.i)+','+y(p.e.mean)).join(' ')}"/>`;s.points.forEach(p=>{const xx=x(p.i),yy=y(p.e.mean),err=p.e.std||0;svg+=`<line x1="${xx}" x2="${xx}" y1="${y(p.e.mean+err)}" y2="${y(p.e.mean-err)}" stroke="${s.color}"/><line x1="${xx-5}" x2="${xx+5}" y1="${y(p.e.mean+err)}" y2="${y(p.e.mean+err)}" stroke="${s.color}"/><line x1="${xx-5}" x2="${xx+5}" y1="${y(p.e.mean-err)}" y2="${y(p.e.mean-err)}" stroke="${s.color}"/><circle cx="${xx}" cy="${yy}" r="4.5" fill="${s.color}"><title>${s.name}: ${p.context} tokens, loss ${metric(p.e,3)}</title></circle>`});const ly=top+index*30;svg+=`<line x1="${left+plotW+26}" x2="${left+plotW+48}" y1="${ly}" y2="${ly}" stroke="${s.color}" stroke-width="3"/><text class="lc-legend" x="${left+plotW+56}" y="${ly+4}">${s.name}</text>`});
-document.getElementById('longContextChart').innerHTML=svg+'</svg>'}
+const chartSeries=variantBenchmarks.map(([variantName,variantBenchmark],colorIndex)=>({variantName,color:colors[colorIndex%colors.length],points:contextLengths.map((contextLength,contextIndex)=>({contextIndex,contextLength,estimate:contextEstimate(variantBenchmark.long_context?.[contextLength],'val_loss')})).filter(point=>point.estimate.mean!=null)})).filter(seriesEntry=>seriesEntry.points.length);
+const errorBounds=chartSeries.flatMap(seriesEntry=>seriesEntry.points.flatMap(point=>[point.estimate.mean-(point.estimate.std||0),point.estimate.mean+(point.estimate.std||0)]));
+if(!errorBounds.length){document.getElementById('longContextChart').innerHTML='<div class="empty">Run the multi-seed long-context benchmark to populate this chart.</div>';return}
+const width=1050,height=450,left=62,right=220,top=28,bottom=58,plotWidth=width-left-right,plotHeight=height-top-bottom;
+const minLoss=Math.min(...errorBounds),maxLoss=Math.max(...errorBounds),padding=Math.max(.05,(maxLoss-minLoss)*.08),lowerLoss=minLoss-padding,upperLoss=maxLoss+padding,lossSpan=upperLoss-lowerLoss||1;
+const xForContext=contextIndex=>left+(contextLengths.length===1?plotWidth/2:contextIndex*plotWidth/(contextLengths.length-1));
+const yForLoss=loss=>top+(upperLoss-loss)*plotHeight/lossSpan;
+let chartSvg=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Mean tail-token validation loss by context length with seed standard-deviation error bars">`;
+for(let gridIndex=0;gridIndex<=5;gridIndex++){const loss=lowerLoss+gridIndex*lossSpan/5,gridY=yForLoss(loss);chartSvg+=`<line class="lc-grid" x1="${left}" x2="${left+plotWidth}" y1="${gridY}" y2="${gridY}"/><text class="lc-axis" x="${left-10}" y="${gridY+4}" text-anchor="end">${fmt(loss,2)}</text>`}
+contextLengths.forEach((contextLength,contextIndex)=>{chartSvg+=`<text class="lc-axis" x="${xForContext(contextIndex)}" y="${height-24}" text-anchor="middle">${Number(contextLength).toLocaleString()}</text>`});
+chartSvg+=`<text class="lc-axis" x="${left+plotWidth/2}" y="${height-4}" text-anchor="middle">available context tokens</text><text class="lc-axis" transform="translate(15 ${top+plotHeight/2}) rotate(-90)" text-anchor="middle">tail validation loss (lower is better)</text>`;
+chartSeries.forEach((seriesEntry,legendIndex)=>{if(seriesEntry.points.length>1)chartSvg+=`<polyline fill="none" stroke="${seriesEntry.color}" stroke-width="2.5" points="${seriesEntry.points.map(point=>xForContext(point.contextIndex)+','+yForLoss(point.estimate.mean)).join(' ')}"/>`;seriesEntry.points.forEach(point=>{const pointX=xForContext(point.contextIndex),pointY=yForLoss(point.estimate.mean),error=point.estimate.std||0,errorTop=yForLoss(point.estimate.mean+error),errorBottom=yForLoss(point.estimate.mean-error);chartSvg+=`<line x1="${pointX}" x2="${pointX}" y1="${errorTop}" y2="${errorBottom}" stroke="${seriesEntry.color}"/><line x1="${pointX-5}" x2="${pointX+5}" y1="${errorTop}" y2="${errorTop}" stroke="${seriesEntry.color}"/><line x1="${pointX-5}" x2="${pointX+5}" y1="${errorBottom}" y2="${errorBottom}" stroke="${seriesEntry.color}"/><circle cx="${pointX}" cy="${pointY}" r="4.5" fill="${seriesEntry.color}"><title>${seriesEntry.variantName}: ${point.contextLength} tokens, loss ${metric(point.estimate,3)}</title></circle>`});const legendY=top+legendIndex*30;chartSvg+=`<line x1="${left+plotWidth+26}" x2="${left+plotWidth+48}" y1="${legendY}" y2="${legendY}" stroke="${seriesEntry.color}" stroke-width="3"/><text class="lc-legend" x="${left+plotWidth+56}" y="${legendY+4}">${seriesEntry.variantName}</text>`});
+document.getElementById('longContextChart').innerHTML=chartSvg+'</svg>'}
 renderLongContextChart();
-const metricStatus=(entry,key,d=2)=>lcOkay(entry)?metric(entry[key],d):entry?.status||'—';
-const sortedBenchmarks=lcEntries.sort((a,b)=>(lcEstimate(a[1].long_context?.[lcLast],'perplexity').mean??Infinity)-(lcEstimate(b[1].long_context?.[lcLast],'perplexity').mean??Infinity));
+const metricStatus=(measurement,metricKey,digits=2)=>isContextMeasurement(measurement)?metric(measurement[metricKey],digits):measurement?.status||'—';
+const qualityPosition=new Map(qualityRanking.map(entry=>[entry.variant,entry.rank]));
+const sortedBenchmarks=variantBenchmarks.sort(([leftName],[rightName])=>(qualityPosition.get(leftName)??Infinity)-(qualityPosition.get(rightName)??Infinity)||leftName.localeCompare(rightName));
 document.querySelector('#benchmarks table thead').innerHTML='<tr><th>Rank</th><th>Variant</th><th>Uncached tok/s</th><th>Cached tok/s</th><th>KV cache</th><th>1K tail PPL</th><th>2K tail PPL</th><th>4K tail PPL</th><th>4K PPL ratio</th><th>4K prefill tok/s</th><th>Seeds</th></tr>';
-document.getElementById('benchmarkRows').innerHTML=sortedBenchmarks.length?sortedBenchmarks.map(([name,b],index)=>{const g=b.generation||{},lc=b.long_context||{},cache=g.kv_cache,last=lc[lcLast];return `<tr><td>${lcOkay(last)?index+1:'—'}</td><td><strong>${name}</strong></td><td>${statusValue(g.uncached,'tokens_per_second')}</td><td>${statusValue(g.cached,'tokens_per_second')}</td><td>${cache?.status==='ok'?(cache.bytes/1048576).toFixed(1)+' MiB':cache?.status||'—'}</td><td>${metricStatus(lc['1024'],'perplexity')}</td><td>${metricStatus(lc['2048'],'perplexity')}</td><td>${metricStatus(lc['4096'],'perplexity')}</td><td>${metricStatus(last,'perplexity_ratio')}</td><td>${metricStatus(last,'prefill_tokens_per_second',0)}</td><td>${lcEstimate(last,'val_loss').n??'—'}</td></tr>`}).join(''):'<tr><td colspan="11"><div class="empty">No benchmark data.</div></td></tr>';
+document.getElementById('benchmarkRows').innerHTML=sortedBenchmarks.length?sortedBenchmarks.map(([variantName,variantBenchmark])=>{const generation=variantBenchmark.generation||{},longContext=variantBenchmark.long_context||{},cache=generation.kv_cache,longestMeasurement=longContext[longestContext];return `<tr><td>${qualityPosition.get(variantName)??'—'}</td><td><strong>${variantName}</strong></td><td>${statusValue(generation.uncached,'tokens_per_second')}</td><td>${statusValue(generation.cached,'tokens_per_second')}</td><td>${cache?.status==='ok'?(cache.bytes/1048576).toFixed(1)+' MiB':cache?.status||'—'}</td><td>${metricStatus(longContext['1024'],'perplexity')}</td><td>${metricStatus(longContext['2048'],'perplexity')}</td><td>${metricStatus(longContext['4096'],'perplexity')}</td><td>${metricStatus(longestMeasurement,'perplexity_ratio')}</td><td>${metricStatus(longestMeasurement,'prefill_tokens_per_second',0)}</td><td>${contextEstimate(longestMeasurement,'val_loss').n??'—'}</td></tr>`}).join(''):'<tr><td colspan="11"><div class="empty">No benchmark data.</div></td></tr>';
 const method=benchmarks.long_context_method||{};
-document.getElementById('benchmarkLimitations').textContent=[...benchmarks.limitations||[],'','Method: '+Object.values(method).join('; ')].join('\n');
+document.getElementById('benchmarkLimitations').textContent=[...(benchmarks.limitations||[]),'','Method: '+Object.values(method).join('; ')].join('\n');
 document.getElementById('probeGrid').innerHTML=Object.keys(probeAgg).length?Object.entries(probeAgg).map(([n,p])=>`<div class="probe"><span class="pill">${n} · n=${p.n}</span><strong>MQAR ${metric({mean:p.mqar?.accuracy,std:p.mqar?.accuracy_std},3)}</strong><span>Stable rank ${metric({mean:p.stable_rank?.mean,std:p.stable_rank?.std},2)}</span><br><span>curve σ: rank ${fmt(average(p.stable_rank?.per_layer_std),2)} · CKA ${fmt(average(p.cka?.adjacent_curve_std),3)} · entropy ${fmt(average(p.attention_entropy?.per_layer_std),3)}</span>${spark(p.stable_rank?.per_layer)}</div>`).join(''):'<div class="empty">Probe data was not serialized for this report.</div>';
 document.getElementById('gallery').innerHTML=plots.length?plots.map(p=>`<figure class="figure"><img loading="lazy" src="${p.data_uri}" alt="${p.title}"><figcaption>${p.title}</figcaption></figure>`).join(''):'<div class="empty">No plot files found.</div>';
 document.getElementById('metadata').textContent=JSON.stringify({...meta,schema_version:data.schema_version,variant_count:names.length},null,2);
@@ -201,7 +209,14 @@ def build_dashboard(report_dir: str | Path, output_path: str | Path | None = Non
     )
     benchmarks_path = report_dir / "raw" / "benchmarks.json"
     if benchmarks_path.is_file():
-        metrics["benchmarks"] = json.loads(benchmarks_path.read_text(encoding="utf-8"))
+        benchmarks = json.loads(benchmarks_path.read_text(encoding="utf-8"))
+        context_lengths = benchmarks.get("settings", {}).get("context_lengths", [])
+        if context_lengths and "long_context_rankings" not in benchmarks:
+            benchmarks["long_context_rankings"] = rank_long_context_variants(
+                benchmarks.get("variants", {}),
+                context_length=max(context_lengths),
+            )
+        metrics["benchmarks"] = benchmarks
     plots = _embedded_plots(report_dir / "plots")
     html = (
         _HTML.replace("__REPORT_JSON__", _safe_json(metrics))

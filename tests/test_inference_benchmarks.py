@@ -13,6 +13,7 @@ from src.evaluation.benchmarks import (
     benchmark_generation,
     evaluate_long_context,
     inspect_kv_cache,
+    rank_long_context_variants,
 )
 
 
@@ -150,6 +151,45 @@ def test_long_context_scores_the_same_tail_across_multiple_windows() -> None:
     assert torch.equal(model.seen_inputs[1], tokens[1:2, 4:8])
     assert torch.equal(model.seen_inputs[2], tokens[0:1, :8])
     assert torch.equal(model.seen_inputs[3], tokens[1:2, :8])
+
+
+def test_long_context_rankings_cover_quality_retention_and_throughput() -> None:
+    def measurement(perplexity: float, ratio: float, throughput: float) -> dict:
+        return {
+            "status": "ok",
+            "perplexity": {"mean": perplexity, "std": 1.0, "n": 3},
+            "perplexity_ratio": {"mean": ratio, "std": 0.1, "n": 3},
+            "prefill_tokens_per_second": {
+                "mean": throughput,
+                "std": 10.0,
+                "n": 3,
+            },
+        }
+
+    variants = {
+        "stable": {"long_context": {"4096": measurement(60.0, 1.01, 100.0)}},
+        "quality": {"long_context": {"4096": measurement(50.0, 1.20, 80.0)}},
+        "fast": {"long_context": {"4096": measurement(70.0, 1.10, 200.0)}},
+        "unsupported": {"long_context": {"4096": {"status": "unsupported"}}},
+    }
+
+    rankings = rank_long_context_variants(variants, context_length=4096)
+
+    assert [entry["variant"] for entry in rankings["quality"]] == [
+        "quality",
+        "stable",
+        "fast",
+    ]
+    assert [entry["variant"] for entry in rankings["retention"]] == [
+        "stable",
+        "fast",
+        "quality",
+    ]
+    assert [entry["variant"] for entry in rankings["throughput"]] == [
+        "fast",
+        "stable",
+        "quality",
+    ]
 
 
 def test_long_context_aggregation_uses_seed_means_and_paired_degradation() -> None:
