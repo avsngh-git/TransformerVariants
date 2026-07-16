@@ -124,6 +124,9 @@ def test_build_dashboard_writes_one_offline_html_file(tmp_path: Path) -> None:
         )
     )
     (report_dir / "plots" / "learning_curves_tokens.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+    (report_dir / "plots" / "stable_rank.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+    (report_dir / "plots" / "cka_adjacent.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+    (report_dir / "plots" / "cka_heatmap_modern.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
 
     output = build_dashboard(report_dir)
 
@@ -147,6 +150,20 @@ def test_build_dashboard_writes_one_offline_html_file(tmp_path: Path) -> None:
     assert 'id="longContextChart"' in html
     assert 'id="longContextSummary"' in html
     assert 'id="longContextRankings"' in html
+    assert 'id="longContextChartSummary"' in html
+    assert 'id="longContextRankingsSummary"' in html
+    assert 'id="axisSummary"' in html
+    assert 'class="plot-stack"' in html
+    assert html.count('class="plot-panel"') == 4
+    assert "Tracks validation loss against the number of training tokens" in html
+    assert "Shows the effective dimensionality of each layer" in html
+    assert "Representation similarity (CKA)" in html
+    assert "The adjacent-layer curve highlights local transitions" in html
+    assert "Training dynamics" in html
+    assert 'id="provenanceCards"' in html
+    assert "Evaluation hardware" in html
+    assert "NVIDIA L4" in html
+    assert "JSON.stringify({...meta" not in html
     embedded_report = html.split(
         '<script type="application/json" id="report-data">',
         maxsplit=1,
