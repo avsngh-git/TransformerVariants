@@ -20,8 +20,16 @@ def test_build_dashboard_writes_one_offline_html_file(tmp_path: Path) -> None:
             "modern": [{"checkpoint_dir": "modern_s42", "val_loss": 3.4}],
         },
         "aggregated": {
-            "vanilla": {"val_loss": {"mean": 3.6, "std": 0.1}},
-            "modern": {"val_loss": {"mean": 3.4, "std": 0.05}},
+            "vanilla": {
+                "val_loss": {"mean": 3.6, "std": 0.1},
+                "icl_alpha": {"mean": 0.5},
+                "step_flops": {"mean": 100.0},
+            },
+            "modern": {
+                "val_loss": {"mean": 3.4, "std": 0.05},
+                "icl_alpha": {"mean": 0.6},
+                "step_flops": {"mean": 120.0},
+            },
         },
         "comparison": {
             "fixed_data": {
@@ -35,11 +43,32 @@ def test_build_dashboard_writes_one_offline_html_file(tmp_path: Path) -> None:
             "parameter_parity_valid": False,
             "total_parameter_counts": {"vanilla": 51_000_000, "modern": 59_000_000},
         },
-        "probes": {"aggregated": {}, "per_seed": {}},
+        "probes": {
+            "aggregated": {
+                "modern": {
+                    "mqar": {"accuracy": 0.5},
+                    "stable_rank": {"mean": 9.0, "per_layer": [8.0, 10.0]},
+                    "cka": {
+                        "adjacent_curve": [0.8, 0.9],
+                        "full_matrix": [[1.0, 0.2], [0.2, 1.0]],
+                    },
+                    "n": 3,
+                }
+            },
+            "per_seed": {},
+        },
     }
     (report_dir / "raw" / "metrics.json").write_text(json.dumps(metrics))
     (report_dir / "metadata.json").write_text(
-        json.dumps({"timestamp": "2026-07-15T12:00:00+00:00", "hardware": "NVIDIA L4"})
+        json.dumps(
+            {
+                "timestamp": "2026-07-15T12:00:00+00:00",
+                "hardware": "NVIDIA L4",
+                "software_versions": {"python": "3.11"},
+                "evaluated_checkpoints": ["modern_s42"],
+                "warnings": ["Historical wall-clock uncertainty is incomplete."],
+            }
+        )
     )
     (report_dir / "raw" / "benchmarks.json").write_text(
         json.dumps(
@@ -127,6 +156,14 @@ def test_build_dashboard_writes_one_offline_html_file(tmp_path: Path) -> None:
     (report_dir / "plots" / "stable_rank.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
     (report_dir / "plots" / "cka_adjacent.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
     (report_dir / "plots" / "cka_heatmap_modern.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+    for plot_name in (
+        "flop_breakdown",
+        "pareto_flops_val_loss",
+        "pareto_peak_memory_val_loss",
+        "pareto_wallclock_val_loss",
+        "roofline",
+    ):
+        (report_dir / "plots" / f"{plot_name}.png").write_bytes(b"\x89PNG\r\n\x1a\nfixture")
 
     output = build_dashboard(report_dir)
 
@@ -154,15 +191,27 @@ def test_build_dashboard_writes_one_offline_html_file(tmp_path: Path) -> None:
     assert 'id="longContextRankingsSummary"' in html
     assert 'id="axisSummary"' in html
     assert 'class="plot-stack"' in html
-    assert html.count('class="plot-panel"') == 4
+    assert html.count('class="plot-panel"') == 9
     assert "Tracks validation loss against the number of training tokens" in html
     assert "Shows the effective dimensionality of each layer" in html
     assert "Representation similarity (CKA)" in html
     assert "The adjacent-layer curve highlights local transitions" in html
     assert "Training dynamics" in html
+    assert "modern leads fixed-data quality" in html
+    assert "modern averages 0.850 adjacent-layer CKA" in html
+    assert html.count("The reported Pareto front contains modern.") == 2
+    assert "wall-clock and memory plots mark their own axis-specific fronts" in html
+    assert "the roofline relates arithmetic intensity to achieved throughput" in html
+    assert "modern&#x27;s first-to-last-layer CKA is 0.200" in html
     assert 'id="provenanceCards"' in html
     assert "Evaluation hardware" in html
     assert "NVIDIA L4" in html
+    assert "<summary>Software versions (1)</summary>" in html
+    assert "<li><b>python</b>: 3.11</li>" in html
+    assert "<summary>Evaluated checkpoints (1)</summary>" in html
+    assert "<li>modern_s42</li>" in html
+    assert "<summary>Methodology warnings (1)</summary>" in html
+    assert "Historical wall-clock uncertainty is incomplete." in html
     assert "JSON.stringify({...meta" not in html
     embedded_report = html.split(
         '<script type="application/json" id="report-data">',
