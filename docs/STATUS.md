@@ -173,7 +173,7 @@ Operational state of the project. Read this to understand what's built, what's r
 
 ## Test Suite
 
-430 tests collected:
+736 tests collected:
 - `tests/test_evaluate_cli.py` — Pipeline seed detection, aggregation, metadata/raw data writing
 - `tests/test_flops.py` — FLOP computation correctness
 - `tests/test_metrics.py` — Metrics extraction, ICL fitting
@@ -197,7 +197,7 @@ Operational state of the project. Read this to understand what's built, what's r
 - `tests/test_data_pipeline.py` — tokenizer, sharding, manifest
 - `tests/test_seed.py`, `test_run_dir.py`, `test_params.py`, `test_config.py`, `test_device.py`, `test_logging.py`, `test_run_logger.py` — utilities
 
-Run all tests: `conda run -n transformer_lab python -m pytest tests/ -v` (430 tests, ~61s)
+Run all tests: `conda run --no-capture-output -n transformer_lab python -m pytest -q`
 
 ---
 
@@ -249,16 +249,32 @@ Install: `pip install -e ".[data]"`
 
 ---
 
-## What's Next
+## Recent phase completion
 
-- Regenerate the final seed-aware report after any checkpoint or evaluator change;
-  fresh checkpoint validation supplies final seed losses, while duplicate historical
-  seed logs are flagged and do not produce artificial error bars.
-- Review explicit unsupported inference/cache statuses before making serving claims.
-- Treat long-context measurements as one-sample diagnostics until repeated across
-  validation windows and seeds.
-- Complete Phase 13 packaging: freeze the report schema, archive commands and
-  environment metadata, and prepare publication/demo assets.
+### Phase 10: Large-Scale Data Pipeline ✅
+
+- FineWeb-Edu streaming preparation produced the 1B-token sharded dataset.
+
+### Phase 11: Fault-Tolerant Training ✅
+
+- `--fault-tolerant` wires atomic asynchronous checkpointing and health monitoring.
+- SHA-256 verified ring rotation retains the newest valid checkpoints.
+- Resume restores the next unprocessed step, loader cursors, progress, optimizer,
+  and RNG.
+- Fault-injection, checkpoint, monitor, trainer, and CLI seams are covered by tests.
+
+### Phase 13: Publication Asset Packaging ✅
+
+- `scripts/export_site_assets.py` emits frontend-agnostic JSON and PNG assets.
+- CKA, stable rank, aggregate and captured-context entropy, and selectable attention
+  layers/heads are included.
+- The GitHub Pages/Jekyll presentation repository remains intentionally separate.
+
+## What's next
+
+- Compose the separate GitHub Pages/Jekyll repository from `site_assets/`.
+- Keep unsupported attention/cache paths explicit in the presentation.
+- Re-export assets after any evaluator, checkpoint, or report-schema change.
 
 ---
 

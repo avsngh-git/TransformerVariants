@@ -13,10 +13,6 @@ These tests validate the system's behavior under adversarial conditions:
 Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8
 """
 
-import math
-import time
-
-import pytest
 import torch
 import torch.nn as nn
 from torch.optim import SGD
@@ -27,7 +23,6 @@ from src.training.checkpoint import (
     CheckpointRingBuffer,
 )
 from src.training.health_monitor import Action, HealthMonitor
-
 
 # ============================================================
 # Helpers
@@ -90,6 +85,23 @@ class TestCorruptedCheckpointDetected:
         assert previous == path1
         assert AtomicCheckpointWriter.verify(previous) is True
 
+    def test_latest_verified_skips_a_corrupted_newest_checkpoint(self, tmp_path):
+        """Automatic recovery chooses the newest checkpoint whose hash still verifies."""
+        ring_dir = tmp_path / "checkpoints"
+        ring_dir.mkdir()
+        writer = AtomicCheckpointWriter()
+        ring = CheckpointRingBuffer(ring_dir, capacity=3)
+        older, older_hash = _save_checkpoint(writer, ring_dir, 1000)
+        newest, newest_hash = _save_checkpoint(writer, ring_dir, 2000)
+        ring.register(1000, older, older_hash)
+        ring.register(2000, newest, newest_hash)
+
+        corrupted = bytearray(newest.read_bytes())
+        corrupted[100] ^= 0xFF
+        newest.write_bytes(corrupted)
+
+        assert ring.latest_verified() == older
+
 
 # ============================================================
 # Test 2: Partial write recovery (Requirement 6.2)
@@ -149,7 +161,7 @@ class TestNanGradientRollback:
             assert action == Action.CONTINUE
 
         # Inject NaN into loss — should trigger ROLLBACK
-        action = monitor.check(10, loss=float('nan'), grad_norm=0.5)
+        action = monitor.check(10, loss=float("nan"), grad_norm=0.5)
         assert action == Action.ROLLBACK
 
     def test_nan_grad_norm_rollback(self):
@@ -161,7 +173,7 @@ class TestNanGradientRollback:
             monitor.check(i, loss=1.0 + i * 0.001, grad_norm=0.5 + i * 0.001)
 
         # Inject NaN into grad_norm
-        action = monitor.check(10, loss=1.0, grad_norm=float('nan'))
+        action = monitor.check(10, loss=1.0, grad_norm=float("nan"))
         assert action == Action.ROLLBACK
 
     def test_inf_triggers_rollback(self):
@@ -171,7 +183,7 @@ class TestNanGradientRollback:
         for i in range(10):
             monitor.check(i, loss=1.0 + i * 0.001, grad_norm=0.5 + i * 0.001)
 
-        action = monitor.check(10, loss=float('inf'), grad_norm=0.5)
+        action = monitor.check(10, loss=float("inf"), grad_norm=0.5)
         assert action == Action.ROLLBACK
 
 
@@ -195,9 +207,7 @@ class TestLossSpikeSkip:
         # Feed stable steps to establish baseline
         stable_loss = 1.0
         for i in range(10):
-            action = monitor.check(
-                i, loss=stable_loss + i * 0.01, grad_norm=0.5 + i * 0.001
-            )
+            action = monitor.check(i, loss=stable_loss + i * 0.01, grad_norm=0.5 + i * 0.001)
             assert action == Action.CONTINUE
 
         # Inject 100x loss spike
@@ -389,9 +399,9 @@ class TestResumeAfterSimulatedCrash:
 
         # Verify fresh model has different weights
         for key in saved_model_state:
-            assert not torch.equal(
-                fresh_model.state_dict()[key], saved_model_state[key]
-            ), "Fresh model should have different random weights"
+            assert not torch.equal(fresh_model.state_dict()[key], saved_model_state[key]), (
+                "Fresh model should have different random weights"
+            )
 
         # Load checkpoint
         checkpoint_path = async_writer.latest()
@@ -407,21 +417,21 @@ class TestResumeAfterSimulatedCrash:
 
         # Verify model weights match
         for key in saved_model_state:
-            assert torch.equal(
-                fresh_model.state_dict()[key], saved_model_state[key]
-            ), f"Model weight mismatch for {key}"
+            assert torch.equal(fresh_model.state_dict()[key], saved_model_state[key]), (
+                f"Model weight mismatch for {key}"
+            )
 
         # Verify optimizer state matches
         restored_opt_state = fresh_optimizer.state_dict()
         for param_id in saved_optimizer_state.get("state", {}):
             for k, v in saved_optimizer_state["state"][param_id].items():
                 if isinstance(v, torch.Tensor):
-                    assert torch.equal(
-                        restored_opt_state["state"][param_id][k], v
-                    ), f"Optimizer state mismatch for param {param_id}/{k}"
+                    assert torch.equal(restored_opt_state["state"][param_id][k], v), (
+                        f"Optimizer state mismatch for param {param_id}/{k}"
+                    )
                 else:
-                    assert (
-                        restored_opt_state["state"][param_id][k] == v
-                    ), f"Optimizer scalar mismatch for param {param_id}/{k}"
+                    assert restored_opt_state["state"][param_id][k] == v, (
+                        f"Optimizer scalar mismatch for param {param_id}/{k}"
+                    )
 
         async_writer.shutdown()

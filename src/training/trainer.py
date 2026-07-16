@@ -48,7 +48,7 @@ class TrainConfig:
 
     # Optimization
     max_lr: float = 3e-4
-    min_lr: float = 3e-5          # 10% of max_lr
+    min_lr: float = 3e-5  # 10% of max_lr
     weight_decay: float = 0.1
     beta1: float = 0.9
     beta2: float = 0.95
@@ -56,19 +56,19 @@ class TrainConfig:
 
     # Batching
     micro_batch_size: int = 8
-    grad_accum_steps: int = 8     # effective batch = micro * accum * seq_len tokens
+    grad_accum_steps: int = 8  # effective batch = micro * accum * seq_len tokens
 
     # Schedule
     warmup_steps: int = 100
-    max_steps: int = 1000         # total training steps (override per experiment)
+    max_steps: int = 1000  # total training steps (override per experiment)
 
     # Precision
-    dtype: str = "bfloat16"       # "bfloat16", "float16", or "float32"
+    dtype: str = "bfloat16"  # "bfloat16", "float16", or "float32"
 
     # Logging & eval
-    log_interval: int = 10        # log every N steps
-    eval_interval: int = 100      # evaluate every N steps
-    eval_steps: int = 20          # number of eval batches per evaluation
+    log_interval: int = 10  # log every N steps
+    eval_interval: int = 100  # evaluate every N steps
+    eval_steps: int = 20  # number of eval batches per evaluation
 
     # Checkpointing
     checkpoint_interval: int = 500
@@ -179,9 +179,7 @@ class Trainer:
         print(f"  Micro batch size: {self.config.micro_batch_size}")
         print(f"  Grad accumulation: {self.config.grad_accum_steps}")
         # Note: seq_len is determined by the data loader, not TrainConfig
-        effective_batch_size = (
-            self.config.micro_batch_size * self.config.grad_accum_steps
-        )
+        effective_batch_size = self.config.micro_batch_size * self.config.grad_accum_steps
         print(f"  Effective batch size: {effective_batch_size}")
         print(f"  Precision: {self.config.dtype}")
         print(f"  Device: {self.device}")
@@ -225,7 +223,7 @@ class Trainer:
 
             # Checkpointing
             if self.step % self.config.checkpoint_interval == 0 and self.step > 0:
-                self._save_checkpoint()
+                self._save_checkpoint(completed_step=self.step + 1)
 
             self.step += 1
 
@@ -235,6 +233,8 @@ class Trainer:
         eval_time = time.time() - eval_start
         print(f"\nTraining complete. Final val_loss: {val_loss:.4f}")
         self._save_checkpoint()
+        if self.checkpoint_manager is not None:
+            self.checkpoint_manager.wait()
 
         total_time = time.time() - t_start
         results = {
@@ -287,7 +287,7 @@ class Trainer:
                 logits, loss, _ = self.model(x, y)
 
             # Get aux loss (zero for dense models, non-zero for MoE)
-            if hasattr(self.model, 'get_aux_loss'):
+            if hasattr(self.model, "get_aux_loss"):
                 aux_loss = self.model.get_aux_loss()
             else:
                 aux_loss = torch.tensor(0.0, device=self.device)
@@ -339,16 +339,9 @@ class Trainer:
 
                 action = self.health_monitor.check(self.step, avg_loss, grad_norm)
                 if action == Action.ROLLBACK:
-                    if self.checkpoint_manager is not None:
-                        self.checkpoint_manager.wait()
-                        rollback_path = self.checkpoint_manager.rollback()
-                        if rollback_path is not None:
-                            self.load_checkpoint(rollback_path)
-                    self.health_monitor.reset()
+                    self._rollback_to_latest_verified()
                     return metrics
-            raise FloatingPointError(
-                f"{nonfinite_reason}; optimizer step aborted"
-            ) from clip_error
+            raise FloatingPointError(f"{nonfinite_reason}; optimizer step aborted") from clip_error
 
         # Health check uses the same unclipped norm that is reported in logs.
         if self.health_monitor is not None:
@@ -363,17 +356,24 @@ class Trainer:
 
             if action == Action.ROLLBACK:
                 self.optimizer.zero_grad(set_to_none=True)
-                if self.checkpoint_manager is not None:
-                    self.checkpoint_manager.wait()
-                    rollback_path = self.checkpoint_manager.rollback()
-                    if rollback_path is not None:
-                        self.load_checkpoint(rollback_path)
-                self.health_monitor.reset()
+                self._rollback_to_latest_verified()
                 return metrics
 
         self.optimizer.step()
 
         return metrics
+
+    def _rollback_to_latest_verified(self) -> None:
+        """Restore the newest trusted checkpoint or fail without advancing."""
+        if self.checkpoint_manager is None:
+            raise RuntimeError("Rollback requested but no verified checkpoint manager is available")
+        self.checkpoint_manager.wait()
+        rollback_path = self.checkpoint_manager.rollback()
+        if rollback_path is None:
+            raise RuntimeError("Rollback requested but no verified checkpoint is available")
+        self.load_checkpoint(rollback_path)
+        if self.health_monitor is not None:
+            self.health_monitor.reset()
 
     @torch.no_grad()
     def _evaluate(self) -> float:
@@ -394,24 +394,37 @@ class Trainer:
         self.model.train()
         return total_loss / self.config.eval_steps
 
-    def _save_checkpoint(self) -> None:
-        """Save model, optimizer, and training state.
+    def _save_checkpoint(self, completed_step: int | None = None) -> None:
+        """Save model, optimizer, loader cursors, RNG, and training progress.
 
-        If a checkpoint_manager (AsyncCheckpointWriter) is provided, delegates
-        to it for async, fault-tolerant saves. Otherwise uses the original
-        internal save logic.
+        completed_step is the next scheduler/loop step after weights already
+        updated by a periodic save. Final saves use the current loop step.
         """
+        from src.utils.seed import get_rng_state
+
+        checkpoint_step = self.step if completed_step is None else completed_step
+
+        def loader_state(loader):
+            state_dict = getattr(loader, "state_dict", None)
+            return state_dict() if callable(state_dict) else None
+
+        training_state = {
+            "tokens_processed": self.tokens_processed,
+            "best_val_loss": self.best_val_loss,
+            "skipped_steps": self._skipped_steps,
+            "rng_state": get_rng_state(),
+            "train_loader_state": loader_state(self.train_loader),
+            "val_loader_state": loader_state(self.val_loader),
+        }
+
         if self.checkpoint_manager is not None:
             self.checkpoint_manager.save(
-                step=self.step,
+                step=checkpoint_step,
                 model=self.model,
                 optimizer=self.optimizer,
-                training_state={
-                    "tokens_processed": self.tokens_processed,
-                    "best_val_loss": self.best_val_loss,
-                },
+                training_state=training_state,
             )
-            print(f"  → Queued async checkpoint at step {self.step}")
+            print(f"  → Queued async checkpoint at step {checkpoint_step}")
             return
 
         ckpt_dir = Path(self.config.checkpoint_dir)
@@ -422,22 +435,25 @@ class Trainer:
         cleaned_state = {k.replace("_orig_mod.", ""): v for k, v in model_state.items()}
 
         checkpoint = {
-            "step": self.step,
+            "step": checkpoint_step,
             "tokens_processed": self.tokens_processed,
             "best_val_loss": self.best_val_loss,
+            "skipped_steps": self._skipped_steps,
+            "rng_state": training_state["rng_state"],
+            "train_loader_state": training_state["train_loader_state"],
+            "val_loader_state": training_state["val_loader_state"],
             "model_state_dict": cleaned_state,
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
 
         # Save as step-numbered file
-        path = ckpt_dir / f"checkpoint_step_{self.step:06d}.pt"
+        path = ckpt_dir / f"checkpoint_step_{checkpoint_step:06d}.pt"
         torch.save(checkpoint, path)
-
         # Also save a "latest" symlink/copy for easy resume
         latest_path = ckpt_dir / "checkpoint_latest.pt"
         torch.save(checkpoint, latest_path)
 
-        print(f"  → Saved checkpoint at step {self.step}")
+        print(f"  → Saved checkpoint at step {checkpoint_step}")
 
     def load_checkpoint(self, path: str | Path) -> None:
         """Resume training from a checkpoint.
@@ -471,8 +487,27 @@ class Trainer:
 
         self.model.load_state_dict(cleaned_state)
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        training_state = checkpoint.get("training_state", checkpoint)
         self.step = checkpoint["step"]
-        self.tokens_processed = checkpoint["tokens_processed"]
-        self.best_val_loss = checkpoint["best_val_loss"]
+        self.tokens_processed = training_state["tokens_processed"]
+        self.best_val_loss = training_state["best_val_loss"]
+        self._skipped_steps = training_state.get("skipped_steps", 0)
+        for loader, state_key in (
+            (self.train_loader, "train_loader_state"),
+            (self.val_loader, "val_loader_state"),
+        ):
+            loader_state = training_state.get(state_key)
+            if loader_state is None:
+                continue
+            load_state_dict = getattr(loader, "load_state_dict", None)
+            if not callable(load_state_dict):
+                raise RuntimeError(
+                    f"Checkpoint contains {state_key}, but loader cannot restore state"
+                )
+            load_state_dict(loader_state)
+        if rng_state := training_state.get("rng_state"):
+            from src.utils.seed import set_rng_state
+
+            set_rng_state(rng_state)
 
         print(f"Resumed from step {self.step} ({self.tokens_processed:,} tokens)")

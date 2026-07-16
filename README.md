@@ -2,8 +2,8 @@
 
 A controlled, single-GPU study of decoder-only Transformer architectures on an
 NVIDIA L4-24Q. The repository contains the full path from streamed dataset preparation
-through training, checkpoint recovery, multi-seed evaluation, diagnostic probes,
-inference benchmarking, and a self-contained offline HTML report.
+through fault-tolerant training, multi-seed evaluation, diagnostic probes, inference
+benchmarking, and frontend-agnostic assets for a separate static project site.
 
 The objective is not to train a frontier model. It is to answer smaller, more useful
 systems-and-architecture questions under a fixed hardware and training budget:
@@ -29,12 +29,12 @@ systems-and-architecture questions under a fixed hardware and training budget:
 | Main experiment | 30 runs: 10 recipes × 3 seeds |
 | Main token budget | Approximately 1B tokens per run |
 | Primary parameter range | 48.3M–68.8M active parameters |
-| Test suite | 716 passing tests |
-| Report surface | One offline, serverless HTML file |
+| Test suite | 736 passing tests |
+| Publication surface | Versioned JSON and PNG assets for a separate static site |
 
-Open the current report directly in a browser:
+Current report artifacts:
 
-- [Static HTML dashboard](reports/1B_comparison/index.html)
+- [Static-site asset manifest](reports/1B_comparison/site_assets/manifest.json)
 - [Markdown evaluation summary](reports/1B_comparison/summary.md)
 - [Detailed scientific and implementation notes](docs/project_notes.tex)
 - [Experiment contract](reports/experiment_contract.md)
@@ -270,6 +270,8 @@ python scripts/train.py \
   --eval_interval 50 \
   --checkpoint_interval 100 \
   --checkpoint_dir checkpoints/modern_debug_s42 \
+  --fault-tolerant \
+  --checkpoint-ring-size 3 \
   --seed 42
 ```
 
@@ -279,14 +281,17 @@ Useful training options include:
 - `--scale`: `debug`, `main`, or `stretch`.
 - `--dtype`: `bfloat16`, `float16`, or `float32`.
 - `--compile`: enable `torch.compile` for compatible dense recipes.
-- `--resume PATH`: restore model, optimizer, scheduler, scaler, RNG, and progress state.
+- `--fault-tolerant`: enable health monitoring plus asynchronous, atomic, verified
+  checkpoint rotation.
+- `--checkpoint-ring-size N`: retain the newest `N` verified checkpoints.
+- `--resume latest`: recover from the newest checkpoint whose SHA-256 matches the
+  persisted ring metadata. An explicit path is also accepted.
 - `--checkpoint_dir PATH`: choose a stable output directory for scripted sweeps.
 
 ### 3. Evaluate checkpoints
 
 The evaluator loads logs and weights, computes fresh validation metrics and probes,
-aggregates seeds, generates PNGs and raw data, writes `summary.md`, and builds
-`index.html`.
+aggregates seeds, generates publication PNGs and raw data, and writes `summary.md`.
 
 ```bash
 python scripts/evaluate.py \
@@ -365,20 +370,26 @@ sample standard deviation across the three seed means. Serving measurements stil
 one representative checkpoint and should not be interpreted as seed-aggregated timing
 claims.
 
-## Static HTML dashboard
+## Static-site assets
 
-Streamlit is no longer the supported reporting surface. The report generator produces
-one portable HTML file containing its CSS, JavaScript, JSON data, metadata, benchmark
-statuses, and PNG plots. It requires no Python server, CDN, network connection, or
-tracking runtime.
+The publication site will live in a separate GitHub Pages/Jekyll repository. This
+repository exports the versioned data and images that site needs; it deliberately does
+not prescribe HTML, CSS, JavaScript, or a Jekyll theme.
 
 ```bash
-python scripts/build_dashboard.py --report reports/1B_comparison
+python scripts/export_site_assets.py reports/1B_comparison \
+  --with-attention \
+  --data-dir data/processed/fineweb-1B \
+  --context-length 64
 ```
 
-Then open [`reports/1B_comparison/index.html`](reports/1B_comparison/index.html)
-directly in a browser. Rebuild it after changing `raw/metrics.json`,
-`raw/benchmarks.json`, metadata, or plot files.
+The resulting `site_assets/` directory contains strict JSON for CKA, stable rank,
+aggregate attention entropy, captured-context entropy for each supported softmax
+variant, and selectable per-layer/per-head attention patterns, plus PNG fallbacks.
+Full-attention, SDPA, ALiBi, GQA, SWA, and MoE recipes are supported. V5 is
+recorded as unsupported for pairwise softmax heatmaps because causal linear attention
+does not define that matrix. The older self-contained dashboard remains a local legacy
+artifact and is not the publication target.
 
 ## Evaluation outputs
 
@@ -386,10 +397,10 @@ An evaluation report contains:
 
 ```text
 reports/<experiment>/
-├── index.html               # Self-contained dashboard
 ├── summary.md               # Human-readable comparison tables
 ├── metadata.json            # Environment, checkpoints, warnings, provenance
 ├── plots/                   # Publication-oriented PNG figures
+├── site_assets/             # Copyable JSON/PNG bundle for GitHub Pages/Jekyll
 └── raw/
     ├── metrics.csv          # Flat checkpoint metrics
     ├── metrics.json         # Versioned aggregate + per-seed schema
@@ -416,10 +427,10 @@ ruff check \
   src/evaluation/comparison.py \
   src/evaluation/benchmarks.py \
   src/evaluation/visualizations.py \
-  src/viz/html_dashboard.py \
+  src/evaluation/site_assets.py \
   scripts/evaluate.py \
   scripts/benchmark_inference.py \
-  scripts/build_dashboard.py
+  scripts/export_site_assets.py
 ```
 Repository-wide Ruff currently also scans the legacy Streamlit surface and older test
 modules that retain known lint debt, so it is not yet used as a clean global gate.
@@ -433,7 +444,7 @@ The suite covers, among other things:
 - checkpoint atomicity, integrity, resume, rollback, and fault injection;
 - parameter and FLOP accounting;
 - multi-seed aggregation and duplicate-history handling;
-- probes, inference benchmarks, report generation, and offline HTML integrity.
+- probes, inference benchmarks, report generation, and static-site asset integrity.
 
 ## Project status
 
@@ -442,13 +453,14 @@ The suite covers, among other things:
 | 00–03 | Contract, repository, data, vanilla model | Complete |
 | 04–07 | Training system and architecture variants | Complete |
 | 08–10 | Evaluation, static reporting, large-scale data | Complete |
-| 11 | Fault-tolerant training and recovery hardening | Partial |
+| 11 | Fault-tolerant training and recovery hardening | Complete |
 | 12 | Main controlled benchmark | Complete |
-| 13 | Final report, packaging, and demo assets | In progress |
+| 13 | Final report and reusable publication assets | Complete in this repository |
 
-The remaining work is primarily packaging and publication work. Fault-tolerance code
-and tests exist, but Phase 11 remains marked partial until every planned recovery and
-operational scenario in the experiment contract is closed.
+The remaining publication work is intentionally external: choose the Jekyll theme and
+compose the GitHub Pages repository around the exported bundle. This repository now
+contains the experiment, recovery path, report schema, scientific notes, and reusable
+visualization inputs needed for that presentation layer.
 
 ## Adding a new recipe
 

@@ -27,16 +27,16 @@ def writer():
 def sample_state_dict():
     """Create a sample state dict resembling a model checkpoint."""
     return {
-        'model': {
-            'layer1.weight': torch.randn(64, 128),
-            'layer1.bias': torch.randn(64),
-            'layer2.weight': torch.randn(32, 64),
+        "model": {
+            "layer1.weight": torch.randn(64, 128),
+            "layer1.bias": torch.randn(64),
+            "layer2.weight": torch.randn(32, 64),
         },
-        'optimizer': {
-            'step': 100,
-            'lr': 3e-4,
+        "optimizer": {
+            "step": 100,
+            "lr": 3e-4,
         },
-        'step': 42,
+        "step": 42,
     }
 
 
@@ -45,42 +45,42 @@ class TestAtomicCheckpointWriterSave:
 
     def test_save_creates_checkpoint_file(self, writer, sample_state_dict, tmp_path):
         """Saving should create the checkpoint file at the target path."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         writer.save(sample_state_dict, path)
         assert path.exists()
 
     def test_save_creates_sha256_sidecar(self, writer, sample_state_dict, tmp_path):
         """Saving should create a .sha256 sidecar file alongside the checkpoint."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         writer.save(sample_state_dict, path)
-        hash_path = Path(str(path) + '.sha256')
+        hash_path = Path(str(path) + ".sha256")
         assert hash_path.exists()
 
     def test_save_returns_sha256_hash(self, writer, sample_state_dict, tmp_path):
         """Save should return a valid 64-char hex SHA-256 hash."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         result = writer.save(sample_state_dict, path)
         assert len(result) == 64
-        assert all(c in '0123456789abcdef' for c in result)
+        assert all(c in "0123456789abcdef" for c in result)
 
     def test_save_hash_matches_sidecar(self, writer, sample_state_dict, tmp_path):
         """The returned hash should match what's stored in the sidecar file."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         returned_hash = writer.save(sample_state_dict, path)
-        hash_path = Path(str(path) + '.sha256')
+        hash_path = Path(str(path) + ".sha256")
         stored_hash = hash_path.read_text().strip()
         assert returned_hash == stored_hash
 
     def test_save_no_temp_file_remains(self, writer, sample_state_dict, tmp_path):
         """After a successful save, no .pt.tmp file should remain."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         writer.save(sample_state_dict, path)
-        temp_path = path.with_suffix('.pt.tmp')
+        temp_path = path.with_suffix(".pt.tmp")
         assert not temp_path.exists()
 
     def test_save_temp_file_in_same_directory(self, writer, sample_state_dict, tmp_path):
         """Temp file should be created in the same directory as the target."""
-        path = tmp_path / 'subdir' / 'checkpoint.pt'
+        path = tmp_path / "subdir" / "checkpoint.pt"
         path.parent.mkdir(parents=True)
 
         # Patch open to check that the temp file is in the right directory
@@ -88,11 +88,11 @@ class TestAtomicCheckpointWriterSave:
         temp_paths_seen = []
 
         def tracking_open(p, *args, **kwargs):
-            if str(p).endswith('.pt.tmp'):
+            if str(p).endswith(".pt.tmp"):
                 temp_paths_seen.append(Path(p))
             return original_open(p, *args, **kwargs)
 
-        with patch('builtins.open', side_effect=tracking_open):
+        with patch("builtins.open", side_effect=tracking_open):
             writer.save(sample_state_dict, path)
 
         assert len(temp_paths_seen) == 1
@@ -104,25 +104,25 @@ class TestAtomicCheckpointWriterRoundTrip:
 
     def test_round_trip_preserves_tensors(self, writer, sample_state_dict, tmp_path):
         """Saving and loading should produce equivalent tensors."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         writer.save(sample_state_dict, path)
         loaded = torch.load(path, weights_only=False)
 
-        for key in ['layer1.weight', 'layer1.bias', 'layer2.weight']:
+        for key in ["layer1.weight", "layer1.bias", "layer2.weight"]:
             assert torch.equal(
-                sample_state_dict['model'][key],
-                loaded['model'][key],
+                sample_state_dict["model"][key],
+                loaded["model"][key],
             )
 
     def test_round_trip_preserves_scalars(self, writer, sample_state_dict, tmp_path):
         """Saving and loading should preserve scalar values."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         writer.save(sample_state_dict, path)
         loaded = torch.load(path, weights_only=False)
 
-        assert loaded['step'] == 42
-        assert loaded['optimizer']['step'] == 100
-        assert loaded['optimizer']['lr'] == 3e-4
+        assert loaded["step"] == 42
+        assert loaded["optimizer"]["step"] == 100
+        assert loaded["optimizer"]["lr"] == 3e-4
 
 
 class TestAtomicCheckpointWriterVerify:
@@ -130,13 +130,13 @@ class TestAtomicCheckpointWriterVerify:
 
     def test_verify_valid_checkpoint(self, writer, sample_state_dict, tmp_path):
         """verify() should return True for an uncorrupted checkpoint."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         writer.save(sample_state_dict, path)
         assert AtomicCheckpointWriter.verify(path) is True
 
     def test_verify_corrupted_checkpoint(self, writer, sample_state_dict, tmp_path):
         """verify() should return False when checkpoint bytes are modified."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         writer.save(sample_state_dict, path)
 
         # Corrupt the checkpoint by flipping some bytes
@@ -149,16 +149,16 @@ class TestAtomicCheckpointWriterVerify:
 
     def test_verify_missing_checkpoint(self, tmp_path):
         """verify() should return False when the checkpoint file doesn't exist."""
-        path = tmp_path / 'nonexistent.pt'
+        path = tmp_path / "nonexistent.pt"
         assert AtomicCheckpointWriter.verify(path) is False
 
     def test_verify_missing_hash_file_recomputes(self, writer, sample_state_dict, tmp_path):
         """verify() should recompute and write hash if .sha256 file is missing."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         writer.save(sample_state_dict, path)
 
         # Delete the hash file
-        hash_path = Path(str(path) + '.sha256')
+        hash_path = Path(str(path) + ".sha256")
         hash_path.unlink()
         assert not hash_path.exists()
 
@@ -174,7 +174,7 @@ class TestAtomicCheckpointWriterComputeHash:
 
     def test_compute_hash_is_deterministic(self, writer, sample_state_dict, tmp_path):
         """Computing hash twice on the same file should give the same result."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         writer.save(sample_state_dict, path)
 
         hash1 = AtomicCheckpointWriter.compute_hash(path)
@@ -183,23 +183,25 @@ class TestAtomicCheckpointWriterComputeHash:
 
     def test_compute_hash_format(self, writer, sample_state_dict, tmp_path):
         """Hash should be a 64-char lowercase hex string (SHA-256)."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
         writer.save(sample_state_dict, path)
 
         h = AtomicCheckpointWriter.compute_hash(path)
         assert len(h) == 64
         assert h == h.lower()
-        assert all(c in '0123456789abcdef' for c in h)
+        assert all(c in "0123456789abcdef" for c in h)
 
     def test_compute_hash_different_for_different_files(self, writer, tmp_path):
         """Different file contents should produce different hashes."""
-        path1 = tmp_path / 'a.pt'
-        path2 = tmp_path / 'b.pt'
+        path1 = tmp_path / "a.pt"
+        path2 = tmp_path / "b.pt"
 
-        writer.save({'x': torch.tensor([1.0])}, path1)
-        writer.save({'x': torch.tensor([2.0])}, path2)
+        writer.save({"x": torch.tensor([1.0])}, path1)
+        writer.save({"x": torch.tensor([2.0])}, path2)
 
-        assert AtomicCheckpointWriter.compute_hash(path1) != AtomicCheckpointWriter.compute_hash(path2)
+        assert AtomicCheckpointWriter.compute_hash(path1) != AtomicCheckpointWriter.compute_hash(
+            path2
+        )
 
 
 class TestAtomicCheckpointWriterFailure:
@@ -207,7 +209,7 @@ class TestAtomicCheckpointWriterFailure:
 
     def test_temp_file_cleaned_up_on_torch_save_failure(self, writer, tmp_path):
         """If torch.save fails, the temp file should be cleaned up."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
 
         # Create an object that fails to pickle
         class Unpicklable:
@@ -215,10 +217,10 @@ class TestAtomicCheckpointWriterFailure:
                 raise RuntimeError("Cannot pickle")
 
         with pytest.raises(RuntimeError, match="Cannot pickle"):
-            writer.save({'bad': Unpicklable()}, path)
+            writer.save({"bad": Unpicklable()}, path)
 
         # Temp file should not remain
-        temp_path = path.with_suffix('.pt.tmp')
+        temp_path = path.with_suffix(".pt.tmp")
         assert not temp_path.exists()
 
         # Final file should not exist either
@@ -226,13 +228,13 @@ class TestAtomicCheckpointWriterFailure:
 
     def test_temp_file_cleaned_up_on_fsync_failure(self, writer, sample_state_dict, tmp_path):
         """If fsync fails, the temp file should be cleaned up."""
-        path = tmp_path / 'checkpoint.pt'
+        path = tmp_path / "checkpoint.pt"
 
-        with patch('os.fsync', side_effect=OSError("Disk full")):
+        with patch("os.fsync", side_effect=OSError("Disk full")):
             with pytest.raises(OSError, match="Disk full"):
                 writer.save(sample_state_dict, path)
 
-        temp_path = path.with_suffix('.pt.tmp')
+        temp_path = path.with_suffix(".pt.tmp")
         assert not temp_path.exists()
         assert not path.exists()
 
@@ -241,7 +243,7 @@ class TestAtomicCheckpointWriterFailure:
 # Tests for CheckpointRingBuffer
 # ============================================================
 
-from src.training.checkpoint import CheckpointRingBuffer, RingEntry
+from src.training.checkpoint import CheckpointRingBuffer
 
 
 @pytest.fixture
@@ -325,7 +327,7 @@ class TestCheckpointRingBufferCapacity:
 
         path1, sha1 = _create_checkpoint(ring_dir, 1000, writer)
         ring.register(1000, path1, sha1)
-        sidecar1 = Path(str(path1) + '.sha256')
+        sidecar1 = Path(str(path1) + ".sha256")
         assert sidecar1.exists()
 
         path2, sha2 = _create_checkpoint(ring_dir, 2000, writer)
@@ -753,6 +755,7 @@ class TestAsyncCheckpointWriterWait:
         writer.save(step=100, model=model, optimizer=optimizer, training_state={})
         # Remove the checkpoint dir to trigger an error during background save
         import shutil
+
         shutil.rmtree(checkpoint_dir)
 
         with pytest.raises(Exception):
@@ -879,3 +882,11 @@ class TestAsyncCheckpointWriterRingBuffer:
         writer.wait()
 
         assert writer.rollback() == ring.latest()
+
+
+def test_trusted_verify_rejects_checkpoint_without_expected_digest(tmp_path):
+    path = tmp_path / "legacy.pt"
+    torch.save({"step": 1}, path)
+
+    assert AtomicCheckpointWriter.verify_trusted(path) is False
+    assert not Path(str(path) + ".sha256").exists()

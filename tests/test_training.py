@@ -134,8 +134,14 @@ class TestTrainingIntegration:
         """A short training run should reduce loss (model is learning)."""
         # Create tiny model
         config = ModelConfig(
-            n_layer=2, d_model=64, n_head=4, vocab_size=256,
-            seq_len=32, dropout=0.0, bias=False, tie_embeddings=True,
+            n_layer=2,
+            d_model=64,
+            n_head=4,
+            vocab_size=256,
+            seq_len=32,
+            dropout=0.0,
+            bias=False,
+            tie_embeddings=True,
         )
         model = VanillaTransformer(config)
 
@@ -171,7 +177,8 @@ class TestTrainingIntegration:
         run_logger = RunLogger(tmp_path / "run", config={"variant": "test", "scale": "debug"})
 
         trainer = Trainer(
-            model, train_config,
+            model,
+            train_config,
             train_loader=loader,
             val_loader=loader,
             run_logger=run_logger,
@@ -198,8 +205,14 @@ class TestModernTrainingIntegration:
         """A short training run with V1 should reduce loss (model is learning)."""
         # Create tiny V1 model (same dimensions as V0 test for comparability)
         config = ModelConfig(
-            n_layer=2, d_model=64, n_head=4, vocab_size=256,
-            seq_len=32, dropout=0.0, bias=False, tie_embeddings=True,
+            n_layer=2,
+            d_model=64,
+            n_head=4,
+            vocab_size=256,
+            seq_len=32,
+            dropout=0.0,
+            bias=False,
+            tie_embeddings=True,
         )
         model = ModernTransformer(config)
 
@@ -235,7 +248,8 @@ class TestModernTrainingIntegration:
         run_logger = RunLogger(tmp_path / "run", config={"variant": "test", "scale": "debug"})
 
         trainer = Trainer(
-            model, train_config,
+            model,
+            train_config,
             train_loader=loader,
             val_loader=loader,
             run_logger=run_logger,
@@ -307,3 +321,19 @@ def test_nonfinite_gradient_fails_before_optimizer_step(tmp_path):
     for name, parameter in model.named_parameters():
         assert torch.isfinite(parameter).all()
         torch.testing.assert_close(parameter, before[name])
+
+
+def test_sharded_loader_state_restores_exact_next_batch(tmp_path):
+    tokens = np.arange(256, dtype=np.uint16)
+    tokens.tofile(tmp_path / "train_0000.bin")
+    original = ShardedDataLoader(tmp_path, batch_size=1, seq_len=8, split="train")
+    original.next_batch()
+    state = original.state_dict()
+    expected = original.next_batch()
+
+    restored = ShardedDataLoader(tmp_path, batch_size=1, seq_len=8, split="train")
+    restored.load_state_dict(state)
+    actual = restored.next_batch()
+
+    assert torch.equal(actual[0], expected[0])
+    assert torch.equal(actual[1], expected[1])

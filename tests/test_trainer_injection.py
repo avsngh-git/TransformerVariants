@@ -11,15 +11,19 @@ Validates Requirement 7.4 (consolidate-logging):
 """
 
 import json
+import random
 from pathlib import Path
 
+import pytest
 import torch
 
 from src.models.config import ModelConfig
 from src.models.vanilla_transformer import VanillaTransformer
-from src.training.synthetic_loader import SyntheticLoader
-from src.training.trainer import Trainer, TrainConfig
+from src.training.checkpoint import AsyncCheckpointWriter, CheckpointRingBuffer
 from src.training.run_logger import RunLogger
+from src.training.synthetic_loader import SyntheticLoader
+from src.training.trainer import TrainConfig, Trainer
+from src.utils.seed import get_rng_state, set_seed
 
 
 def test_trainer_injection_with_list_based_loader(tmp_path):
@@ -106,9 +110,7 @@ def test_trainer_delegates_logging_to_run_logger(tmp_path):
 
     Validates: Requirement 7.4
     """
-    model_config = ModelConfig(
-        n_layer=2, d_model=64, n_head=2, vocab_size=256, seq_len=32
-    )
+    model_config = ModelConfig(n_layer=2, d_model=64, n_head=2, vocab_size=256, seq_len=32)
     model = VanillaTransformer(model_config)
 
     batch_size = 4
@@ -179,3 +181,188 @@ def test_trainer_requires_run_logger():
     Validates: Requirement 7.4
     """
     assert not hasattr(Trainer, "set_run_logger"), "Trainer should not have set_run_logger method"
+
+
+def test_trainer_resumes_fault_tolerant_checkpoint_with_rng_state(tmp_path):
+    """Trainer accepts the fault-tolerant checkpoint schema and restores progress and RNG."""
+    model_config = ModelConfig(n_layer=1, d_model=32, n_head=2, vocab_size=64, seq_len=8)
+    batches = [
+        (
+            torch.randint(0, 64, (2, 8), dtype=torch.int64),
+            torch.randint(0, 64, (2, 8), dtype=torch.int64),
+        )
+    ]
+    trainer = Trainer(
+        VanillaTransformer(model_config),
+        TrainConfig(max_steps=1, checkpoint_dir=str(tmp_path), dtype="float32"),
+        train_loader=SyntheticLoader(batches),
+        val_loader=SyntheticLoader(batches),
+        run_logger=RunLogger(tmp_path / "run", config={"variant": "test"}),
+        device="cpu",
+    )
+    trainer.step = 17
+    trainer.tokens_processed = 12_345
+    trainer.best_val_loss = 2.75
+
+    set_seed(2026)
+    saved_rng_state = get_rng_state()
+    expected_python_random = random.random()
+    expected_torch_random = torch.rand(3)
+
+    checkpoint_dir = tmp_path / "fault_tolerant"
+    ring = CheckpointRingBuffer(checkpoint_dir, capacity=3)
+    writer = AsyncCheckpointWriter(ring, checkpoint_dir)
+    writer.save(
+        step=trainer.step,
+        model=trainer.model,
+        optimizer=trainer.optimizer,
+        training_state={
+            "tokens_processed": trainer.tokens_processed,
+            "best_val_loss": trainer.best_val_loss,
+            "rng_state": saved_rng_state,
+        },
+    )
+    writer.wait()
+
+    trainer.step = 0
+    trainer.tokens_processed = 0
+    trainer.best_val_loss = float("inf")
+    set_seed(7)
+    trainer.load_checkpoint(writer.latest())
+
+    assert trainer.step == 17
+    assert trainer.tokens_processed == 12_345
+    assert trainer.best_val_loss == 2.75
+    assert random.random() == expected_python_random
+    assert torch.equal(torch.rand(3), expected_torch_random)
+    writer.shutdown()
+
+
+def test_fault_tolerant_training_returns_with_durable_resumable_checkpoint(tmp_path):
+    """Completed training flushes its async checkpoint and preserves RNG continuity."""
+    model_config = ModelConfig(n_layer=1, d_model=32, n_head=2, vocab_size=64, seq_len=8)
+    batches = [
+        (
+            torch.randint(0, 64, (2, 8), dtype=torch.int64),
+            torch.randint(0, 64, (2, 8), dtype=torch.int64),
+        )
+    ]
+    train_config = TrainConfig(
+        max_steps=1,
+        eval_steps=1,
+        grad_accum_steps=1,
+        checkpoint_interval=10,
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        dtype="float32",
+    )
+    ring = CheckpointRingBuffer(Path(train_config.checkpoint_dir), capacity=3)
+    writer = AsyncCheckpointWriter(ring, Path(train_config.checkpoint_dir))
+    trainer = Trainer(
+        VanillaTransformer(model_config),
+        train_config,
+        train_loader=SyntheticLoader(batches),
+        val_loader=SyntheticLoader(batches),
+        run_logger=RunLogger(tmp_path / "run", config={"variant": "test"}),
+        checkpoint_manager=writer,
+        device="cpu",
+    )
+
+    set_seed(2026)
+    trainer.train()
+    checkpoint_path = writer.latest()
+    assert checkpoint_path is not None
+    assert checkpoint_path.exists()
+    expected_python_random = random.random()
+    expected_torch_random = torch.rand(3)
+
+    resumed = Trainer(
+        VanillaTransformer(model_config),
+        train_config,
+        train_loader=SyntheticLoader(batches),
+        val_loader=SyntheticLoader(batches),
+        run_logger=RunLogger(tmp_path / "resumed", config={"variant": "test"}),
+        device="cpu",
+    )
+    set_seed(7)
+    resumed.load_checkpoint(checkpoint_path)
+
+    assert resumed.step == trainer.step
+    assert resumed.tokens_processed == trainer.tokens_processed
+    assert resumed.train_loader._idx == trainer.train_loader._idx
+    assert resumed.val_loader._idx == trainer.val_loader._idx
+    assert random.random() == expected_python_random
+    assert torch.equal(torch.rand(3), expected_torch_random)
+    writer.shutdown()
+
+
+def test_periodic_fault_tolerant_checkpoint_resumes_at_next_step(tmp_path):
+    model_config = ModelConfig(n_layer=1, d_model=16, n_head=2, vocab_size=32, seq_len=4)
+    batches = [
+        (
+            torch.randint(0, 32, (1, 4), dtype=torch.int64),
+            torch.randint(0, 32, (1, 4), dtype=torch.int64),
+        )
+    ]
+    train_config = TrainConfig(
+        max_steps=2,
+        eval_steps=1,
+        grad_accum_steps=1,
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        dtype="float32",
+    )
+    writer = AsyncCheckpointWriter(
+        CheckpointRingBuffer(Path(train_config.checkpoint_dir), capacity=3),
+        Path(train_config.checkpoint_dir),
+    )
+    trainer = Trainer(
+        VanillaTransformer(model_config),
+        train_config,
+        train_loader=SyntheticLoader(batches),
+        val_loader=SyntheticLoader(batches),
+        run_logger=RunLogger(tmp_path / "run", config={}),
+        checkpoint_manager=writer,
+        device="cpu",
+    )
+
+    trainer._training_step()
+    trainer._save_checkpoint(completed_step=trainer.step + 1)
+    writer.wait()
+
+    resumed = Trainer(
+        VanillaTransformer(model_config),
+        train_config,
+        train_loader=SyntheticLoader(batches),
+        val_loader=SyntheticLoader(batches),
+        run_logger=RunLogger(tmp_path / "resume", config={}),
+        device="cpu",
+    )
+    resumed.load_checkpoint(writer.latest())
+
+    assert resumed.step == 1
+    writer.shutdown()
+
+
+def test_rollback_without_verified_checkpoint_fails_safely(tmp_path):
+    model_config = ModelConfig(n_layer=1, d_model=16, n_head=2, vocab_size=32, seq_len=4)
+    batches = [
+        (
+            torch.randint(0, 32, (1, 4), dtype=torch.int64),
+            torch.randint(0, 32, (1, 4), dtype=torch.int64),
+        )
+    ]
+    checkpoint_dir = tmp_path / "empty"
+    writer = AsyncCheckpointWriter(CheckpointRingBuffer(checkpoint_dir, capacity=3), checkpoint_dir)
+    trainer = Trainer(
+        VanillaTransformer(model_config),
+        TrainConfig(max_steps=1, eval_steps=1, dtype="float32"),
+        train_loader=SyntheticLoader(batches),
+        val_loader=SyntheticLoader(batches),
+        run_logger=RunLogger(tmp_path / "run", config={}),
+        checkpoint_manager=writer,
+        device="cpu",
+    )
+
+    with pytest.raises(RuntimeError, match="no verified checkpoint"):
+        trainer._rollback_to_latest_verified()
+
+    writer.shutdown()

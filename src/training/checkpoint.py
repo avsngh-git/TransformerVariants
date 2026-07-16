@@ -57,10 +57,10 @@ class AtomicCheckpointWriter:
             Temp file is cleaned up on failure.
         """
         path = Path(path)
-        temp_path = path.with_suffix('.pt.tmp')
+        temp_path = path.with_suffix(".pt.tmp")
         try:
             # Step 1: Write to temporary file
-            with open(temp_path, 'wb') as f:
+            with open(temp_path, "wb") as f:
                 torch.save(state_dict, f)
                 f.flush()
                 # Step 2: Force OS buffers to disk
@@ -69,7 +69,7 @@ class AtomicCheckpointWriter:
             os.rename(temp_path, path)
             # Step 4: Compute and write integrity hash
             sha256 = self.compute_hash(path)
-            hash_path = Path(str(path) + '.sha256')
+            hash_path = Path(str(path) + ".sha256")
             hash_path.write_text(sha256)
             return sha256
         except Exception:
@@ -98,7 +98,7 @@ class AtomicCheckpointWriter:
         if not path.exists():
             return False
 
-        hash_path = Path(str(path) + '.sha256')
+        hash_path = Path(str(path) + ".sha256")
 
         if not hash_path.exists():
             # Missing hash file: recompute and write it
@@ -109,6 +109,23 @@ class AtomicCheckpointWriter:
         stored_hash = hash_path.read_text().strip()
         computed_hash = AtomicCheckpointWriter.compute_hash(path)
         return computed_hash == stored_hash
+
+    @staticmethod
+    def verify_trusted(path: Path) -> bool:
+        """Verify only when an expected digest already exists.
+
+        Unlike :meth:`verify`, this method never enrolls a legacy file by
+        generating a digest from the bytes being checked.
+        """
+        path = Path(path)
+        hash_path = Path(str(path) + ".sha256")
+        if not path.exists() or not hash_path.exists():
+            return False
+        try:
+            stored_hash = hash_path.read_text().strip()
+            return AtomicCheckpointWriter.compute_hash(path) == stored_hash
+        except OSError:
+            return False
 
     @staticmethod
     def compute_hash(path: Path) -> str:
@@ -125,7 +142,7 @@ class AtomicCheckpointWriter:
         """
         path = Path(path)
         sha256 = hashlib.sha256()
-        with open(path, 'rb') as f:
+        with open(path, "rb") as f:
             while True:
                 chunk = f.read(65536)  # 64KB chunks
                 if not chunk:
@@ -203,8 +220,7 @@ class CheckpointRingBuffer:
         # Verify the new checkpoint before adding
         if not AtomicCheckpointWriter.verify(abs_path):
             raise ValueError(
-                f"Checkpoint verification failed for {abs_path}. "
-                "Not adding to ring buffer."
+                f"Checkpoint verification failed for {abs_path}. Not adding to ring buffer."
             )
 
         # Evict oldest if at capacity (delete from disk after verification)
@@ -214,7 +230,7 @@ class CheckpointRingBuffer:
             if oldest_path.exists():
                 oldest_path.unlink()
             # Also remove the .sha256 sidecar
-            oldest_hash_path = Path(str(oldest_path) + '.sha256')
+            oldest_hash_path = Path(str(oldest_path) + ".sha256")
             if oldest_hash_path.exists():
                 oldest_hash_path.unlink()
             self._entries.pop(0)
@@ -254,6 +270,14 @@ class CheckpointRingBuffer:
         latest_entry = self._entries[-1]
         return self._checkpoint_dir / latest_entry.path
 
+    def latest_verified(self) -> Path | None:
+        """Return the newest checkpoint whose contents match the ring metadata hash."""
+        for entry in reversed(self._entries):
+            path = self._checkpoint_dir / entry.path
+            if path.exists() and AtomicCheckpointWriter.compute_hash(path) == entry.sha256:
+                return path
+        return None
+
     def rollback_to(self, n_back: int = 1) -> Path | None:
         """Return path to the nth most recent checkpoint.
 
@@ -288,7 +312,7 @@ class CheckpointRingBuffer:
         }
         metadata_path = self._checkpoint_dir / self.METADATA_FILENAME
         # Write atomically via temp file
-        temp_path = metadata_path.with_suffix('.json.tmp')
+        temp_path = metadata_path.with_suffix(".json.tmp")
         try:
             temp_path.write_text(json.dumps(metadata, indent=2))
             os.rename(temp_path, metadata_path)
@@ -334,10 +358,10 @@ def _optimizer_state_to_cpu(opt_state_dict: dict) -> dict:
     """
     cpu_state: dict = {}
     for key, value in opt_state_dict.items():
-        if key == 'state':
-            cpu_state['state'] = {}
+        if key == "state":
+            cpu_state["state"] = {}
             for param_id, param_state in value.items():
-                cpu_state['state'][param_id] = {
+                cpu_state["state"][param_id] = {
                     k: v.cpu().clone() if isinstance(v, torch.Tensor) else v
                     for k, v in param_state.items()
                 }
@@ -397,9 +421,7 @@ class AsyncCheckpointWriter:
         self.wait()
 
         # CPU snapshot: copy state_dicts to CPU tensors
-        model_state_cpu = {
-            k: v.cpu().clone() for k, v in model.state_dict().items()
-        }
+        model_state_cpu = {k: v.cpu().clone() for k, v in model.state_dict().items()}
         optimizer_state_cpu = _optimizer_state_to_cpu(optimizer.state_dict())
 
         # Build the checkpoint path
@@ -436,10 +458,10 @@ class AsyncCheckpointWriter:
             path: Target path for the checkpoint file.
         """
         checkpoint_dict = {
-            'step': step,
-            'model_state_dict': model_state,
-            'optimizer_state_dict': optimizer_state,
-            'training_state': training_state,
+            "step": step,
+            "model_state_dict": model_state,
+            "optimizer_state_dict": optimizer_state,
+            "training_state": training_state,
         }
 
         # Atomic write to disk
@@ -479,7 +501,7 @@ class AsyncCheckpointWriter:
             Absolute path to the latest verified checkpoint, or None if
             no checkpoints are available.
         """
-        return self._ring_buffer.latest()
+        return self._ring_buffer.latest_verified()
 
     def shutdown(self) -> None:
         """Shut down the background thread pool.

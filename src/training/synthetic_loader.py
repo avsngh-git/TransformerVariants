@@ -21,3 +21,16 @@ class SyntheticLoader:
         batch = self.batches[self._idx % len(self.batches)]
         self._idx += 1
         return batch
+
+    def state_dict(self) -> dict[str, int]:
+        """Return the current batch cursor for resume tests."""
+        return {"version": 1, "index": self._idx}
+
+    def load_state_dict(self, state: dict[str, int]) -> None:
+        """Restore a cursor produced by :meth:`state_dict`."""
+        if state.get("version") != 1:
+            raise ValueError("Unsupported SyntheticLoader state version")
+        index = state.get("index")
+        if not isinstance(index, int) or index < 0:
+            raise ValueError("Invalid SyntheticLoader index")
+        self._idx = index

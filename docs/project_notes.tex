@@ -2967,6 +2967,84 @@ interface, while the HTML is a portable presentation artifact.
 
 
 % =============================================================================
+\section{Operational Hardening and Static-Site Assets}
+
+\subsection{Fault-tolerant training path}
+
+The fault-tolerance components described earlier are now connected to the public
+training command.  Passing \texttt{--fault-tolerant} constructs a
+\texttt{CheckpointRingBuffer}, \texttt{AsyncCheckpointWriter}, and
+\texttt{HealthMonitor} and injects them into the trainer.  The operating sequence is
+therefore:
+\begin{enumerate}
+    \item copy model and optimizer state to CPU-owned tensors;
+    \item serialize in a single background worker to a temporary file;
+    \item flush the file with \texttt{fsync}, atomically rename it, and compute SHA-256;
+    \item register the checkpoint only after integrity verification; and
+    \item evict the oldest ring member only after the replacement is valid.
+\end{enumerate}
+Training waits for the final queued save before returning, so command completion is a
+durability boundary rather than merely a request to save.
+
+The fault-tolerant schema stores model and optimizer state plus token count, best
+validation loss, skipped-step count, exact training and validation loader cursors,
+and Python, PyTorch, and CUDA random-number generator state.  Resume accepts either
+an explicit verified path or
+\texttt{--resume latest}.  The latter scans the persisted ring from newest to oldest
+and compares each file against the hash in ring metadata; a bit-flipped newest file is
+therefore skipped in favor of the newest valid predecessor.  This distinction matters:
+fault-tolerant explicit resume requires a pre-existing SHA-256 sidecar instead of
+trusting bytes without a previously persisted expected digest, and automatic ring
+recovery checks the independent digest recorded in ring metadata.
+
+The health monitor observes the un-clipped gradient norm and loss.  Non-finite values
+abort the optimizer step before clipping can contaminate otherwise finite gradients.
+Finite statistical spikes skip the step; repeated spikes escalate to a rollback.  A
+rollback reloads model and optimizer state, progress counters, loader cursors, and RNG
+state, then resets the monitor window.  Fault-injection tests exercise corruption,
+interrupted
+writes, NaN/Inf handling, spike escalation, rotation, asynchronous completion, and
+crash-style state restoration.  Snapshot latency remains hardware dependent, so the
+original 200 ms target is treated as an operational measurement to report on the
+deployment GPU rather than a cross-platform guarantee.
+
+\subsection{Portable model-internals export}
+
+The publication frontend will live in a separate GitHub Pages/Jekyll repository.
+Consequently, \texttt{scripts/export\_site\_assets.py} emits a frontend-agnostic
+bundle instead of another application runtime.  Its manifest points to strict JSON
+containing cross-seed stable-rank curves, adjacent and full CKA matrices, attention
+entropy from the aggregate probe where available, captured-context attention entropy
+for every supported softmax variant, and attention-pattern records by layer and head.
+PNG curves and mean-head heatmaps provide static fallbacks.  A site can therefore
+implement interactive
+variant, layer, and head selectors without importing the training repository or
+running Python.
+
+Memory-efficient attention kernels deliberately avoid materializing the quadratic
+probability matrix.  For visualization only, the exporter captures the normalized
+input to each selected attention module and reconstructs its pre-dropout probabilities:
+\[
+    A_h = \operatorname{softmax}\!\left(
+        \frac{Q_h K_h^\top}{\sqrt{d_h}} + B_h + M
+    \right).
+\]
+Here \(B_h\) is the ALiBi bias when applicable and \(M\) is the causal mask,
+augmented by the local-window constraint for SWA layers.  RoPE is applied before the
+dot product, and GQA key heads are repeated across their associated query-head groups.
+This is mathematically equivalent to the probabilities used by full softmax attention,
+SDPA, and FlashAttention before dropout, even though the production kernel never
+stores \(A_h\).  Tests verify that rows sum to one and that all mass above the causal
+diagonal is zero.
+
+\begin{warningbox}[Why V5 has no pairwise attention heatmap]
+Causal linear attention computes outputs from prefix feature-map statistics rather
+than a normalized pairwise softmax matrix.  Its rotated numerator and unrotated
+denominator do not define a single conventional \(T\!\times\!T\) probability map.
+The asset schema therefore records V5 as \texttt{unsupported} with this reason.  It
+does not invent a softmax visualization that the trained model never used.
+\end{warningbox}
+
 \section{References}
 % =============================================================================
 

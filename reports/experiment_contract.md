@@ -136,11 +136,12 @@ For the final comparison report, compute:
 - [x] Phases 00–06 complete and tested
 - [x] Basic evaluation framework (Phase 08)
 - [x] Basic static visualization dashboard (Phase 09)
-- [ ] Basic fault-tolerant checkpointing (Phase 11)
-- [ ] Final packaging (Phase 13)
+- [x] Basic fault-tolerant checkpointing (Phase 11)
+- [x] Final report schema and reusable publication assets (Phase 13)
 - [x] At least 3 variants trained on same data with same token budget
 - [x] Comparison results with error ranges over multiple seeds
 - [ ] Interactive dashboard showing attention patterns
+- [x] Layer/head attention-pattern JSON and PNG inputs for the external site
 
 ### Strong version
 
@@ -148,14 +149,14 @@ All of the above, plus:
 
 - [x] All 6 main variants (V0–V5) trained at 40M–70M scale
 - [x] Large-scale data pipeline (Phase 10)
-- [ ] Full fault-injection checkpoint tests (Phase 11)
+- [x] Full fault-injection checkpoint tests (Phase 11)
 - [x] Long-context evaluation at 2048 and 4096 tokens
 - [ ] Final comparison report with statistical significance
 
 ### Stretch goals
 
 - [ ] 100M–125M model run for at least 2 variants
-- [ ] Switch/MoE small model
+- [x] Sparse MoE recipes
 - [ ] Entropy-adaptive sparse attention
 - [ ] Hosted dashboard demo
 
@@ -169,7 +170,7 @@ All of the above, plus:
 | Training loop | L4-optimized, bf16, gradient accumulation, eval hooks |
 | Checkpointing | Atomic saves, resume, corruption fallback |
 | Evaluation | Metrics collection, statistics, plotting |
-| Visualization | Self-contained offline HTML report for metrics, probes, and plots |
+| Visualization | Frontend-agnostic JSON/PNG assets for a separate GitHub Pages/Jekyll site |
 | Config system | YAML-based, hierarchical, fully reproducible |
 
 ---
@@ -217,6 +218,16 @@ JSONL, one event per line:
 {"step": 100, "tokens": 6553600, "train_loss": 5.91, "lr": 0.00029, "tokens_per_sec": 18750, "peak_gpu_mem_gb": 14.2}
 ```
 
+### Static-site asset outputs
+
+```text
+reports/<experiment>/site_assets/
+  manifest.json
+  model_internals.json
+  attention_patterns.json
+  *.png
+```
+
 ---
 
 ## 11. Change Log
@@ -224,4 +235,5 @@ JSONL, one event per line:
 | Date | Change | Justification |
 |------|--------|---------------|
 | 2026-07-15 | Active/total parameter accounting; static HTML report | Correct the implemented SwiGLU/MoE counts, preserve documented parity exceptions, and replace the unwanted Streamlit runtime |
+| 2026-07-16 | Fault-tolerant CLI and static-site asset contract | Complete recovery integration while keeping the Jekyll frontend in its own repository |
 | 2025-01-01 | Initial contract | Phase 00 creation |

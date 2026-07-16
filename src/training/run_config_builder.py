@@ -68,17 +68,11 @@ class RunConfigBuilder:
         spec = VARIANTS[args.variant]
 
         # Resolve max_steps: use explicit value or fall back to variant's default
-        max_steps = (
-            args.max_steps
-            if args.max_steps is not None
-            else spec.default_steps[args.scale]
-        )
+        max_steps = args.max_steps if args.max_steps is not None else spec.default_steps[args.scale]
 
         # Format labels
         activation_label = args.activation if args.variant == "vanilla" else "swiglu"
-        variant_label = (
-            f"vanilla_{args.activation}" if args.variant == "vanilla" else args.variant
-        )
+        variant_label = f"vanilla_{args.activation}" if args.variant == "vanilla" else args.variant
 
         # Resolve checkpoint directory
         checkpoint_dir = (
@@ -107,9 +101,7 @@ class RunConfigBuilder:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if device == "cuda":
             gpu_name = torch.cuda.get_device_name()
-            gpu_memory_gb = round(
-                torch.cuda.get_device_properties(0).total_memory / 1e9, 1
-            )
+            gpu_memory_gb = round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1)
         else:
             gpu_name = "cpu"
             gpu_memory_gb = 0
@@ -152,6 +144,21 @@ class RunConfigBuilder:
                 "device": device,
                 "gpu": gpu_name,
                 "gpu_memory_gb": gpu_memory_gb,
+            },
+            "fault_tolerance": {
+                "enabled": bool(getattr(args, "fault_tolerant", False)),
+                "checkpoint_ring_size": (
+                    int(getattr(args, "checkpoint_ring_size", 3))
+                    if getattr(args, "fault_tolerant", False)
+                    else None
+                ),
+                "integrity": "sha256" if getattr(args, "fault_tolerant", False) else None,
+                "checkpoint_write": (
+                    "async_atomic"
+                    if getattr(args, "fault_tolerant", False)
+                    else "legacy_torch_save"
+                ),
+                "health_monitor": bool(getattr(args, "fault_tolerant", False)),
             },
             "resumed_from": args.resume,
         }

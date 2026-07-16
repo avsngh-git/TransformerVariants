@@ -219,7 +219,7 @@ __marimo__/
 
 # Project-specific: experiment outputs and data
 runs/
-data/
+/data/
 checkpoints/
 
 
