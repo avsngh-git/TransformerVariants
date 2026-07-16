@@ -2860,52 +2860,78 @@ hidden by the erroneous estimator.  No compensating retrain was introduced:
 changing expert width, top-$k$, depth placement, or training tokens would define
 a new experiment rather than repair the already completed one.
 
-\subsection{Inference and long-context gap fill}
+\subsection{Seed-aware serving and paired-tail long-context evaluation}
 
-A separate representative-checkpoint benchmark measures greedy generation with a
+Serving remains a representative-checkpoint capability benchmark: seed 42 uses a
 64-token prompt, eight generated tokens, batch size one, one warm-up, and two timed
 repetitions on the NVIDIA L4-24Q.  Cached timing is reported only when the model
-returns a reusable prompt cache.  Persistent cache memory counts the tensor
-storages actually retained by that opaque cache.  Long-context perplexity uses
-one contiguous held-out validation sample at 1024, 2048, and 4096 tokens.  These
-numbers are diagnostics, not seed-aggregated quality estimates.  The raw benchmark
-and HTML dashboard additionally retain target-free prefill throughput for every
-supported context length.  Validation loss is timed separately so cross-entropy
-work is not mislabeled as inference prefill.
+returns a genuinely reusable prompt cache, and persistent memory counts the tensor
+storages retained by that opaque cache.  Serving timing is therefore not presented
+as a seed-aggregated claim.
+
+Long-context quality now uses all three independently trained checkpoints and eight
+fixed, non-overlapping validation windows per checkpoint.  Each window contains
+4097 tokens.  For a context length $c\in\{1024,2048,4096\}$, the evaluator crops
+the window from the left so that every $c$ scores the same final $N=256$ target
+tokens.  If $z_{s,c,w,t}$ denotes the logits for seed $s$, context $c$, window $w$,
+and one of those shared tail positions, the checkpoint estimate is
+\[
+ \widehat{L}_{s,c}
+ = \frac{1}{8N}\sum_{w=1}^{8}\sum_{t=1}^{N}
+   \operatorname{CE}(z_{s,c,w,t}, y_{w,t}).
+\]
+The report first averages windows within a checkpoint, then reports the mean and
+sample standard deviation of the three checkpoint estimates.  Paired degradation
+is computed within each seed before aggregation.  This makes the checkpoint seed,
+not a token or window, the independent uncertainty unit.  Target-free prefill
+timing ends before float32 cross-entropy is computed, so quality work is not
+mislabelled as inference throughput.
 
 \begin{table}[H]
 \centering
 \scriptsize
-\begin{tabular}{lrrrr}
+\begin{tabular}{lrrrrr}
 \toprule
-Recipe & Uncached tok/s & Cached tok/s & PPL@1K & PPL@4K \\
+Recipe & Tail PPL@1K & Tail PPL@2K & Tail PPL@4K & 4K/1K & 4K ktok/s \\
 \midrule
-Vanilla & 477.2 & 516.2 & 23.8 & unsupported \\
-Modern & 326.2 & 329.8 & 21.7 & 146.0 \\
-ALiBi & 374.1 & unsupported & 28.8 & 34.7 \\
-GQA & 267.5 & unsupported & 31.1 & 143.8 \\
-SWA & 264.3 & unsupported & 30.6 & 34.7 \\
-SWA-interleaved & 264.4 & unsupported & 31.1 & 44.6 \\
-Linear & 94.0 & unsupported & 27.3 & 287.3 \\
-MoE & 45.5 & 89.7 & 18.6 & 142.8 \\
-MoE-interleaved & 80.8 & 139.4 & 20.2 & 137.3 \\
-MoE-deep & 81.3 & 138.3 & 19.9 & 147.0 \\
+ALiBi & $56.07\pm0.51$ & $58.29\pm0.88$ & $58.74\pm1.10$ & $1.047\pm0.010$ & 242.6 \\
+SWA & $58.95\pm0.45$ & $58.95\pm0.48$ & $58.93\pm0.46$ & $1.000\pm0.001$ & 253.4 \\
+SWA-interleaved & $58.58\pm0.28$ & $78.48\pm4.50$ & $84.86\pm6.12$ & $1.448\pm0.100$ & 237.9 \\
+GQA & $60.10\pm0.41$ & $370.72\pm82.01$ & $437.37\pm47.76$ & $7.279\pm0.815$ & 239.6 \\
+MoE-deep & $34.10\pm0.65$ & $458.63\pm61.52$ & $488.85\pm23.26$ & $14.329\pm0.423$ & 42.0 \\
+MoE-interleaved & $34.40\pm0.66$ & $463.84\pm54.23$ & $518.29\pm18.30$ & $15.077\pm0.817$ & 41.7 \\
+MoE & $31.91\pm0.29$ & $427.35\pm24.78$ & $526.63\pm17.94$ & $16.505\pm0.508$ & 36.0 \\
+Modern & $39.80\pm0.31$ & $453.01\pm61.98$ & $553.94\pm18.95$ & $13.917\pm0.368$ & 51.2 \\
+Linear & $50.10\pm0.54$ & $1103.41\pm299.49$ & $1311.78\pm25.66$ & $26.186\pm0.789$ & 34.7 \\
+Vanilla & $44.52\pm0.39$ & unsupported & unsupported & unsupported & unsupported \\
 \bottomrule
 \end{tabular}
-\caption{Representative-checkpoint inference and long-context diagnostics.
-\emph{Unsupported} is an explicit capability result, not a zero or failed timing.}
+\caption{Paired-tail long-context quality.  Each entry is mean $\pm$ sample
+standard deviation over three checkpoint seeds; every checkpoint estimate averages
+eight windows and 2048 shared target predictions.  Throughput is the cross-seed
+mean of target-free 4096-token prefill.}
 \label{tab:inference-long-context-final}
 \end{table}
 
-Vanilla cannot exceed its learned 1024-position table without defining a new
-position-extension method.  ALiBi shows the smallest degradation in this
-one-sample extrapolation test.  The corrected causal linear model runs at longer
-contexts, but its perplexity deteriorates sharply; linear asymptotic complexity
-does not imply length generalization.  ALiBi, GQA, and both SWA recipes currently
-return no reusable cache after a multi-token FlashAttention prefill, and the
-causal linear recipe does not yet expose its recurrent prefix state through the
-shared cache interface.  Their cached generation rows are therefore marked
-unsupported rather than benchmarked through a semantically incorrect fallback.
+ALiBi has the lowest mean 4096-token tail perplexity, but SWA is only 0.20
+perplexity points behind.  That gap is smaller than either model's cross-seed
+standard deviation, so these data do not justify an absolute-quality winner.
+SWA has the strongest retention ($0.9998\pm0.0008$) and the faster 4096-token
+prefill of the two.  ALiBi degrades only $4.7\%$, while SWA-interleaved degrades
+about $44.8\%$.  GQA, the dense/MoE RoPE recipes, and causal linear attention
+all deteriorate sharply outside the training length; causal linear attention is
+worst at a $26.19\times$ perplexity ratio.  Linear asymptotic complexity therefore
+does not imply length generalization.
+
+SWA's flat curve needs a careful interpretation.  Its receptive field remains
+256 tokens, so stability at a 4096-token input shows that the trained local
+computation transfers; it does not show that the model retrieves information
+thousands of tokens away.  ALiBi and SWA are consequently co-leaders in absolute
+tail quality, SWA is the stability leader, and long-range retrieval remains a
+separate question.  Vanilla is explicitly unsupported beyond its learned
+1024-position table.  ALiBi, GQA, both SWA recipes, and causal linear attention
+still expose no reusable prompt cache through the shared interface; those serving
+paths remain labelled unsupported rather than emulated.
 
 
 \subsection{Seed provenance and fresh final validation}

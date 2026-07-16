@@ -34,6 +34,10 @@ designed as future-compatible but is not required or tested.
 
 Long-context evaluation lengths: 1024, 2048, 4096 tokens.
 
+The formal long-context protocol scores the same final 256 target tokens at every
+length, over eight fixed non-overlapping validation windows per checkpoint and all
+three checkpoint seeds. Checkpoint means are the independent units for uncertainty.
+
 ---
 
 ## 3. Task Definition
@@ -81,9 +85,10 @@ To ensure meaningful comparisons between variants:
    parameters. A completed recipe outside tolerance is retained only as a documented
    limitation; changing its width, depth, routing, or token budget constitutes a new
    experiment.
-8. **Multiple seeds.** Primary training and checkpoint-quality results are reported
-   over at least 3 random seeds. Representative-checkpoint serving and long-context
-   diagnostics are labeled as capability measurements, not statistical main results.
+8. **Multiple seeds.** Primary training, checkpoint quality, and paired-tail
+   long-context quality are reported over at least 3 random seeds. Serving and
+   KV-cache diagnostics use one explicitly identified representative checkpoint and
+   are not statistical timing claims.
 9. **Reproducibility.** Every run is fully specified by:
    `model_config + data_config + train_config + code_version + dataset_manifest`
 
@@ -107,11 +112,12 @@ To ensure meaningful comparisons between variants:
 
 | Metric | Unit | Direction |
 |--------|------|-----------|
-| Perplexity at 2048 tokens | exp(loss) | lower is better |
-| Perplexity at 4096 tokens | exp(loss) | lower is better |
-| Long-context degradation | Δ perplexity | lower is better |
-| Throughput at 2048 tokens | tokens/sec | reported |
-| Throughput at 4096 tokens | tokens/sec | reported |
+| Paired-tail perplexity at 1024/2048/4096 | exp(tail loss) | lower is better |
+| Paired-tail perplexity ratio vs. 1024 | ratio | closer to 1 is more stable |
+| Paired tail-loss change vs. 1024 | nats | lower is better |
+| Cross-seed uncertainty | sample standard deviation | reported |
+| Prefill throughput at 2048 tokens | tokens/sec | reported |
+| Prefill throughput at 4096 tokens | tokens/sec | reported |
 
 ### Efficiency summary
 

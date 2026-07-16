@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 
 from src.evaluation.benchmarks import (
+    aggregate_long_context_runs,
     benchmark_generation,
     evaluate_long_context,
     inspect_kv_cache,
@@ -51,6 +53,29 @@ class CacheModel(nn.Module):
         return logits, loss, cache
 
 
+class TailScoringModel(nn.Module):
+    """Decoder whose final two predictions are good and earlier ones are bad."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(
+            seq_len=4,
+            position_encoding="rope",
+            d_head=2,
+            vocab_size=16,
+        )
+        self.anchor = nn.Parameter(torch.zeros(()))
+        self.seen_inputs: list[torch.Tensor] = []
+
+    def forward(self, idx, targets=None, kv_cache=None):
+        self.seen_inputs.append(idx.detach().cpu())
+        logits = torch.full((*idx.shape, 16), -10.0, device=idx.device)
+        logits[..., 1] = 10.0
+        logits[:, -2:, 0] = 10.0
+        logits[:, -2:, 1] = -10.0
+        return logits, None, [None]
+
+
 def test_inspect_kv_cache_reports_bytes_or_explicit_unsupported() -> None:
     prompt = torch.tensor([[1, 2, 3, 4]])
 
@@ -78,15 +103,92 @@ def test_long_context_records_native_result_and_unsupported_extension() -> None:
     model = CacheModel()
     tokens = torch.arange(9).remainder(16).unsqueeze(0)
 
-    result = evaluate_long_context(model, tokens, context_lengths=[8, 64])
+    result = evaluate_long_context(
+        model,
+        tokens,
+        context_lengths=[8, 64],
+        tail_tokens=2,
+    )
 
     assert result["8"]["status"] == "ok"
-    assert result["8"]["prefill_tokens_per_second"] > 0
-    assert result["8"]["validation_seconds"] > 0
-    assert result["8"]["perplexity"] > 0
+    assert result["8"]["prefill_tokens_per_second"]["mean"] > 0
+    assert result["8"]["val_loss"]["n"] == 1
+    assert result["8"]["perplexity"]["mean"] > 0
     assert result["64"] == {
         "status": "unsupported",
         "reason": "position encoding 'none' has no declared extrapolation path",
     }
     assert model.target_free_calls == 1
-    assert model.targeted_calls == 1
+    assert model.targeted_calls == 0
+
+
+def test_long_context_scores_the_same_tail_across_multiple_windows() -> None:
+    model = TailScoringModel()
+    tokens = torch.tensor(
+        [
+            [1, 2, 3, 4, 5, 6, 0, 0, 0],
+            [9, 8, 7, 6, 5, 4, 0, 0, 0],
+        ]
+    )
+
+    result = evaluate_long_context(
+        model,
+        tokens,
+        context_lengths=[4, 8],
+        tail_tokens=2,
+    )
+
+    for context_length in ("4", "8"):
+        measurement = result[context_length]
+        assert measurement["status"] == "ok"
+        assert measurement["tail_tokens"] == 2
+        assert measurement["val_loss"]["n"] == 2
+        assert measurement["val_loss"]["mean"] < 1e-6
+        assert len(measurement["windows"]) == 2
+
+    assert torch.equal(model.seen_inputs[0], tokens[0:1, 4:8])
+    assert torch.equal(model.seen_inputs[1], tokens[1:2, 4:8])
+    assert torch.equal(model.seen_inputs[2], tokens[0:1, :8])
+    assert torch.equal(model.seen_inputs[3], tokens[1:2, :8])
+
+
+def test_long_context_aggregation_uses_seed_means_and_paired_degradation() -> None:
+    def run(seed: int, native_loss: float, extended_loss: float, throughput: float) -> dict:
+        return {
+            "seed": seed,
+            "checkpoint_dir": f"modern_s{seed}",
+            "long_context": {
+                "4": {
+                    "status": "ok",
+                    "val_loss": {"mean": native_loss, "std": 0.05, "n": 8},
+                    "prefill_tokens_per_second": {
+                        "mean": throughput,
+                        "std": 1.0,
+                        "n": 8,
+                    },
+                },
+                "8": {
+                    "status": "ok",
+                    "val_loss": {"mean": extended_loss, "std": 0.05, "n": 8},
+                    "prefill_tokens_per_second": {
+                        "mean": throughput / 2,
+                        "std": 1.0,
+                        "n": 8,
+                    },
+                },
+            },
+        }
+
+    aggregate = aggregate_long_context_runs(
+        [
+            run(42, 1.0, 1.2, 100.0),
+            run(137, 1.2, 1.5, 120.0),
+            run(2024, 1.4, 1.8, 110.0),
+        ],
+        baseline_context=4,
+    )
+
+    assert aggregate["4"]["val_loss"] == pytest.approx({"mean": 1.2, "std": 0.2, "n": 3})
+    assert aggregate["8"]["val_loss"] == pytest.approx({"mean": 1.5, "std": 0.3, "n": 3})
+    assert aggregate["8"]["paired_delta_loss"] == pytest.approx({"mean": 0.3, "std": 0.1, "n": 3})
+    assert aggregate["8"]["perplexity_ratio"]["mean"] == pytest.approx(1.3543620878)

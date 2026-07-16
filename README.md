@@ -29,7 +29,7 @@ systems-and-architecture questions under a fixed hardware and training budget:
 | Main experiment | 30 runs: 10 recipes × 3 seeds |
 | Main token budget | Approximately 1B tokens per run |
 | Primary parameter range | 48.3M–68.8M active parameters |
-| Test suite | 713 passing tests |
+| Test suite | 715 passing tests |
 | Report surface | One offline, serverless HTML file |
 
 Open the current report directly in a browser:
@@ -116,14 +116,45 @@ The report deliberately distinguishes primary results from diagnostics:
 - Nine historical `metrics.jsonl` seed triplets were duplicated. Fixed-wall-clock and
   pre-endpoint fixed-FLOP values derived from those histories are labeled
   **incomplete/non-statistical** and do not display artificial `±0.0000` error bars.
-- Generation, KV-cache, long-context, and target-free prefill measurements use one
-  representative checkpoint per recipe. They are capability diagnostics, not
-  seed-aggregated quality claims.
+- Generation and KV-cache measurements use one representative checkpoint per recipe
+  and remain serving capability diagnostics.
+- Long-context quality and target-free prefill use all three checkpoint seeds, eight
+  fixed validation windows per checkpoint, and sample standard deviation across seed
+  means.
 - Unsupported cache or context-extension paths remain visible as `unsupported`; they
   are never converted to zero or silently emulated.
 
 These limitations are persisted in `metadata.json` and rendered in the dashboard’s
 provenance section.
+
+
+### Long-context extrapolation
+
+The long-context study scores the same final 256 target tokens with 1,024, 2,048,
+and 4,096 tokens of available context. Each checkpoint is evaluated on eight fixed,
+non-overlapping validation windows; the table reports mean ± sample standard deviation
+across the three independently trained seeds.
+
+| Recipe | Tail PPL @ 1K | Tail PPL @ 2K | Tail PPL @ 4K | 4K / 1K ratio |
+|--------|--------------:|--------------:|--------------:|---------------:|
+| ALiBi | 56.07 ± 0.51 | 58.29 ± 0.88 | **58.74 ± 1.10** | 1.047 ± 0.010 |
+| SWA | 58.95 ± 0.45 | 58.95 ± 0.48 | **58.93 ± 0.46** | **1.000 ± 0.001** |
+| SWA-interleaved | 58.58 ± 0.28 | 78.48 ± 4.50 | 84.86 ± 6.12 | 1.448 ± 0.100 |
+| GQA | 60.10 ± 0.41 | 370.72 ± 82.01 | 437.37 ± 47.76 | 7.279 ± 0.815 |
+| MoE-deep | 34.10 ± 0.65 | 458.63 ± 61.52 | 488.85 ± 23.26 | 14.329 ± 0.423 |
+| MoE-interleaved | 34.40 ± 0.66 | 463.84 ± 54.23 | 518.29 ± 18.30 | 15.077 ± 0.817 |
+| MoE | **31.91 ± 0.29** | 427.35 ± 24.78 | 526.63 ± 17.94 | 16.505 ± 0.508 |
+| Modern | 39.80 ± 0.31 | 453.01 ± 61.98 | 553.94 ± 18.95 | 13.917 ± 0.368 |
+| Causal linear | 50.10 ± 0.54 | 1,103.41 ± 299.49 | 1,311.78 ± 25.66 | 26.186 ± 0.789 |
+| Vanilla | 44.52 ± 0.39 | unsupported | unsupported | unsupported |
+
+ALiBi has the lowest mean 4K tail perplexity, while SWA is only 0.20 perplexity
+points behind and has the best retention and 4K prefill throughput. That small quality
+gap is below the cross-seed variability, so the data do not support declaring an
+absolute-quality winner between them. SWA's stability also does not prove that it uses
+4K-range information: its fixed 256-token receptive field deliberately prevents that.
+The result establishes extrapolation stability; long-range retrieval remains a
+separate capability question.
 
 ## Experimental protocol
 
@@ -309,26 +340,30 @@ Bash.
 ## Inference and long-context benchmark
 
 The benchmark keeps uncached generation, cached generation, persistent KV-cache
-storage, validation loss, and target-free prefill throughput separate. A cached result
-is emitted only when the model returns a genuinely reusable prompt cache.
+storage, paired-tail validation loss, and target-free prefill throughput separate.
+Generation uses seed 42 as the representative checkpoint; long-context quality uses
+every supplied checkpoint seed.
 
 ```bash
 python scripts/benchmark_inference.py \
   --checkpoints \
-    checkpoints/{alibi,gqa,modern,moe_deep,moe_interleaved,moe,swa_interleaved,swa,vanilla}_main_1B_s42 \
-    checkpoints/linear_main_1B_fixed_s42 \
+    checkpoints/{alibi,gqa,modern,moe_deep,moe_interleaved,moe,swa_interleaved,swa,vanilla}_main_1B_s{42,137,2024} \
+    checkpoints/linear_main_1B_fixed_s{42,137,2024} \
   --output reports/1B_comparison/raw/benchmarks.json \
   --data-dir data/processed/fineweb-1B \
   --prompt-length 64 \
   --new-tokens 8 \
   --repeats 2 \
   --warmups 1 \
+  --windows 8 \
+  --tail-tokens 256 \
   --context-lengths 1024 2048 4096
 ```
 
-These measurements intentionally use one representative checkpoint per recipe. Repeat
-the benchmark across checkpoints and validation windows before making statistical
-serving claims.
+The long-context JSON preserves every window and checkpoint estimate, then reports
+sample standard deviation across the three seed means. Serving measurements still use
+one representative checkpoint and should not be interpreted as seed-aggregated timing
+claims.
 
 ## Static HTML dashboard
 

@@ -85,6 +85,34 @@ Pareto-optimal variants (non-dominated on FLOPs vs val_loss):
 - **moe**
 - **vanilla**
 
+
+## Seed-Aware Long-Context Extrapolation
+
+Each checkpoint was evaluated on eight fixed, non-overlapping validation windows.
+For every window, 1K, 2K, and 4K contexts score the same final 256 target tokens.
+Entries are mean ± sample standard deviation across the three checkpoint-seed means.
+
+| Rank at 4K | Variant | Tail PPL @ 1K | Tail PPL @ 2K | Tail PPL @ 4K | 4K / 1K PPL |
+|------------|---------|--------------:|--------------:|--------------:|-------------:|
+| 1 | alibi | 56.07 ± 0.51 | 58.29 ± 0.88 | **58.74 ± 1.10** | 1.047 ± 0.010 |
+| 2 | swa | 58.95 ± 0.45 | 58.95 ± 0.48 | **58.93 ± 0.46** | **1.000 ± 0.001** |
+| 3 | swa_interleaved | 58.58 ± 0.28 | 78.48 ± 4.50 | 84.86 ± 6.12 | 1.448 ± 0.100 |
+| 4 | gqa | 60.10 ± 0.41 | 370.72 ± 82.01 | 437.37 ± 47.76 | 7.279 ± 0.815 |
+| 5 | moe_deep | 34.10 ± 0.65 | 458.63 ± 61.52 | 488.85 ± 23.26 | 14.329 ± 0.423 |
+| 6 | moe_interleaved | 34.40 ± 0.66 | 463.84 ± 54.23 | 518.29 ± 18.30 | 15.077 ± 0.817 |
+| 7 | moe | **31.91 ± 0.29** | 427.35 ± 24.78 | 526.63 ± 17.94 | 16.505 ± 0.508 |
+| 8 | modern | 39.80 ± 0.31 | 453.01 ± 61.98 | 553.94 ± 18.95 | 13.917 ± 0.368 |
+| 9 | linear | 50.10 ± 0.54 | 1,103.41 ± 299.49 | 1,311.78 ± 25.66 | 26.186 ± 0.789 |
+| unsupported | vanilla | 44.52 ± 0.39 | unsupported | unsupported | unsupported |
+
+ALiBi has the lowest mean 4K tail perplexity. SWA is only 0.20 perplexity
+points behind, has the smallest degradation, and has the highest 4K prefill
+throughput among the quality leaders. The observed ALiBi--SWA gap is smaller than
+their cross-seed standard deviations and does not establish an absolute-quality
+winner. SWA's stability means its fixed 256-token receptive field transfers cleanly;
+it does not demonstrate retrieval from 4K-token distances. See
+[the raw benchmark](raw/benchmarks.json) for checkpoint and window observations.
+
 ## Figures
 
 ### Learning Curves

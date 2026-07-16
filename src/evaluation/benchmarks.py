@@ -179,18 +179,134 @@ def _extend_context(model: nn.Module, context_length: int) -> tuple[bool, str | 
     return True, None
 
 
+def _sample_summary(values: list[float]) -> dict[str, float | int]:
+    """Return a named estimate with sample standard deviation."""
+    count = len(values)
+    mean = sum(values) / count
+    std = (
+        math.sqrt(sum((value - mean) ** 2 for value in values) / (count - 1))
+        if count > 1
+        else 0.0
+    )
+    return {"mean": mean, "std": std, "n": count}
+
+
+def aggregate_long_context_runs(
+    runs: Iterable[dict],
+    *,
+    baseline_context: int,
+) -> dict[str, dict]:
+    """Aggregate window means across independent checkpoint seeds."""
+    run_list = list(runs)
+    context_keys = sorted(
+        {
+            int(context)
+            for run in run_list
+            for context in run.get("long_context", {})
+        }
+    )
+    baseline_key = str(baseline_context)
+    results: dict[str, dict] = {}
+
+    for context_length in context_keys:
+        context_key = str(context_length)
+        supported: list[tuple[dict, dict]] = []
+        unsupported: list[dict] = []
+        for run in run_list:
+            measurement = run.get("long_context", {}).get(context_key)
+            if measurement is not None and measurement.get("status") == "ok":
+                supported.append((run, measurement))
+            else:
+                unsupported.append(
+                    {
+                        "seed": run.get("seed"),
+                        "checkpoint_dir": run.get("checkpoint_dir"),
+                        "status": (
+                            measurement.get("status")
+                            if measurement is not None
+                            else "unavailable"
+                        ),
+                        "reason": (
+                            measurement.get("reason", "context result is missing")
+                            if measurement is not None
+                            else "context result is missing"
+                        ),
+                    }
+                )
+
+        if not supported:
+            results[context_key] = {
+                "status": "unsupported",
+                "supported_checkpoints": 0,
+                "total_checkpoints": len(run_list),
+                "unsupported": unsupported,
+            }
+            continue
+
+        seed_losses = [
+            float(measurement["val_loss"]["mean"])
+            for _, measurement in supported
+        ]
+        seed_throughputs = [
+            float(measurement["prefill_tokens_per_second"]["mean"])
+            for _, measurement in supported
+        ]
+        aggregate = {
+            "status": "ok" if len(supported) == len(run_list) else "partial",
+            "supported_checkpoints": len(supported),
+            "total_checkpoints": len(run_list),
+            "window_count": sum(
+                int(measurement["val_loss"]["n"])
+                for _, measurement in supported
+            ),
+            "seeds": [run.get("seed") for run, _ in supported],
+            "val_loss": _sample_summary(seed_losses),
+            "perplexity": _sample_summary([math.exp(loss) for loss in seed_losses]),
+            "prefill_tokens_per_second": _sample_summary(seed_throughputs),
+            "unsupported": unsupported,
+        }
+
+        paired_delta_losses: list[float] = []
+        for run, measurement in supported:
+            baseline = run.get("long_context", {}).get(baseline_key)
+            if baseline is None or baseline.get("status") != "ok":
+                continue
+            paired_delta_losses.append(
+                float(measurement["val_loss"]["mean"])
+                - float(baseline["val_loss"]["mean"])
+            )
+        if paired_delta_losses:
+            aggregate["paired_delta_loss"] = _sample_summary(paired_delta_losses)
+            aggregate["perplexity_ratio"] = _sample_summary(
+                [math.exp(delta) for delta in paired_delta_losses]
+            )
+
+        results[context_key] = aggregate
+
+    return results
+
+
 @torch.no_grad()
 def evaluate_long_context(
     model: nn.Module,
     tokens: torch.Tensor,
     *,
     context_lengths: Iterable[int] = (1024, 2048, 4096),
+    tail_tokens: int = 256,
 ) -> dict[str, dict]:
-    """Measure one held-out next-token loss per context or explain unsupported cases."""
+    """Score the same held-out tail under several available context lengths."""
+    lengths = sorted(set(context_lengths))
+    if not lengths:
+        raise ValueError("context_lengths must not be empty")
+    if tokens.ndim != 2 or tokens.size(0) == 0:
+        raise ValueError("tokens must contain one or more two-dimensional windows")
+    if tail_tokens <= 0 or tail_tokens > lengths[0]:
+        raise ValueError("tail_tokens must be positive and fit within every context length")
+
     device = _device_of(model)
     tokens = tokens.to(device)
     results: dict[str, dict] = {}
-    for context_length in sorted(set(context_lengths)):
+    for context_length in lengths:
         supported, reason = _extend_context(model, context_length)
         if not supported:
             results[str(context_length)] = {
@@ -201,32 +317,55 @@ def evaluate_long_context(
         if tokens.size(1) < context_length + 1:
             results[str(context_length)] = {
                 "status": "unavailable",
-                "reason": f"requires {context_length + 1} validation tokens",
+                "reason": f"requires {context_length + 1} validation tokens per window",
             }
             continue
-        inputs = tokens[:, :context_length]
-        targets = tokens[:, 1 : context_length + 1]
+
+        windows: list[dict] = []
         try:
-            _synchronize(device)
-            started = time.perf_counter()
-            model(inputs, targets=None, kv_cache=None)
-            _synchronize(device)
-            prefill_elapsed = time.perf_counter() - started
-            _synchronize(device)
-            validation_started = time.perf_counter()
-            _, loss, _ = model(inputs, targets=targets, kv_cache=None)
-            _synchronize(device)
-            validation_elapsed = time.perf_counter() - validation_started
-            if loss is None or not torch.isfinite(loss):
-                raise RuntimeError("non-finite or missing validation loss")
-            val_loss = float(loss.item())
+            for window_index in range(tokens.size(0)):
+                inputs = tokens[
+                    window_index : window_index + 1,
+                    -(context_length + 1) : -1,
+                ]
+                targets = tokens[window_index : window_index + 1, -tail_tokens:]
+
+                _synchronize(device)
+                started = time.perf_counter()
+                logits, _, _ = model(inputs, targets=None, kv_cache=None)
+                _synchronize(device)
+                prefill_elapsed = time.perf_counter() - started
+
+                tail_logits = logits[:, -tail_tokens:, :].float()
+                loss = torch.nn.functional.cross_entropy(
+                    tail_logits.reshape(-1, tail_logits.size(-1)),
+                    targets.reshape(-1),
+                )
+                if not torch.isfinite(loss):
+                    raise RuntimeError("non-finite tail validation loss")
+                val_loss = float(loss.item())
+                windows.append(
+                    {
+                        "window_index": window_index,
+                        "val_loss": val_loss,
+                        "perplexity": math.exp(val_loss),
+                        "prefill_seconds": prefill_elapsed,
+                        "prefill_tokens_per_second": context_length / prefill_elapsed,
+                    }
+                )
+
             results[str(context_length)] = {
                 "status": "ok",
-                "val_loss": val_loss,
-                "perplexity": math.exp(val_loss),
-                "prefill_seconds": prefill_elapsed,
-                "prefill_tokens_per_second": context_length / prefill_elapsed,
-                "validation_seconds": validation_elapsed,
+                "tail_tokens": tail_tokens,
+                "val_loss": _sample_summary([window["val_loss"] for window in windows]),
+                "perplexity": _sample_summary([window["perplexity"] for window in windows]),
+                "prefill_seconds": _sample_summary(
+                    [window["prefill_seconds"] for window in windows]
+                ),
+                "prefill_tokens_per_second": _sample_summary(
+                    [window["prefill_tokens_per_second"] for window in windows]
+                ),
+                "windows": windows,
             }
         except (AssertionError, NotImplementedError, RuntimeError) as exc:
             results[str(context_length)] = {

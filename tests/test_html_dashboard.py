@@ -44,7 +44,16 @@ def test_build_dashboard_writes_one_offline_html_file(tmp_path: Path) -> None:
     (report_dir / "raw" / "benchmarks.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
+                "settings": {
+                    "context_lengths": [1024, 2048, 4096],
+                    "long_context_windows_per_checkpoint": 8,
+                    "long_context_tail_tokens": 256,
+                },
+                "long_context_method": {
+                    "target_alignment": "the same final tail tokens are scored",
+                    "uncertainty_unit": "sample standard deviation across checkpoint seeds",
+                },
                 "limitations": ["Representative checkpoint only."],
                 "variants": {
                     "vanilla": {
@@ -53,8 +62,63 @@ def test_build_dashboard_writes_one_offline_html_file(tmp_path: Path) -> None:
                             "cached": {"status": "unsupported"},
                             "kv_cache": {"status": "unsupported"},
                         },
-                        "long_context": {"1024": {"status": "ok", "perplexity": 42.0}},
-                    }
+                        "long_context": {
+                            "1024": {
+                                "status": "ok",
+                                "val_loss": {"mean": 3.7, "std": 0.1, "n": 3},
+                                "perplexity": {"mean": 40.5, "std": 4.0, "n": 3},
+                                "perplexity_ratio": {"mean": 1.0, "std": 0.0, "n": 3},
+                                "prefill_tokens_per_second": {
+                                    "mean": 50000,
+                                    "std": 1000,
+                                    "n": 3,
+                                },
+                            },
+                            "4096": {"status": "unsupported"},
+                        },
+                    },
+                    "modern": {
+                        "generation": {
+                            "uncached": {"status": "ok", "tokens_per_second": 10.0},
+                            "cached": {"status": "ok", "tokens_per_second": 15.0},
+                            "kv_cache": {"status": "ok", "bytes": 4194304},
+                        },
+                        "long_context": {
+                            "1024": {
+                                "status": "ok",
+                                "val_loss": {"mean": 3.5, "std": 0.1, "n": 3},
+                                "perplexity": {"mean": 33.2, "std": 3.0, "n": 3},
+                                "perplexity_ratio": {"mean": 1.0, "std": 0.0, "n": 3},
+                                "prefill_tokens_per_second": {
+                                    "mean": 45000,
+                                    "std": 900,
+                                    "n": 3,
+                                },
+                            },
+                            "2048": {
+                                "status": "ok",
+                                "val_loss": {"mean": 3.8, "std": 0.1, "n": 3},
+                                "perplexity": {"mean": 44.7, "std": 4.0, "n": 3},
+                                "perplexity_ratio": {"mean": 1.35, "std": 0.05, "n": 3},
+                                "prefill_tokens_per_second": {
+                                    "mean": 42000,
+                                    "std": 800,
+                                    "n": 3,
+                                },
+                            },
+                            "4096": {
+                                "status": "ok",
+                                "val_loss": {"mean": 4.1, "std": 0.2, "n": 3},
+                                "perplexity": {"mean": 60.3, "std": 8.0, "n": 3},
+                                "perplexity_ratio": {"mean": 1.82, "std": 0.1, "n": 3},
+                                "prefill_tokens_per_second": {
+                                    "mean": 39000,
+                                    "std": 700,
+                                    "n": 3,
+                                },
+                            },
+                        },
+                    },
                 },
             }
         )
@@ -81,4 +145,8 @@ def test_build_dashboard_writes_one_offline_html_file(tmp_path: Path) -> None:
     assert "Active params" in html
     assert "Total params" in html
     assert "Representative checkpoint only." in html
+
+    assert 'id="longContextChart"' in html
+    assert 'id="longContextSummary"' in html
+    assert "Paired tail-token extrapolation" in html
     assert "12.3" in html
