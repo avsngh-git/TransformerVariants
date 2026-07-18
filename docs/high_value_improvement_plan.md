@@ -258,7 +258,9 @@ its versioned result belongs at `reports/fault_recovery_demo.json`.
 
 ### Phase B — primary retraining
 
-- [ ] Launch the manifest in a named tmux session.
+- [x] Launch the manifest in named tmux session `transformer_500m_5seed` from
+  commit `aa49e72bddd2403ecef54e896fb6b9b95663b7ce` (2026-07-18); the real matrix
+  passed verified step-zero bootstrap and health-monitor warm-up.
 - [ ] Produce 50 independent training histories.
 - [ ] Produce 50 verified final checkpoints at step 7,629.
 - [ ] Record any recovery event instead of hiding it.
