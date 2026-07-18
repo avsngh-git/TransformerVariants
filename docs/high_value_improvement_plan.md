@@ -252,6 +252,9 @@ its versioned result belongs at `reports/fault_recovery_demo.json`.
   exact agreement with uninterrupted training.
 - [x] Correct the launch-preflight health-monitor false positive, add a verified
   step-zero bootstrap, and make interval labels count completed updates.
+- [x] Canonicalize relative checkpoint directories before async writes and ring
+  registration, preventing the verifier from prefixing a project-relative path
+  twice; cover the exact launch-path shape with a regression test.
 
 ### Phase B — primary retraining
 

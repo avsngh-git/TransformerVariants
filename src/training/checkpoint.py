@@ -187,7 +187,10 @@ class CheckpointRingBuffer:
             checkpoint_dir: Directory where checkpoints and metadata are stored.
             capacity: Maximum number of checkpoints to retain (default 3).
         """
-        self._checkpoint_dir = Path(checkpoint_dir)
+        # Keep one canonical path contract across the ring and async writer.
+        # Without resolving here, a project-relative directory can be prefixed
+        # twice when the writer passes its directory-qualified path to register().
+        self._checkpoint_dir = Path(checkpoint_dir).resolve()
         self._capacity = capacity
         self._entries: list[RingEntry] = []
         self._load_metadata()
@@ -390,7 +393,7 @@ class AsyncCheckpointWriter:
             checkpoint_dir: Directory where checkpoint files are written.
         """
         self._ring_buffer = ring_buffer
-        self._checkpoint_dir = Path(checkpoint_dir)
+        self._checkpoint_dir = Path(checkpoint_dir).resolve()
         self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._future: Future | None = None

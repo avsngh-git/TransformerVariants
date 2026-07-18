@@ -824,6 +824,25 @@ class TestAsyncCheckpointWriterSingleInflight:
 class TestAsyncCheckpointWriterRingBuffer:
     """Tests that ring buffer is updated after save completes."""
 
+    def test_relative_checkpoint_directory_is_not_prefixed_twice(
+        self, tmp_path, monkeypatch
+    ):
+        """A project-relative checkpoint directory must remain verifiable."""
+        monkeypatch.chdir(tmp_path)
+        checkpoint_dir = Path("runs/example/checkpoints")
+        ring = CheckpointRingBuffer(checkpoint_dir, capacity=3)
+        writer = AsyncCheckpointWriter(ring, checkpoint_dir)
+        model = SimpleModel()
+        optimizer = SGD(model.parameters(), lr=0.01)
+
+        writer.save(step=0, model=model, optimizer=optimizer, training_state={})
+        writer.wait()
+
+        checkpoint = checkpoint_dir / "checkpoint_step_000000.pt"
+        assert checkpoint.exists()
+        assert ring.latest() == checkpoint.resolve()
+        assert ring.latest_verified() == checkpoint.resolve()
+
     def test_ring_buffer_updated_after_save(self, checkpoint_setup):
         """The ring buffer should have the checkpoint registered after wait()."""
         setup = checkpoint_setup

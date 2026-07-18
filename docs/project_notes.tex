@@ -3086,6 +3086,16 @@ completed without a recovery event, retained verified checkpoints at completed s
 0 and 12, and consumed exactly 786,432 tokens.  This was an infrastructure false
 positive, not a numerical failure of the Vanilla model.
 
+A second launch preflight found a path-contract defect that unit tests using absolute
+temporary directories had not exercised.  With the matrix's project-relative run
+directory, the asynchronous writer passed an already directory-qualified checkpoint
+path to a ring buffer that prefixed the checkpoint directory again.  The file and its
+digest were written correctly, but verification looked under a duplicated path and
+rejected the checkpoint.  Both components now canonicalize their checkpoint directory
+to an absolute path at construction, and a regression test reproduces the exact
+relative-path launch shape.  This failure occurred before any optimizer update and no
+result from either failed preflight is part of the primary study.
+
 The new matrix contains 50 independent runs and processes approximately 25.0 billion
 tokens.  The earlier matrix processed approximately 29.5 billion tokens.  Thus the
 shorter per-run horizon reduces nominal token compute by about 15.2\%, not 50\%,
