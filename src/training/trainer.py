@@ -129,6 +129,8 @@ class Trainer:
         self.tokens_processed = 0
         self.best_val_loss = float("inf")
         self._skipped_steps = 0
+        self._rollback_performed = False
+        self._consecutive_rollbacks = 0
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create AdamW optimizer with proper weight decay grouping.
@@ -185,8 +187,18 @@ class Trainer:
         print(f"  Device: {self.device}")
         print()
 
+        # A health check is allowed to request rollback from the first optimizer
+        # step. Seed the verified ring before entering that failure domain.
+        self._ensure_bootstrap_checkpoint()
+
         while self.step < self.config.max_steps:
+            self._rollback_performed = False
             step_metrics = self._training_step()
+            if self._rollback_performed:
+                continue
+            # self.step denotes the next optimizer update on entry and the
+            # number of completed updates everywhere outside _training_step.
+            self.step += 1
 
             # Logging
             if self.step % self.config.log_interval == 0:
@@ -212,7 +224,10 @@ class Trainer:
                 )
 
             # Evaluation
-            if self.step % self.config.eval_interval == 0 and self.step > 0:
+            if (
+                self.step % self.config.eval_interval == 0
+                and self.step < self.config.max_steps
+            ):
                 eval_start = time.time()
                 val_loss = self._evaluate()
                 eval_time = time.time() - eval_start
@@ -222,10 +237,11 @@ class Trainer:
                 self.run_logger.log_eval(self.step, val_loss, eval_time)
 
             # Checkpointing
-            if self.step % self.config.checkpoint_interval == 0 and self.step > 0:
-                self._save_checkpoint(completed_step=self.step + 1)
-
-            self.step += 1
+            if (
+                self.step % self.config.checkpoint_interval == 0
+                and self.step < self.config.max_steps
+            ):
+                self._save_checkpoint(completed_step=self.step)
 
         # Final evaluation and checkpoint
         eval_start = time.time()
@@ -361,18 +377,42 @@ class Trainer:
                 return metrics
 
         self.optimizer.step()
+        self._consecutive_rollbacks = 0
 
         return metrics
 
+    def _ensure_bootstrap_checkpoint(self) -> None:
+        """Create a verified recovery target before the first optimizer step."""
+        if self.checkpoint_manager is None:
+            return
+        self.checkpoint_manager.wait()
+        if self.checkpoint_manager.rollback() is not None:
+            return
+        self._save_checkpoint(completed_step=self.step)
+        self.checkpoint_manager.wait()
+        if self.checkpoint_manager.rollback() is None:
+            raise RuntimeError("Failed to create a verified bootstrap checkpoint")
+
     def _rollback_to_latest_verified(self) -> None:
         """Restore the newest trusted checkpoint or fail without advancing."""
+        trigger_step = self.step
         if self.checkpoint_manager is None:
             raise RuntimeError("Rollback requested but no verified checkpoint manager is available")
         self.checkpoint_manager.wait()
         rollback_path = self.checkpoint_manager.rollback()
         if rollback_path is None:
             raise RuntimeError("Rollback requested but no verified checkpoint is available")
+        self._consecutive_rollbacks += 1
+        if self._consecutive_rollbacks > 3:
+            raise RuntimeError("Training exceeded three consecutive rollback attempts")
         self.load_checkpoint(rollback_path)
+        self.run_logger.log_recovery(
+            event="health_monitor_rollback",
+            checkpoint=str(rollback_path),
+            trigger_step=trigger_step,
+            attempt=self._consecutive_rollbacks,
+        )
+        self._rollback_performed = True
         if self.health_monitor is not None:
             self.health_monitor.reset()
 

@@ -366,3 +366,127 @@ def test_rollback_without_verified_checkpoint_fails_safely(tmp_path):
         trainer._rollback_to_latest_verified()
 
     writer.shutdown()
+
+
+def test_fault_tolerant_training_bootstraps_checkpoint_and_retries_rollback(tmp_path):
+    """A recovery request before the periodic interval restores step zero and retries it."""
+
+    class RollbackOnceMonitor:
+        def __init__(self) -> None:
+            self.check_calls = 0
+
+        def check(self, step: int, loss: float, grad_norm: float):
+            from src.training.health_monitor import Action
+
+            self.check_calls += 1
+            return Action.ROLLBACK if self.check_calls == 1 else Action.CONTINUE
+
+        def reset(self) -> None:
+            pass
+
+    model_config = ModelConfig(
+        n_layer=1,
+        d_model=16,
+        n_head=2,
+        vocab_size=32,
+        seq_len=4,
+    )
+    batch = (
+        torch.randint(0, 32, (1, 4), dtype=torch.int64),
+        torch.randint(0, 32, (1, 4), dtype=torch.int64),
+    )
+    checkpoint_dir = tmp_path / "checkpoints"
+    writer = AsyncCheckpointWriter(
+        CheckpointRingBuffer(checkpoint_dir, capacity=3), checkpoint_dir
+    )
+    monitor = RollbackOnceMonitor()
+    trainer = Trainer(
+        VanillaTransformer(model_config),
+        TrainConfig(
+            max_steps=1,
+            eval_steps=1,
+            grad_accum_steps=1,
+            checkpoint_interval=100,
+            checkpoint_dir=str(checkpoint_dir),
+            dtype="float32",
+        ),
+        train_loader=SyntheticLoader([batch]),
+        val_loader=SyntheticLoader([batch]),
+        run_logger=RunLogger(tmp_path / "run", config={}),
+        checkpoint_manager=writer,
+        health_monitor=monitor,
+        device="cpu",
+    )
+    initial_parameters = {
+        name: parameter.detach().clone()
+        for name, parameter in trainer.model.named_parameters()
+    }
+
+    trainer.train()
+
+    assert monitor.check_calls == 2
+    assert trainer.step == 1
+    assert trainer.tokens_processed == 4
+    assert any(
+        not torch.equal(initial_parameters[name], parameter)
+        for name, parameter in trainer.model.named_parameters()
+    )
+    assert writer.rollback() is not None
+    recovery_events = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "recovery_events.jsonl").read_text().splitlines()
+    ]
+    assert recovery_events[0]["event"] == "health_monitor_rollback"
+    assert recovery_events[0]["trigger_step"] == 0
+    assert recovery_events[0]["attempt"] == 1
+    assert recovery_events[0]["checkpoint"].endswith("checkpoint_step_000000.pt")
+    writer.shutdown()
+
+
+def test_training_intervals_are_numbered_by_completed_optimizer_steps(tmp_path):
+    """Logs/evaluations/checkpoints at step N represent exactly N completed updates."""
+    model_config = ModelConfig(
+        n_layer=1,
+        d_model=16,
+        n_head=2,
+        vocab_size=32,
+        seq_len=4,
+    )
+    batch = (
+        torch.randint(0, 32, (1, 4), dtype=torch.int64),
+        torch.randint(0, 32, (1, 4), dtype=torch.int64),
+    )
+    checkpoint_dir = tmp_path / "checkpoints"
+    writer = AsyncCheckpointWriter(
+        CheckpointRingBuffer(checkpoint_dir, capacity=4), checkpoint_dir
+    )
+    run_dir = tmp_path / "run"
+    trainer = Trainer(
+        VanillaTransformer(model_config),
+        TrainConfig(
+            max_steps=4,
+            eval_steps=1,
+            grad_accum_steps=1,
+            log_interval=1,
+            eval_interval=2,
+            checkpoint_interval=2,
+            checkpoint_dir=str(checkpoint_dir),
+            dtype="float32",
+        ),
+        train_loader=SyntheticLoader([batch]),
+        val_loader=SyntheticLoader([batch]),
+        run_logger=RunLogger(run_dir, config={}),
+        checkpoint_manager=writer,
+        device="cpu",
+    )
+
+    trainer.train()
+
+    entries = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    train_entries = [entry for entry in entries if entry["type"] == "train"]
+    eval_entries = [entry for entry in entries if entry["type"] == "eval"]
+    assert [entry["step"] for entry in train_entries] == [1, 2, 3, 4]
+    assert [entry["tokens_processed"] for entry in train_entries] == [4, 8, 12, 16]
+    assert [entry["step"] for entry in eval_entries] == [2, 4]
+    assert [entry.step for entry in writer._ring_buffer.list_available()] == [0, 2, 4]
+    writer.shutdown()

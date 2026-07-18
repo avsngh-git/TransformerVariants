@@ -75,7 +75,7 @@ A size configuration that determines the model's width and depth. Applies to any
 | main | Primary benchmark (~51M params) | Yes |
 | stretch | Near-memory-limit exploration (~124M params) | Yes |
 
-Dense variants at the same scale target active-parameter counts within ±5%. Dimensions (d_model, n_layer, n_head) remain fixed; inherent reducers such as GQA and capacity expanders such as the completed MoE recipes are labeled non-conforming when they fall outside tolerance, with active and total counts reported rather than silently compensated.
+Dense variants at the same scale target active-parameter counts within ±5%. Dimensions (d_model, n_layer, n_head) remain fixed. GQA's parameter reduction is reported explicitly. Corrective MoE experts use half the dense SwiGLU hidden width under top-2 routing, matching dense active FFN parameters while retaining larger stored conditional capacity.
 
 ### Run
 
@@ -87,7 +87,7 @@ A controlled comparison: multiple runs across variants and/or seeds under the sa
 
 ### Sliding Window Attention (SWA)
 
-An attention pattern where each query token attends only to the W tokens immediately preceding it (plus itself), rather than the full sequence. W is the window size. In this project, W is a fixed proportion of seq_len (W = seq_len // 4), constant across all layers. SWA applies during training only — generation uses the full KV cache.
+An attention pattern where each query token attends only to the W tokens immediately preceding it (plus itself), rather than the full sequence. W is the window size. In this project, W is a fixed proportion of seq_len (W = seq_len // 4), constant across all layers. SWA applies the same local window during training and cached generation. The current physical KV allocation is pre-sized rather than circular, so bounded attention reach does not yet imply bounded allocated cache memory.
 
 The flash_attn kernel supports SWA natively via its `window_size` parameter. No custom masks or block-sparse patterns are needed.
 
@@ -99,7 +99,7 @@ An autoregressive attention mechanism using the positive feature map `phi(x) = E
 
 ELU+1 is applied first. Following RoFormer equation 19, RoPE rotates the positive Q and K features used by the numerator, while the denominator uses unrotated positive features. Stability-sensitive recurrence products and prefix states use float32. The implementation processes fixed-size chunks: a small triangular matrix handles causal interactions within each chunk, while accumulated state summarizes all earlier chunks. This is algebraically equivalent to the token-wise recurrence.
 
-V5 uses `ModernTransformer` as its model shell (RMSNorm, SwiGLU) and `CausalLinearAttention`. It supports full-sequence validation, long-context diagnostics, and uncached generation. Recurrent generation state is not yet exposed through the shared KV-cache interface, so reusable cached serving remains unsupported.
+V5 uses `ModernTransformer` as its model shell (RMSNorm, SwiGLU) and `CausalLinearAttention`. It supports full-sequence validation, long-context diagnostics, and cached generation through a fixed-size recurrent numerator/denominator state.
 
 ### Shard
 
@@ -245,7 +245,7 @@ A performance optimization where the training loop snapshots model and optimizer
 
 ### Health Monitor
 
-An injected dependency in the Trainer that inspects grad_norm and loss after each step. Maintains a rolling window (default 100 steps) and computes z-scores. Returns one of three actions: CONTINUE (normal), SKIP_STEP (discard the current gradient update, don't step the optimizer), or ROLLBACK (reload the most recent checkpoint from the ring buffer and resume from there).
+An injected dependency in the Trainer that inspects grad_norm and loss after each step. Maintains a rolling window (default 100 steps), requires ten finite baseline samples before z-score decisions, and checks NaN/Inf immediately. Returns one of three actions: CONTINUE (normal), SKIP_STEP (discard the current gradient update, don't step the optimizer), or ROLLBACK (reload the most recent verified checkpoint and retry its completed-step number). Fault-tolerant runs create a verified step-zero bootstrap checkpoint before monitoring can request recovery.
 
 ### Fault Injection Test
 

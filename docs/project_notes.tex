@@ -3065,6 +3065,27 @@ $3\times10^{-5}$, 250 warmup steps, cosine decay, and gradient-norm clipping at 
 All of these values, the BF16 precision policy, and the 20-batch evaluation length
 are explicit in the YAML manifest rather than inherited silently from code defaults.
 
+Before the first optimizer update, fault-tolerant training writes and verifies a
+step-zero bootstrap checkpoint.  The health monitor collects ten finite observations
+before applying rolling z-score decisions, although NaN and infinity checks remain
+active immediately.  A rollback restores the verified model, optimizer, loader,
+random-number-generator, and token-count state; the restored step is retried rather
+than counted as complete, and the event is appended to a structured recovery log.
+More than three consecutive rollbacks terminates the run for diagnosis.  Interval
+labels count completed optimizer updates, so step 3,750 corresponds to exactly
+245,760,000 consumed tokens rather than 3,751 updates.
+
+The first full-matrix preflight exposed why both safeguards matter.  The original
+monitor began z-score decisions after only two observations.  A deterministic replay
+showed healthy early loss and gradient-norm pairs of $(10.9537,7.70)$,
+$(10.9391,7.84)$, and $(10.8874,7.78)$; because the first two losses had very small
+variance, the third appeared more than eight standard deviations from their mean.
+Three normal warmup changes were consequently classified as skip, skip, and rollback,
+before the first periodic checkpoint existed.  The corrected 12-step GPU replay
+completed without a recovery event, retained verified checkpoints at completed steps
+0 and 12, and consumed exactly 786,432 tokens.  This was an infrastructure false
+positive, not a numerical failure of the Vanilla model.
+
 The new matrix contains 50 independent runs and processes approximately 25.0 billion
 tokens.  The earlier matrix processed approximately 29.5 billion tokens.  Thus the
 shorter per-run horizon reduces nominal token compute by about 15.2\%, not 50\%,

@@ -34,6 +34,9 @@ We chose direct injection (Option 1).
 - No callback infrastructure to build and maintain
 - Easy to test: mock the monitor, verify Trainer respects actions
 - `monitor=None` is the default — zero behavioral change for existing code
+- Fault-tolerant training seeds a verified step-zero checkpoint, builds a ten-sample
+  finite baseline before z-score decisions, and retries rather than advances a
+  restored step. NaN/Inf detection remains immediate.
 
 **Tradeoffs:**
 - If future hooks are needed (e.g., logging callbacks, profiling), they'd be

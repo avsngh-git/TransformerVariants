@@ -82,13 +82,10 @@ class RunLogger:
         self._write_header()
 
         if config.get("resumed_from"):
-            recovery_event = {
-                "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "event": "verified_checkpoint_resume",
-                "resumed_from": config["resumed_from"],
-            }
-            with open(self.run_dir / "recovery_events.jsonl", "a") as f:
-                f.write(json.dumps(recovery_event) + "\n")
+            self.log_recovery(
+                event="verified_checkpoint_resume",
+                checkpoint=str(config["resumed_from"]),
+            )
 
         # Create empty metrics.jsonl if it doesn't exist
         if not self.metrics_path.exists():
@@ -240,6 +237,27 @@ Warmup:       {training.get('warmup_steps', 0)} steps
             f.write(f"Total tokens:     {results.get('total_tokens', 0):,}\n")
             f.write(f"Total time:       {self._format_time(results.get('total_time', 0))}\n")
             f.write(f"Avg tok/s:        {results.get('avg_tokens_per_sec', 0):,.0f}\n")
+
+    def log_recovery(
+        self,
+        *,
+        event: str,
+        checkpoint: str,
+        trigger_step: int | None = None,
+        attempt: int | None = None,
+    ) -> None:
+        """Append one structured resume or rollback event."""
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "event": event,
+            "checkpoint": checkpoint,
+        }
+        if trigger_step is not None:
+            payload["trigger_step"] = trigger_step
+        if attempt is not None:
+            payload["attempt"] = attempt
+        with open(self.run_dir / "recovery_events.jsonl", "a") as f:
+            f.write(json.dumps(payload) + "\n")
 
     @property
     def checkpoint_dir(self) -> Path:

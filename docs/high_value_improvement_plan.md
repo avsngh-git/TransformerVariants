@@ -215,6 +215,15 @@ Every new run uses the hardened checkpoint path. Completion requires a verified 
 checkpoint. An interrupted run resumes only from the newest checkpoint whose file
 hash matches the persisted ring metadata.
 
+The trainer writes and verifies a step-zero bootstrap checkpoint before the first
+optimizer update, requires ten finite observations before z-score anomaly decisions,
+and stops after more than three consecutive rollback attempts. NaN/Inf checks remain
+active immediately. A rollback restores loader/RNG/optimizer state, records a
+structured recovery event, and retries the restored step; it is not counted as a
+completed update. Logs, evaluations, and checkpoint intervals use one-based completed
+optimizer-step numbers, so a record labeled step 3,750 represents exactly 3,750
+updates and 245,760,000 tokens.
+
 In addition to the existing injection tests, preserve one recruiter-facing recovery
 demonstration: interrupt a debug run, corrupt its latest checkpoint, recover the
 preceding verified checkpoint, and compare resumed versus uninterrupted loss. This is
@@ -241,6 +250,8 @@ its versioned result belongs at `reports/fault_recovery_demo.json`.
   the 2026-07-18 preflight).
 - [x] Demonstrate checksum-detected corruption, rollback, deterministic replay, and
   exact agreement with uninterrupted training.
+- [x] Correct the launch-preflight health-monitor false positive, add a verified
+  step-zero bootstrap, and make interval labels count completed updates.
 
 ### Phase B — primary retraining
 

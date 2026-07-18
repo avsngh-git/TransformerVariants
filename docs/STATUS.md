@@ -173,7 +173,7 @@ Operational state of the project. Read this to understand what's built, what's r
 
 ## Test Suite
 
-761 tests collected. The final offline release validation passed 742 tests, skipped
+764 tests collected. The final offline release validation passed 745 tests, skipped
 18 hardware-specific tests, and deselected one network test. The final L4 CUDA
 validation covered all 64 selected cases: 63 passed in the combined regression, then
 the corrected ALiBi case and five ablation checks passed together.

@@ -35,6 +35,9 @@ class HealthMonitor:
         Z-score threshold above which a loss value is considered anomalous (default 5.0).
     max_consecutive_skips : int
         Number of consecutive SKIP_STEP actions before escalating to ROLLBACK (default 3).
+    min_samples : int
+        Number of finite observations required before z-score decisions (default 10).
+        NaN and Inf checks remain active immediately.
     """
 
     def __init__(
@@ -43,11 +46,17 @@ class HealthMonitor:
         grad_norm_z_threshold: float = 5.0,
         loss_z_threshold: float = 5.0,
         max_consecutive_skips: int = 3,
+        min_samples: int = 10,
     ):
+        if min_samples < 2:
+            raise ValueError("min_samples must be at least 2")
+        if min_samples > window_size:
+            raise ValueError("min_samples must not exceed window_size")
         self.window_size = window_size
         self.grad_norm_z_threshold = grad_norm_z_threshold
         self.loss_z_threshold = loss_z_threshold
         self.max_consecutive_skips = max_consecutive_skips
+        self.min_samples = min_samples
 
         self._loss_window: deque[float] = deque(maxlen=window_size)
         self._grad_norm_window: deque[float] = deque(maxlen=window_size)
@@ -76,7 +85,7 @@ class HealthMonitor:
             return Action.ROLLBACK
 
         # Insufficient data — can't compute z-score yet
-        if len(self._loss_window) < 2:
+        if len(self._loss_window) < self.min_samples:
             self._loss_window.append(loss)
             self._grad_norm_window.append(grad_norm)
             return Action.CONTINUE

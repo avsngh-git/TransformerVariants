@@ -210,6 +210,12 @@ runs/<run_id>/
   checkpoints/
 ```
 
+Fault-tolerant runs create a verified step-zero bootstrap checkpoint before entering
+the optimizer loop. Health z-scores require ten finite baseline observations; NaN/Inf
+checks are immediate. Rollback restores and retries the saved completed-step number,
+records a JSONL recovery event, and aborts after more than three consecutive attempts.
+All displayed step numbers count completed optimizer updates.
+
 ### Processed dataset outputs
 
 ```
@@ -245,6 +251,7 @@ reports/<experiment>/site_assets/
 | Date | Change | Justification |
 |------|--------|---------------|
 | 2026-07-18 | Canonical 500M-token, five-seed corrective study | Match MoE active parameters, produce independent histories, run fault-tolerant training, and add retrieval/serving evidence |
+| 2026-07-18 | Fault-monitor launch preflight | Require a ten-sample finite baseline, seed a verified step-zero checkpoint, retry rollbacks, and number intervals by completed updates |
 | 2026-07-15 | Active/total parameter accounting; static HTML report | Correct the implemented SwiGLU/MoE counts, preserve documented parity exceptions, and replace the unwanted Streamlit runtime |
 | 2026-07-16 | Fault-tolerant CLI and static-site asset contract | Complete recovery integration while keeping the Jekyll frontend in its own repository |
 | 2025-01-01 | Initial contract | Phase 00 creation |

@@ -3,15 +3,13 @@
 Tests cover:
 - NaN loss triggers ROLLBACK
 - Inf grad_norm triggers ROLLBACK
-- Warmup period (< 2 data points) returns CONTINUE
+- Baseline warmup period (< 10 data points) returns CONTINUE
 - Z-score spike returns SKIP_STEP
 - 3 consecutive skips escalate to ROLLBACK
 - Normal step resets consecutive skip counter
 - reset() clears window and counter
 - Zero std doesn't cause division by zero
 """
-
-import math
 
 import pytest
 
@@ -92,7 +90,7 @@ class TestHealthMonitorNaNInf:
 
 
 class TestHealthMonitorWarmup:
-    """Tests for warmup handling (< 2 data points → CONTINUE)."""
+    """Tests for warmup handling (< min_samples data points → CONTINUE)."""
 
     def test_first_step_returns_continue(self, monitor):
         """The very first step should return CONTINUE (warmup)."""
@@ -105,13 +103,36 @@ class TestHealthMonitorWarmup:
         result = monitor.check(step=1, loss=1.0, grad_norm=0.5)
         assert result == Action.CONTINUE
 
-    def test_third_step_can_compute_zscore(self, monitor):
-        """After 2 data points, z-score computation should proceed."""
+    def test_third_step_remains_in_baseline_warmup(self, monitor):
+        """Two observations are not a reliable anomaly baseline."""
         monitor.check(step=0, loss=1.0, grad_norm=0.5)
         monitor.check(step=1, loss=1.0, grad_norm=0.5)
         # Third step with normal values should still CONTINUE
         result = monitor.check(step=2, loss=1.0, grad_norm=0.5)
         assert result == Action.CONTINUE
+
+    def test_healthy_main_scale_warmup_trajectory_does_not_trigger_recovery(self):
+        """Normal early optimization drift must build a baseline, not look anomalous."""
+        monitor = HealthMonitor()
+        healthy_metrics = [
+            (10.9537, 7.70),
+            (10.9391, 7.84),
+            (10.8874, 7.78),
+            (10.8332, 7.05),
+            (10.7474, 7.08),
+            (10.6551, 6.25),
+            (10.5720, 5.44),
+            (10.5057, 4.74),
+            (10.4246, 4.25),
+            (10.3712, 3.82),
+        ]
+
+        actions = [
+            monitor.check(step, loss=loss, grad_norm=grad_norm)
+            for step, (loss, grad_norm) in enumerate(healthy_metrics)
+        ]
+
+        assert actions == [Action.CONTINUE] * len(healthy_metrics)
 
 
 class TestHealthMonitorZScore:
@@ -291,6 +312,7 @@ class TestHealthMonitorInit:
         assert m.grad_norm_z_threshold == 5.0
         assert m.loss_z_threshold == 5.0
         assert m.max_consecutive_skips == 3
+        assert m.min_samples == 10
 
     def test_custom_parameters(self):
         """Custom parameters should be stored correctly."""
@@ -299,11 +321,13 @@ class TestHealthMonitorInit:
             grad_norm_z_threshold=3.0,
             loss_z_threshold=4.0,
             max_consecutive_skips=5,
+            min_samples=20,
         )
         assert m.window_size == 50
         assert m.grad_norm_z_threshold == 3.0
         assert m.loss_z_threshold == 4.0
         assert m.max_consecutive_skips == 5
+        assert m.min_samples == 20
 
     def test_window_uses_deque_with_maxlen(self):
         """Internal windows should be bounded deques."""
