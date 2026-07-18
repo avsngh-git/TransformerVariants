@@ -1,17 +1,17 @@
 """Tests for the V1 Modern Transformer (RoPE, RMSNorm, SwiGLU, Flash Attention)."""
 
-import math
+from dataclasses import replace
 
 import pytest
 import torch
 
 from src.models.config import ModelConfig
-from src.models.rmsnorm import RMSNorm
-from src.models.rope import precompute_rope_frequencies, apply_rope
-from src.models.swiglu_ffn import SwiGLUFeedForward
-from src.models.modern_attention import ModernAttention
-from src.models.modern_transformer import ModernTransformerBlock, ModernTransformer
 from src.models.generate import generate
+from src.models.modern_attention import ModernAttention
+from src.models.modern_transformer import ModernTransformer
+from src.models.rmsnorm import RMSNorm
+from src.models.rope import apply_rope, precompute_rope_frequencies
+from src.models.swiglu_ffn import SwiGLUFeedForward
 
 
 @pytest.fixture
@@ -26,6 +26,12 @@ def config():
         dropout=0.0,
         bias=False,
         tie_embeddings=True,
+        variant="modern",
+        norm_type="rmsnorm",
+        position_encoding="rope",
+        ffn_type="swiglu",
+        attention_type="flash_sdpa",
+        activation="swiglu",
     )
 
 
@@ -167,7 +173,17 @@ class TestModernTransformer:
     def test_parameter_count_comparable_to_v0(self, config):
         """V1 should have roughly similar params to V0 (within 20%)."""
         from src.models.vanilla_transformer import VanillaTransformer
-        v0 = VanillaTransformer(config)
+        v0 = VanillaTransformer(
+            replace(
+                config,
+                variant="vanilla",
+                norm_type="layernorm",
+                position_encoding="learned",
+                ffn_type="standard",
+                attention_type="full",
+                activation="gelu",
+            )
+        )
         v1 = ModernTransformer(config)
         v0_params = sum(p.numel() for p in v0.parameters())
         v1_params = sum(p.numel() for p in v1.parameters())

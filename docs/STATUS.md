@@ -40,7 +40,7 @@ Operational state of the project. Read this to understand what's built, what's r
 - Learned position embeddings
 - Pre-LayerNorm
 - Standard multi-head attention with causal mask
-- Configurable activation: ReLU (vanilla) or GELU (GPT-2 match)
+- GELU in the canonical experiment; ReLU remains an explicit pedagogical ablation
 - Weight tying (embedding ↔ output head)
 - GPT-2 weight initialization (N(0, 0.02), residual scaling 1/√(2*n_layers))
 
@@ -118,7 +118,7 @@ Operational state of the project. Read this to understand what's built, what's r
 **Architecture:**
 - V4 (SWA): Each query attends only to `window_size = seq_len // 4` preceding tokens. Uses `FlashAttention` with `window_size` kwarg — flash_attn kernel handles windowing natively.
 - V4-interleaved: Even layers use full attention (window_size=None), odd layers use SWA. Per-layer configs built by registry.
-- V5 (Linear): causal ELU+1 prefix-state attention with RoPE; recurrent generation cache is not yet exposed.
+- V5 (Linear): causal ELU+1 prefix-state attention with RoPE and a fixed-size recurrent generation state.
 
 ---
 
@@ -164,7 +164,7 @@ Operational state of the project. Read this to understand what's built, what's r
 - `scripts/evaluate.py` — Thin CLI shell over EvaluationPipeline
 - Full test suite: 210 evaluation tests
 
-### Architecture Refactors ✅ (uncommitted)
+### Architecture Refactors ✅
 - **Registry deepening** — `src/models/registry.py` refactored: variant-specific knowledge now lives in `VariantSpec.config_overrides` callables. `build()` is a generic dispatcher. `per_layer_config_builder` for swa_interleaved.
 - **AttentionModule Protocol** — `src/models/attention_protocol.py` formalizes the informal attention contract. Type annotations updated in `TransformerBlock` and `ModernTransformerBlock`.
 - **CONTEXT.md** updated with Evaluation Pipeline, ProbeTarget, and AttentionModule terms.
@@ -173,7 +173,12 @@ Operational state of the project. Read this to understand what's built, what's r
 
 ## Test Suite
 
-736 tests collected:
+761 tests collected. The final offline release validation passed 742 tests, skipped
+18 hardware-specific tests, and deselected one network test. The final L4 CUDA
+validation covered all 64 selected cases: 63 passed in the combined regression, then
+the corrected ALiBi case and five ablation checks passed together.
+
+Key suites include:
 - `tests/test_evaluate_cli.py` — Pipeline seed detection, aggregation, metadata/raw data writing
 - `tests/test_flops.py` — FLOP computation correctness
 - `tests/test_metrics.py` — Metrics extraction, ICL fitting
@@ -216,7 +221,7 @@ Run all tests: `conda run --no-capture-output -n transformer_lab python -m pytes
 
 - `configs/project_defaults.yaml` — Global defaults (hardware, training, eval metrics)
 - `configs/data/debug.yaml` — Data pipeline config (dataset, tokenizer, shard size)
-- `configs/model/vanilla.yaml` — V0 vanilla (ReLU, all 3 scales)
+- `configs/model/vanilla.yaml` — V0 GELU baseline (all 3 scales)
 - `configs/model/vanilla_gpt2.yaml` — V0 with GELU activation
 - `configs/model/modern.yaml` — V1 modern (LLaMA-style)
 - `configs/model/alibi.yaml` — V2 ALiBi
@@ -272,9 +277,11 @@ Install: `pip install -e ".[data]"`
 
 ## What's next
 
-- Compose the separate GitHub Pages/Jekyll repository from `site_assets/`.
-- Keep unsupported attention/cache paths explicit in the presentation.
-- Re-export assets after any evaluator, checkpoint, or report-schema change.
+- Run the canonical 500M-token, five-seed corrective matrix from
+  `configs/experiment/main_500m_5seed.yaml` with verified fault-tolerant checkpoints.
+- Evaluate passkey/needle retrieval, the realistic serving matrix, and MoE routing.
+- Freeze an untouched test split before publishing the new primary results.
+- Re-export assets to the separate Jekyll repository after the new report is complete.
 
 ---
 

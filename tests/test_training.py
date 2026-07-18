@@ -196,6 +196,7 @@ class TestTrainingIntegration:
 
         # Loss should decrease
         assert results["final_train_loss"] < initial_loss
+        assert results["best_val_loss"] <= results["final_val_loss"]
 
 
 class TestModernTrainingIntegration:
@@ -267,6 +268,7 @@ class TestModernTrainingIntegration:
 
         # Loss should decrease
         assert results["final_train_loss"] < initial_loss
+        assert results["best_val_loss"] <= results["final_val_loss"]
 
 
 class _FiniteForwardNaNBackward(torch.autograd.Function):

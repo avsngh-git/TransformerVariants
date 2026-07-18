@@ -19,6 +19,7 @@ from src.models.gqa_attention import GQAAttention
 from src.models.linear_attention import CausalLinearAttention
 from src.models.modern_attention import ModernAttention
 from src.models.modern_transformer import ModernTransformer
+from src.models.swiglu_ffn import swiglu_hidden_dim
 from src.models.vanilla_transformer import VanillaTransformer
 
 SCALES: dict[str, dict[str, int]] = {
@@ -67,11 +68,27 @@ def _swa_interleaved_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
 
 
 def _moe_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
-    """MoE: set num_experts and routing hyperparameters on base config."""
+    """MoE: configure top-2 routing with dense-matched active FFN width."""
     config.num_experts = 8
     config.moe_top_k = 2
+    dense_hidden_dim = swiglu_hidden_dim(dims["d_model"])
+    if dense_hidden_dim % config.moe_top_k != 0:
+        raise ValueError(
+            f"Dense SwiGLU width {dense_hidden_dim} is not divisible by top-k "
+            f"{config.moe_top_k}; active parameter matching would be inexact"
+        )
+    config.moe_expert_hidden_dim = dense_hidden_dim // config.moe_top_k
     config.aux_loss_alpha = 0.01
     config.z_loss_beta = 0.001
+    return config
+
+
+def _gelu_ablation_overrides(config: ModelConfig, dims: dict) -> ModelConfig:
+    """Match a two-matrix GELU FFN to the Modern three-matrix SwiGLU FFN."""
+    swiglu_width = swiglu_hidden_dim(dims["d_model"])
+    if (3 * swiglu_width) % 2 != 0:
+        raise ValueError("SwiGLU width cannot be matched exactly by a standard FFN")
+    config.ffn_hidden_dim = 3 * swiglu_width // 2
     return config
 
 
@@ -155,7 +172,7 @@ VARIANTS: dict[str, VariantSpec] = {
         ffn_type="standard",
         attention_type="full",
         attention_class=CausalSelfAttention,
-        default_activation="relu",
+        default_activation="gelu",
         requires_bf16=False,
     ),
     "modern": VariantSpec(
@@ -168,6 +185,40 @@ VARIANTS: dict[str, VariantSpec] = {
         attention_class=ModernAttention,
         default_activation="swiglu",
         requires_bf16=False,
+    ),
+    "modern_abspos": VariantSpec(
+        model_class=ModernTransformer,
+        variant="modern_abspos",
+        norm_type="rmsnorm",
+        position_encoding="learned",
+        ffn_type="swiglu",
+        attention_type="flash_sdpa",
+        attention_class=ModernAttention,
+        default_activation="swiglu",
+        requires_bf16=False,
+    ),
+    "modern_layernorm": VariantSpec(
+        model_class=ModernTransformer,
+        variant="modern_layernorm",
+        norm_type="layernorm",
+        position_encoding="rope",
+        ffn_type="swiglu",
+        attention_type="flash_sdpa",
+        attention_class=ModernAttention,
+        default_activation="swiglu",
+        requires_bf16=False,
+    ),
+    "modern_gelu": VariantSpec(
+        model_class=ModernTransformer,
+        variant="modern_gelu",
+        norm_type="rmsnorm",
+        position_encoding="rope",
+        ffn_type="standard",
+        attention_type="flash_sdpa",
+        attention_class=ModernAttention,
+        default_activation="gelu",
+        requires_bf16=False,
+        config_overrides=_gelu_ablation_overrides,
     ),
     "alibi": VariantSpec(
         model_class=ModernTransformer,

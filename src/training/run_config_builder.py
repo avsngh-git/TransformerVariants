@@ -71,7 +71,7 @@ class RunConfigBuilder:
         max_steps = args.max_steps if args.max_steps is not None else spec.default_steps[args.scale]
 
         # Format labels
-        activation_label = args.activation if args.variant == "vanilla" else "swiglu"
+        activation_label = model_config.activation
         variant_label = f"vanilla_{args.activation}" if args.variant == "vanilla" else args.variant
 
         # Resolve checkpoint directory
@@ -84,7 +84,10 @@ class RunConfigBuilder:
         # Build TrainConfig
         train_config = TrainConfig(
             max_lr=args.max_lr,
-            min_lr=args.max_lr * 0.1,
+            min_lr=args.min_lr if args.min_lr is not None else args.max_lr * 0.1,
+            weight_decay=args.weight_decay,
+            beta1=args.beta1,
+            beta2=args.beta2,
             warmup_steps=args.warmup_steps,
             max_steps=max_steps,
             micro_batch_size=args.micro_batch_size,
@@ -93,6 +96,7 @@ class RunConfigBuilder:
             dtype=args.dtype,
             log_interval=args.log_interval,
             eval_interval=args.eval_interval,
+            eval_steps=args.eval_steps,
             checkpoint_interval=args.checkpoint_interval,
             checkpoint_dir=checkpoint_dir,
         )
@@ -113,6 +117,7 @@ class RunConfigBuilder:
         run_config = {
             "variant": args.variant,
             "scale": args.scale,
+            "seed": args.seed,
             "model": {
                 "n_layer": model_config.n_layer,
                 "d_model": model_config.d_model,
@@ -123,18 +128,40 @@ class RunConfigBuilder:
                 "bias": model_config.bias,
                 "dropout": model_config.dropout,
                 "tie_embeddings": model_config.tie_embeddings,
+                "norm_type": model_config.norm_type,
+                "position_encoding": model_config.position_encoding,
+                "ffn_type": model_config.ffn_type,
+                "ffn_multiplier": model_config.ffn_multiplier,
+                "ffn_hidden_dim": model_config.ffn_hidden_dim,
+                "attention_type": model_config.attention_type,
+                "attention_backend": model_config.attention_backend,
+                "n_kv_head": model_config.n_kv_head,
+                "window_size": model_config.window_size,
+                "num_experts": model_config.num_experts,
+                "moe_top_k": model_config.moe_top_k,
+                "moe_expert_hidden_dim": model_config.moe_expert_hidden_dim,
+                "aux_loss_alpha": model_config.aux_loss_alpha,
+                "z_loss_beta": model_config.z_loss_beta,
                 "total_params": n_params,
             },
             "training": {
                 "max_steps": max_steps,
                 "max_lr": args.max_lr,
-                "min_lr": args.max_lr * 0.1,
+                "min_lr": (
+                    args.min_lr if args.min_lr is not None else args.max_lr * 0.1
+                ),
+                "weight_decay": args.weight_decay,
+                "beta1": args.beta1,
+                "beta2": args.beta2,
                 "warmup_steps": args.warmup_steps,
                 "micro_batch_size": args.micro_batch_size,
                 "grad_accum_steps": args.grad_accum_steps,
                 "grad_clip": args.grad_clip,
                 "dtype": args.dtype,
                 "compiled": args.compile,
+                "eval_interval": args.eval_interval,
+                "eval_steps": args.eval_steps,
+                "checkpoint_interval": args.checkpoint_interval,
             },
             "data": {
                 "data_dir": args.data_dir,

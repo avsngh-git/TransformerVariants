@@ -1,6 +1,7 @@
 # V6-full: Mixture of Experts (all layers MoE)
 # Mixtral-style 8 experts with top-2 routing per token.
-# All layers use MoEFeedForward. Active params match V1 dense baseline (~51M).
+# All layers use MoEFeedForward. Each expert has half the dense SwiGLU width,
+# so top-2 active FFN parameters match one dense FFN (router overhead <0.1%).
 
 model:
   variant: moe
@@ -13,6 +14,7 @@ model:
 
   num_experts: 8
   moe_top_k: 2
+  moe_expert_hidden_dim: 704
   aux_loss_alpha: 0.01
   z_loss_beta: 0.001
 

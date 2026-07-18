@@ -20,8 +20,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.config import ModelConfig
 from src.models.attention import CausalSelfAttention
+from src.models.cache import cache_sequence_length
+from src.models.config import ModelConfig
 from src.models.ffn import FeedForward
 
 if TYPE_CHECKING:
@@ -204,7 +205,7 @@ class VanillaTransformer(nn.Module):
         # Determine position offset from cache
         # If we have cached positions, the new tokens start after them
         if kv_cache is not None and kv_cache[0] is not None:
-            past_len = kv_cache[0][0].size(2)  # number of cached positions
+            past_len = cache_sequence_length(kv_cache[0])
         else:
             past_len = 0
 
@@ -246,5 +247,4 @@ class VanillaTransformer(nn.Module):
             )
 
         return logits, loss, new_kv_cache
-
 

@@ -48,7 +48,8 @@ class MoEFeedForward(nn.Module):
 
         # Expert FFNs: N independent SwiGLU instances
         self.experts = nn.ModuleList([
-            SwiGLUFeedForward(config) for _ in range(self.num_experts)
+            SwiGLUFeedForward(config, hidden_dim=config.moe_expert_hidden_dim)
+            for _ in range(self.num_experts)
         ])
 
         # Internal aux loss buffer (set during forward, cleared on retrieval)

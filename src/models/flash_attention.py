@@ -15,7 +15,7 @@ import torch
 
 from src.models.config import ModelConfig
 from src.models.flash_attention_base import FlashAttentionBase
-from src.models.rope import precompute_rope_frequencies, apply_rope
+from src.models.rope import apply_rope, precompute_rope_frequencies
 
 
 class FlashAttention(FlashAttentionBase):
@@ -75,13 +75,13 @@ class FlashAttention(FlashAttentionBase):
 
     def _extra_training_kwargs(self) -> dict[str, Any]:
         """Return training-path kwargs: alibi_slopes + window_size when configured."""
-        kwargs = self._extra_attn_kwargs()  # gets alibi_slopes if present
-        if self._window_size is not None:
-            kwargs["window_size"] = (self._window_size, self._window_size)
-        return kwargs
+        return self._extra_attn_kwargs()
 
     def _extra_attn_kwargs(self) -> dict[str, Any]:
         """Return alibi_slopes if configured, otherwise empty dict."""
+        kwargs: dict[str, Any] = {}
         if self.alibi_slopes is not None:
-            return {"alibi_slopes": self.alibi_slopes}
-        return {}
+            kwargs["alibi_slopes"] = self.alibi_slopes
+        if self._window_size is not None:
+            kwargs["window_size"] = (self._window_size, self._window_size)
+        return kwargs

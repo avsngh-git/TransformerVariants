@@ -41,7 +41,7 @@ but it must not be described as Linformer.
 - V5 attention complexity is `O(T * d_head^2)`, linear in sequence length.
 - Attention entropy is unavailable because no softmax probability matrix is
   materialized.
-- Recurrent generation state is mathematically possible but is not yet exposed
+- Recurrent generation state is exposed as fixed-size numerator/denominator prefix statistics
   through the project's shared KV-cache interface.
 - The three V5 main-scale seeds must be retrained, followed by a full evaluation
   rerun. Old V5 checkpoints and their rows/plots must not be reused.

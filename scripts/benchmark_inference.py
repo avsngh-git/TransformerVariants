@@ -14,8 +14,9 @@ import torch
 from src.data.dataloader import ShardedDataLoader
 from src.evaluation.benchmarks import (
     aggregate_long_context_runs,
-    benchmark_generation,
+    benchmark_generation_matrix,
     evaluate_long_context,
+    extend_context,
     rank_long_context_variants,
 )
 from src.evaluation.comparison import VariantData, load_variant_data
@@ -28,10 +29,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--prompt-length", type=int, default=128)
-    parser.add_argument("--new-tokens", type=int, default=32)
-    parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--warmups", type=int, default=1)
+    parser.add_argument(
+        "--prompt-lengths", type=int, nargs="+", default=[64, 512, 1024, 4096]
+    )
+    parser.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 4, 8])
+    parser.add_argument("--new-tokens", type=int, default=128)
+    parser.add_argument("--repeats", type=int, default=30)
+    parser.add_argument("--warmups", type=int, default=10)
     parser.add_argument("--windows", type=int, default=8)
     parser.add_argument("--tail-tokens", type=int, default=256)
     parser.add_argument("--generation-seed", type=int, default=42)
@@ -68,11 +72,17 @@ def _infer_seed(checkpoint_dir: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _unsupported_generation(reason: str) -> dict:
+def _unsupported_generation_cells(
+    prompt_length: int,
+    batch_sizes: list[int],
+    reason: str,
+) -> dict[str, dict]:
     return {
-        "uncached": {"status": "unsupported", "reason": reason},
-        "cached": {"status": "unsupported", "reason": reason},
-        "kv_cache": {"status": "unsupported", "reason": reason},
+        f"prompt_{prompt_length}_batch_{batch_size}": {
+            "status": "unsupported",
+            "reason": reason,
+        }
+        for batch_size in batch_sizes
     }
 
 
@@ -111,7 +121,7 @@ def main() -> None:
     results: dict[str, dict] = {}
     for variant_name, checkpoints in sorted(groups.items()):
         representative = _representative_checkpoint(checkpoints, args.generation_seed)
-        generation = _unsupported_generation("representative checkpoint could not be loaded")
+        generation: dict[str, dict] = {}
         runs: list[dict] = []
 
         for variant in sorted(checkpoints, key=lambda item: str(item.checkpoint_dir)):
@@ -134,16 +144,29 @@ def main() -> None:
                 continue
 
             if variant is representative:
-                try:
-                    generation = benchmark_generation(
-                        model,
-                        prompt_length=args.prompt_length,
-                        new_tokens=args.new_tokens,
-                        repeats=args.repeats,
-                        warmups=args.warmups,
+                for prompt_length in sorted(set(args.prompt_lengths)):
+                    required_context = prompt_length + args.new_tokens
+                    supported, reason = extend_context(model, required_context)
+                    if not supported:
+                        generation.update(
+                            _unsupported_generation_cells(
+                                prompt_length,
+                                args.batch_sizes,
+                                reason or "context extension is unsupported",
+                            )
+                        )
+                        continue
+                    generation.update(
+                        benchmark_generation_matrix(
+                            model,
+                            prompt_lengths=[prompt_length],
+                            batch_sizes=args.batch_sizes,
+                            new_tokens=args.new_tokens,
+                            repeats=args.repeats,
+                            warmups=args.warmups,
+                            seed=args.generation_seed,
+                        )
                     )
-                except (AssertionError, NotImplementedError, RuntimeError, ValueError) as exc:
-                    generation = _unsupported_generation(str(exc))
 
             long_context = evaluate_long_context(
                 model,
@@ -181,7 +204,7 @@ def main() -> None:
         else "cpu"
     )
     output = {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "hardware": hardware,
         "software_versions": {
@@ -189,9 +212,9 @@ def main() -> None:
             "torch": torch.__version__,
         },
         "settings": {
-            "prompt_length": args.prompt_length,
+            "prompt_lengths": sorted(set(args.prompt_lengths)),
             "new_tokens": args.new_tokens,
-            "generation_batch_size": 1,
+            "generation_batch_sizes": sorted(set(args.batch_sizes)),
             "repeats": args.repeats,
             "warmups": args.warmups,
             "context_lengths": sorted(set(args.context_lengths)),
@@ -209,6 +232,10 @@ def main() -> None:
         },
         "limitations": [
             "Generation and KV-cache timing use one representative checkpoint per variant.",
+            (
+                "Serving cells that exceed a variant's supported context are explicit, "
+                "not extrapolated."
+            ),
             "Long-context quality uses fixed windows rather than the entire validation corpus.",
             "Models were trained at 1024 tokens; longer lengths measure extrapolation.",
             "Unsupported cache and context-extension paths are reported rather than emulated.",

@@ -1,0 +1,86 @@
+schema_version: 1
+experiment_id: main_500m_5seed
+description: >-
+  Primary fair-comparison sweep: ten recipes, five seeds, approximately 500M
+  tokens per run, and verified fault-tolerant checkpoints.
+
+data_dir: data/processed/fineweb-1B
+dataset_manifest: data/processed/fineweb-1B/manifest.json
+dataset_inventory: reports/data/fineweb_1b_sha256.json
+scale: main
+variants:
+  - vanilla
+  - modern
+  - alibi
+  - gqa
+  - swa
+  - swa_interleaved
+  - linear
+  - moe
+  - moe_interleaved
+  - moe_deep
+seeds: [42, 137, 2024, 31415, 271828]
+
+training:
+  max_steps: 7629
+  target_tokens_per_run: 500000000
+  sequence_length: 1024
+  micro_batch_size: 8
+  grad_accum_steps: 8
+  max_lr: 0.0003
+  min_lr: 0.00003
+  warmup_steps: 250
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  dtype: bfloat16
+  eval_interval: 250
+  eval_steps: 20
+  checkpoint_interval: 1250
+  log_interval: 10
+
+fault_tolerance:
+  enabled: true
+  checkpoint_ring_size: 3
+  resume_latest_verified: true
+
+variant_overrides:
+  vanilla: {activation: gelu, compile: true}
+  modern: {compile: true}
+  alibi: {compile: true}
+  gqa: {compile: true}
+  swa: {compile: true}
+  swa_interleaved: {compile: true}
+  linear: {compile: true}
+  moe: {compile: false}
+  moe_interleaved: {compile: false}
+  moe_deep: {compile: false}
+
+analysis:
+  endpoint_key: val_loss
+  primary_endpoint: fresh fixed-validation loss at 499974144 training tokens
+  uncertainty_unit: >-
+    sample standard deviation and 95% confidence interval across five independent
+    training seeds
+  paired_seed_analysis: true
+  paired_comparisons:
+    - baseline: vanilla
+      candidate: modern
+      role: primary bundled-recipe comparison
+    - baseline: modern
+      candidate: moe
+      role: active-matched sparse comparison
+    - baseline: modern
+      candidate: moe_interleaved
+      role: active-matched sparse comparison
+    - baseline: modern
+      candidate: moe_deep
+      role: active-matched sparse comparison
+  untouched_test_required_before_final_claims: true
+
+output:
+  run_template: runs/main_500m_5seed/{variant}_s{seed}
+  checkpoint_template: runs/main_500m_5seed/{variant}_s{seed}/checkpoints
+  resolved_manifest: reports/500M_5seed/resolved_manifest.json
+  report_dir: reports/500M_5seed

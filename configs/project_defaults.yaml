@@ -43,21 +43,23 @@ experiment_defaults:
     max_parameters: 125_000_000
 
   main_training_tokens:
-    min_tokens: 100_000_000
-    max_tokens: 300_000_000
+    target_tokens: 500_000_000
+    exact_tokens_at_7629_steps: 499_974_144
 
   debug_training_tokens:
     min_tokens: 5_000_000
     max_tokens: 20_000_000
 
   random_seeds:
-    - 1
-    - 2
-    - 3
+    - 42
+    - 137
+    - 2024
+    - 31415
+    - 271828
 
 model_defaults:
   architecture: decoder_only_transformer
-  vocab_size: 32000
+  vocab_size: 50257
   tie_input_output_embeddings: true
   dropout: 0.0
   bias: false
@@ -140,7 +142,7 @@ evaluation_defaults:
     - validation_loss_vs_peak_memory
 
 visualization_defaults:
-  dashboard_framework: streamlit
+  dashboard_framework: static_json_png_for_jekyll
   max_tokens_for_attention_heatmap: 512
   enable_attention_heatmaps: true
   enable_sparse_mask_view: true

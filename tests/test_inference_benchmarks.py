@@ -11,6 +11,7 @@ from torch import nn
 from src.evaluation.benchmarks import (
     aggregate_long_context_runs,
     benchmark_generation,
+    benchmark_generation_matrix,
     evaluate_long_context,
     inspect_kv_cache,
     rank_long_context_variants,
@@ -98,6 +99,29 @@ def test_generation_benchmark_keeps_cached_and_uncached_results_separate() -> No
     assert result["uncached"]["tokens_per_second"] > 0
     assert result["cached"]["status"] == "ok"
     assert result["kv_cache"]["status"] == "ok"
+    assert result["prefill"]["status"] == "ok"
+    assert result["prefill"]["seconds_p50"] > 0
+    assert result["decode_cached"]["status"] == "ok"
+    assert result["decode_cached"]["generated_tokens_measured"] == 1
+    assert result["cached"]["seconds_p95"] >= result["cached"]["seconds_p50"]
+
+
+def test_generation_matrix_records_supported_and_unsupported_cells() -> None:
+    result = benchmark_generation_matrix(
+        CacheModel(),
+        prompt_lengths=[4, 31],
+        batch_sizes=[1, 2],
+        new_tokens=2,
+        repeats=1,
+        warmups=0,
+    )
+
+    assert result["prompt_4_batch_1"]["status"] == "ok"
+    assert result["prompt_4_batch_2"]["measurement"]["cached"]["status"] == "ok"
+    assert result["prompt_31_batch_1"] == {
+        "status": "unsupported",
+        "reason": "prompt_length + new_tokens exceeds model context length",
+    }
 
 
 def test_long_context_records_native_result_and_unsupported_extension() -> None:

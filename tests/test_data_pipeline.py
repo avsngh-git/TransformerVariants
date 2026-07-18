@@ -9,18 +9,11 @@ Requires: pip install -e ".[data,dev]"
 
 import hashlib
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-from src.data.prepare import (
-    compute_token_stats,
-    load_dataset_split,
-    prepare_dataset,
-    tokenize_documents,
-    write_shards,
-)
+from src.data.prepare import prepare_dataset
 from src.data.tokenizer import (
     decode,
     encode,
@@ -28,7 +21,6 @@ from src.data.tokenizer import (
     get_tokenizer,
     get_vocab_size,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures — reusable setup shared across tests
@@ -41,8 +33,17 @@ def tokenizer():
     return get_tokenizer("gpt2")
 
 
+def _synthetic_documents(max_documents: int | None) -> list[str]:
+    """Return deterministic local documents so unit tests never require the Hub."""
+    documents = [
+        f"Synthetic document {index}. " + "transformer evaluation data " * 20
+        for index in range(20)
+    ]
+    return documents if max_documents is None else documents[:max_documents]
+
+
 @pytest.fixture
-def tiny_output_dir(tmp_path):
+def tiny_output_dir(tmp_path, monkeypatch):
     """Run the pipeline on 10 documents and return the output directory.
 
     tmp_path is a pytest built-in fixture that gives a unique temporary
@@ -56,6 +57,10 @@ def tiny_output_dir(tmp_path):
         "tokens_per_shard": 500,
         "output_dir": str(tmp_path / "output"),
     }
+    monkeypatch.setattr(
+        "src.data.prepare.load_dataset_split",
+        lambda _dataset, _split, max_documents: _synthetic_documents(max_documents),
+    )
     prepare_dataset(config)
     return tmp_path / "output"
 
@@ -276,7 +281,7 @@ def test_total_tokens_consistent(tiny_output_dir):
 # ---------------------------------------------------------------------------
 
 
-def test_limits_respected(tmp_path):
+def test_limits_respected(tmp_path, monkeypatch):
     """Running with max_documents=5 produces fewer tokens than max_documents=10.
 
     Confirms that the safety limits actually constrain the output.
@@ -298,6 +303,10 @@ def test_limits_respected(tmp_path):
         "output_dir": str(tmp_path / "large"),
     }
 
+    monkeypatch.setattr(
+        "src.data.prepare.load_dataset_split",
+        lambda _dataset, _split, max_documents: _synthetic_documents(max_documents),
+    )
     prepare_dataset(config_small)
     prepare_dataset(config_large)
 

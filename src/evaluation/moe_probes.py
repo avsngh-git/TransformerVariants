@@ -8,6 +8,7 @@ result dataclass.
 
 import math
 from dataclasses import dataclass
+from itertools import permutations
 
 import torch
 
@@ -63,11 +64,12 @@ class ExpertPairOverlapResult:
 
 @dataclass
 class RoutingStabilityResult:
-    """Cross-seed top-1 agreement rate per layer.
+    """Permutation-aligned held-out cross-seed top-1 agreement per layer.
 
     Attributes:
-        per_layer: Mapping from layer index to agreement rate (fraction of tokens
-            with the same top-1 expert across two seeds).
+        per_layer: Mapping from layer index to agreement rate after learning an
+            expert-label permutation on the first half of tokens and evaluating
+            it on the held-out second half.
     """
 
     per_layer: dict[int, float]
@@ -294,11 +296,12 @@ def run_routing_stability_probe(
     routing_data_a: dict[int, list[tuple[torch.Tensor, torch.Tensor]]],
     routing_data_b: dict[int, list[tuple[torch.Tensor, torch.Tensor]]],
 ) -> RoutingStabilityResult:
-    """Compute cross-seed top-1 agreement rate per layer.
+    """Compute permutation-aligned, held-out top-1 agreement per layer.
 
-    Compares the top-1 expert (highest weight) between two seeds for the
-    same inputs. Returns the agreement rate per layer (fraction of tokens
-    with the same top-1 expert).
+    Expert identifiers are arbitrary across independently initialized models.
+    For each layer, the first half of matched tokens therefore learns the
+    one-to-one permutation from seed-B labels to seed-A labels; agreement is
+    measured only on the held-out second half.
 
     Args:
         routing_data_a: Routing data from seed A.
@@ -319,8 +322,8 @@ def run_routing_stability_probe(
         entries_a = routing_data_a[layer_idx]
         entries_b = routing_data_b[layer_idx]
 
-        total_tokens = 0
-        agreements = 0
+        top1_a_parts: list[torch.Tensor] = []
+        top1_b_parts: list[torch.Tensor] = []
 
         # Compare corresponding entries (same batch index)
         n_entries = min(len(entries_a), len(entries_b))
@@ -342,16 +345,40 @@ def run_routing_stability_probe(
                 dim=-1, index=top1_slot_b.unsqueeze(-1)
             ).squeeze(-1)  # (batch, seq_len)
 
-            # Count agreements
-            agree = (top1_expert_a == top1_expert_b).sum().item()
-            num_tokens = top1_expert_a.numel()
+            length = min(top1_expert_a.numel(), top1_expert_b.numel())
+            top1_a_parts.append(top1_expert_a.reshape(-1)[:length].cpu())
+            top1_b_parts.append(top1_expert_b.reshape(-1)[:length].cpu())
 
-            agreements += agree
-            total_tokens += num_tokens
-
-        if total_tokens > 0:
-            per_layer[layer_idx] = agreements / total_tokens
-        else:
+        if not top1_a_parts:
             per_layer[layer_idx] = 0.0
+            continue
+
+        labels_a = torch.cat(top1_a_parts).to(torch.long)
+        labels_b = torch.cat(top1_b_parts).to(torch.long)
+        if labels_a.numel() < 2:
+            per_layer[layer_idx] = float((labels_a == labels_b).float().mean().item())
+            continue
+
+        split = labels_a.numel() // 2
+        train_a, test_a = labels_a[:split], labels_a[split:]
+        train_b, test_b = labels_b[:split], labels_b[split:]
+        num_experts = int(torch.cat((labels_a, labels_b)).max().item()) + 1
+        contingency = torch.zeros(num_experts, num_experts, dtype=torch.long)
+        for expert_a, expert_b in zip(train_a.tolist(), train_b.tolist()):
+            contingency[expert_a, expert_b] += 1
+
+        best_mapping = tuple(range(num_experts))
+        best_score = -1
+        for mapping in permutations(range(num_experts)):
+            score = sum(
+                int(contingency[mapping[expert_b], expert_b])
+                for expert_b in range(num_experts)
+            )
+            if score > best_score:
+                best_score = score
+                best_mapping = mapping
+        mapping_tensor = torch.tensor(best_mapping, dtype=torch.long)
+        aligned_test_b = mapping_tensor[test_b]
+        per_layer[layer_idx] = float((test_a == aligned_test_b).float().mean().item())
 
     return RoutingStabilityResult(per_layer=per_layer)

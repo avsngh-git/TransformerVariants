@@ -26,10 +26,10 @@ systems-and-architecture questions under a fixed hardware and training budget:
 | Main context length | 1,024 tokens |
 | Long-context diagnostics | 1,024 / 2,048 / 4,096 tokens |
 | Implemented recipes | 10 |
-| Main experiment | 30 runs: 10 recipes × 3 seeds |
-| Main token budget | Approximately 1B tokens per run |
-| Primary parameter range | 48.3M–68.8M active parameters |
-| Test suite | 736 passing tests |
+| Completed historical experiment | 30 runs: 10 recipes × 3 seeds × ~983M tokens |
+| Corrective primary experiment | 50 runs: 10 recipes × 5 seeds × 499,974,144 tokens |
+| Corrective active-parameter range | 48.3M–51.5M; MoE within 0.064% of Modern |
+| Test suite | 700+ unit, property, integration, and failure tests |
 | Publication surface | Versioned JSON and PNG assets for a separate static site |
 
 Current report artifacts:
@@ -38,6 +38,8 @@ Current report artifacts:
 - [Markdown evaluation summary](reports/1B_comparison/summary.md)
 - [Detailed scientific and implementation notes](docs/project_notes.tex)
 - [Experiment contract](reports/experiment_contract.md)
+- [Corrective-study implementation plan](docs/high_value_improvement_plan.md)
+- [Canonical corrective-study manifest](configs/experiment/main_500m_5seed.yaml)
 
 ## Model families
 
@@ -46,7 +48,7 @@ RMSNorm and SwiGLU unless the row states otherwise.
 
 | ID | Registry name | Architecture | Main question |
 |----|---------------|--------------|---------------|
-| V0 | `vanilla` | Learned positions, LayerNorm, standard causal MHA, dense FFN | What does a conventional baseline achieve? |
+| V0 | `vanilla` | Learned positions, LayerNorm, standard causal MHA, GELU dense FFN | What does a conventional GPT-2-style baseline achieve? |
 | V1 | `modern` | RoPE, RMSNorm, SwiGLU, memory-efficient full attention | What is gained by a modernized dense baseline? |
 | V2 | `alibi` | ALiBi positional bias with full attention | Does position bias improve extrapolation without learned positions? |
 | V3 | `gqa` | Grouped-query attention with two KV heads at main scale | How much KV projection capacity can be removed? |
@@ -62,7 +64,12 @@ construction interface. A recipe describes its model class, attention module,
 normalization, position encoding, FFN type, precision requirement, and optional
 per-layer configuration.
 
-## Current results
+## Historical 1B-token results
+
+These results describe the completed three-seed study. They remain available for
+provenance, but will not be mixed with the new 500M-token/five-seed study. The new
+study changes the training horizon, seed count, MoE expert width, checkpoint policy,
+and inference implementation, so it constitutes a new experiment.
 
 The table below is the final fixed-data comparison. Each value is a fresh held-out
 checkpoint evaluation reported as mean ± sample standard deviation across seeds
@@ -104,6 +111,11 @@ the experts selected for a token; **total parameters** count every stored expert
 | GQA | 48,284,672 | 48,284,672 |
 | MoE-interleaved, MoE-deep | 60,097,536 | 112,002,048 |
 | MoE | 68,764,672 | 172,573,696 |
+
+The corrective MoE configuration halves each expert's SwiGLU hidden width under
+top-2 routing. Its active/stored counts are 51,463,168/103,367,680 for full MoE and
+51,446,784/77,399,040 for both partial-MoE placements. These corrected recipes must
+be judged only from the new checkpoints.
 
 ### What is statistically complete
 
@@ -158,14 +170,14 @@ separate capability question.
 
 ## Experimental protocol
 
-The main comparison controls the following variables:
+The corrective primary comparison controls the following variables:
 
 1. Identical tokenized shards and data order.
 2. Identical token budget and causal-language-modeling objective.
 3. Identical AdamW hyperparameters unless an exception is documented.
 4. Identical effective batch size and precision policy.
 5. Identical validation code and comparison budgets.
-6. Three seeds for primary checkpoint-quality results.
+6. Five seeds for primary checkpoint-quality results.
 7. Active and total parameter accounting at the report boundary.
 
 The three comparison views answer different questions:
@@ -302,10 +314,48 @@ python scripts/evaluate.py \
 
 The checkpoint path matches the explicit output directory in the training command above.
 
-## Reproducing the main experiment
+## Running the corrective primary experiment
+
+The executable source of truth is
+[`configs/experiment/main_500m_5seed.yaml`](configs/experiment/main_500m_5seed.yaml).
+The launcher validates exact token accounting, skips verified completed runs, resumes
+partial runs from the newest verified checkpoint, and writes a resolved provenance
+manifest before training.
+
+The one-factor Modern counterfactuals are executable separately through
+[`configs/experiment/surgical_ablations.yaml`](configs/experiment/surgical_ablations.yaml).
+They replace only RoPE, RMSNorm, or SwiGLU respectively, reuse the primary Modern
+step-3,750 validation records as their reference, and never enter the primary ranking.
+
+```bash
+# Validate all 50 commands without training.
+python scripts/train_matrix.py \
+  --manifest configs/experiment/main_500m_5seed.yaml \
+  --dry-run
+
+# Run serially inside a persistent shell or tmux session.
+python scripts/train_matrix.py \
+  --manifest configs/experiment/main_500m_5seed.yaml
+```
+
+The matrix processes approximately 25.0B tokens in total. It uses async atomic
+checkpoints, SHA-256 verification, a three-checkpoint ring, health monitoring, and
+verified resume for every run. Each canonical run directory owns its resolved config,
+machine-readable metrics, human log, summary, recovery events, and nested checkpoints.
+
+The small deterministic recovery demonstration intentionally corrupts the newest
+checkpoint, rolls back to the preceding verified entry, and checks resumed training
+against an uninterrupted control:
+
+```bash
+python scripts/demonstrate_fault_recovery.py \
+  --output reports/fault_recovery_demo.json
+```
+
+### Historical reproduction
 
 The full sweep is expensive: 30 main-scale runs and roughly 1B tokens per run. On the
-target L4 it is a multi-day experiment, not a quick-start command.
+target L4 it is a multi-day historical experiment, not the current primary protocol.
 
 ```bash
 # Prepare the 1B-token FineWeb-Edu shards expected by the sweep scripts.
@@ -344,31 +394,60 @@ Bash.
 
 ## Inference and long-context benchmark
 
-The benchmark keeps uncached generation, cached generation, persistent KV-cache
-storage, paired-tail validation loss, and target-free prefill throughput separate.
+The benchmark keeps prefill, steady-state cached decode, cached end-to-end generation,
+uncached generation, persistent cache storage, paired-tail validation loss, and
+target-free prefill throughput separate.
 Generation uses seed 42 as the representative checkpoint; long-context quality uses
 every supplied checkpoint seed.
 
 ```bash
 python scripts/benchmark_inference.py \
   --checkpoints \
-    checkpoints/{alibi,gqa,modern,moe_deep,moe_interleaved,moe,swa_interleaved,swa,vanilla}_main_1B_s{42,137,2024} \
-    checkpoints/linear_main_1B_fixed_s{42,137,2024} \
-  --output reports/1B_comparison/raw/benchmarks.json \
+    runs/main_500m_5seed/*_s{42,137,2024,31415,271828} \
+  --output reports/500M_5seed/raw/benchmarks.json \
   --data-dir data/processed/fineweb-1B \
-  --prompt-length 64 \
-  --new-tokens 8 \
-  --repeats 2 \
-  --warmups 1 \
+  --prompt-lengths 64 512 1024 4096 \
+  --batch-sizes 1 4 8 \
+  --new-tokens 128 \
+  --repeats 30 \
+  --warmups 10 \
   --windows 8 \
   --tail-tokens 256 \
   --context-lengths 1024 2048 4096
 ```
 
 The long-context JSON preserves every window and checkpoint estimate, then reports
-sample standard deviation across the three seed means. Serving measurements still use
+sample standard deviation across the five seed means. Serving measurements still use
 one representative checkpoint and should not be interpreted as seed-aggregated timing
 claims.
+
+Zero-shot passkey and needle retrieval, including distance curves and a larger-base
+RoPE extrapolation baseline, run separately:
+
+```bash
+python scripts/evaluate_retrieval.py \
+  --checkpoints runs/main_500m_5seed/*_s{42,137,2024,31415,271828} \
+  --output reports/500M_5seed/raw/retrieval.json
+```
+
+MoE routing diagnostics run after training:
+
+```bash
+python scripts/evaluate_moe_routing.py \
+  --checkpoints runs/main_500m_5seed/moe*_s{42,137,2024,31415,271828} \
+  --data-dir data/processed/fineweb-1B \
+  --output reports/500M_5seed/raw/moe_routing.json
+```
+
+After the frozen evaluation writes `raw/metrics.json`, compute the prespecified
+five-seed Student-t intervals and paired seed differences with:
+
+```bash
+python scripts/analyze_primary_statistics.py \
+  --metrics reports/500M_5seed/raw/metrics.json \
+  --manifest configs/experiment/main_500m_5seed.yaml \
+  --output reports/500M_5seed/primary_statistics.json
+```
 
 ## Static-site assets
 
@@ -456,11 +535,11 @@ The suite covers, among other things:
 | 11 | Fault-tolerant training and recovery hardening | Complete |
 | 12 | Main controlled benchmark | Complete |
 | 13 | Final report and reusable publication assets | Complete in this repository |
+| 14 | Five-seed corrective study and serving/retrieval upgrade | In progress |
 
-The remaining publication work is intentionally external: choose the Jekyll theme and
-compose the GitHub Pages repository around the exported bundle. This repository now
-contains the experiment, recovery path, report schema, scientific notes, and reusable
-visualization inputs needed for that presentation layer.
+The Jekyll presentation is maintained in a separate repository. This repository is
+the source of experimental truth and exports the report data and visualization assets
+consumed by that site.
 
 ## Adding a new recipe
 

@@ -14,10 +14,11 @@ The run directory naming convention is:
 import json
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
+import yaml
 
 
 class RunLogger:
@@ -59,6 +60,7 @@ class RunLogger:
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "checkpoints").mkdir(exist_ok=True)
+        (self.run_dir / "logs").mkdir(exist_ok=True)
 
         self.config = config
         self.start_time = time.time()
@@ -66,13 +68,27 @@ class RunLogger:
         # Write config immediately
         with open(self.run_dir / "run_config.json", "w") as f:
             json.dump(config, f, indent=2)
+        with open(self.run_dir / "config_resolved.yaml", "w") as f:
+            yaml.safe_dump(config, f, sort_keys=False)
 
         # Open log files
         self.train_log_path = self.run_dir / "train.log"
+        nested_log_path = self.run_dir / "logs" / "train.log"
+        if not nested_log_path.exists() and not nested_log_path.is_symlink():
+            nested_log_path.symlink_to(Path("..") / "train.log")
         self.metrics_path = self.run_dir / "metrics.jsonl"
 
         # Write header to train.log
         self._write_header()
+
+        if config.get("resumed_from"):
+            recovery_event = {
+                "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "event": "verified_checkpoint_resume",
+                "resumed_from": config["resumed_from"],
+            }
+            with open(self.run_dir / "recovery_events.jsonl", "a") as f:
+                f.write(json.dumps(recovery_event) + "\n")
 
         # Create empty metrics.jsonl if it doesn't exist
         if not self.metrics_path.exists():
@@ -85,6 +101,16 @@ class RunLogger:
         training = c.get("training", {})
         data = c.get("data", {})
         hardware = c.get("hardware", {})
+        tokens_per_step = (
+            training.get("micro_batch_size", 0)
+            * training.get("grad_accum_steps", 0)
+            * model.get("seq_len", 0)
+        )
+        batch_description = (
+            f"{training.get('micro_batch_size', 0)} micro × "
+            f"{training.get('grad_accum_steps', 0)} accum × "
+            f"{model.get('seq_len', 0)} = {tokens_per_step:,} tokens/step"
+        )
 
         header = f"""{'='*80}
 Training Run: {self.run_dir.name}
@@ -99,7 +125,7 @@ Compiled:     {training.get('compiled', False)}
 
 Data:         {data.get('data_dir', 'unknown')}
 Seq len:      {model.get('seq_len', 0)}
-Batch:        {training.get('micro_batch_size', 0)} micro × {training.get('grad_accum_steps', 0)} accum × {model.get('seq_len', 0)} = {training.get('micro_batch_size', 0) * training.get('grad_accum_steps', 0) * model.get('seq_len', 0):,} tokens/step
+Batch:        {batch_description}
 Max steps:    {training.get('max_steps', 0)}
 Warmup:       {training.get('warmup_steps', 0)} steps
 """
@@ -108,7 +134,8 @@ Warmup:       {training.get('warmup_steps', 0)} steps
 
         header += f"{'='*80}\n"
 
-        with open(self.train_log_path, "w") as f:
+        mode = "a" if self.train_log_path.exists() else "w"
+        with open(self.train_log_path, mode) as f:
             f.write(header)
 
     def log_step(
@@ -205,7 +232,7 @@ Warmup:       {training.get('warmup_steps', 0)} steps
         # Also append to train.log
         with open(self.train_log_path, "a") as f:
             f.write(f"\n{'='*80}\n")
-            f.write(f"Training Complete\n")
+            f.write("Training Complete\n")
             f.write(f"{'='*80}\n")
             f.write(f"Final train loss: {results.get('final_train_loss', 0):.4f}\n")
             f.write(f"Final val loss:   {results.get('final_val_loss', 0):.4f}\n")
@@ -223,12 +250,14 @@ Warmup:       {training.get('warmup_steps', 0)} steps
         """Check that the run directory has the expected structure.
 
         Returns:
-            True if the directory contains run_config.json, train.log,
-            metrics.jsonl, and checkpoints/ directory; False otherwise.
+            True if the directory contains resolved YAML/JSON config, root and
+            nested training logs, metrics, and checkpoints; False otherwise.
         """
         expected = [
             self.run_dir / "run_config.json",
+            self.run_dir / "config_resolved.yaml",
             self.run_dir / "train.log",
+            self.run_dir / "logs" / "train.log",
             self.run_dir / "metrics.jsonl",
             self.run_dir / "checkpoints",
         ]

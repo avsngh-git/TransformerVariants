@@ -35,8 +35,9 @@ designed as future-compatible but is not required or tested.
 Long-context evaluation lengths: 1024, 2048, 4096 tokens.
 
 The formal long-context protocol scores the same final 256 target tokens at every
-length, over eight fixed non-overlapping validation windows per checkpoint and all
-three checkpoint seeds. Checkpoint means are the independent units for uncertainty.
+length, over fixed non-overlapping validation windows and all five checkpoint seeds.
+Checkpoint means are the independent units for uncertainty. Zero-shot passkey and
+needle retrieval supplement this extrapolation metric at controlled distances.
 
 ---
 
@@ -44,7 +45,7 @@ three checkpoint seeds. Checkpoint means are the independent units for uncertain
 
 - **Architecture family:** decoder-only Transformer
 - **Objective:** next-token prediction (causal language modeling)
-- **Vocabulary size:** 32,000 tokens (GPT-style BPE)
+- **Vocabulary size:** 50,257 tokens (GPT-2 BPE)
 
 ---
 
@@ -58,9 +59,11 @@ three checkpoint seeds. Checkpoint means are the independent units for uncertain
 | V3 | GQA / MQA | Grouped-query or multi-query attention heads |
 | V4 | Sparse local/global | Sliding window + global token sparse attention |
 | V5 | Causal linear attention | ELU+1 prefix-state attention with RoPE |
+| V6a | Full MoE | Eight half-width SwiGLU experts, top-2 routing in every layer |
+| V6b | Interleaved MoE | Parameter-matched MoE in alternating layers |
+| V6c | Deep MoE | Parameter-matched MoE in the second half of the network |
 
 Stretch variants (only after strong version):
-- Switch/MoE small model
 - Entropy-adaptive sparse attention
 - 100M–125M scale runs
 
@@ -72,23 +75,23 @@ To ensure meaningful comparisons between variants:
 
 1. **Same data.** All variants train on the same tokenized dataset shards in the
    same order (controlled by random seed and manifest).
-2. **Same token budget.** Main comparisons use an identical number of training
-   tokens (100M–300M range, fixed per experiment set).
-3. **Same optimizer settings.** AdamW with identical hyperparameters unless a
-   variant's paper specifies otherwise (documented exception required).
+2. **Same token budget.** The corrective main comparison uses exactly 7,629 steps,
+   or 499,974,144 tokens, for every recipe and seed.
+3. **Same optimizer settings.** AdamW with peak/minimum learning rates
+   $3\times10^{-4}$/$3\times10^{-5}$, betas (0.9, 0.95), matrix-only weight decay
+   0.1, 250 warmup steps, cosine decay, and gradient clipping at 1.0 unless a
+   documented exception is approved before training.
 4. **Same effective batch size.** micro_batch × grad_accum × seq_len held constant.
 5. **Same evaluation protocol.** Identical validation set, identical eval code,
    identical metrics collection.
 6. **Same precision.** bf16 for all variants in a comparison set.
 7. **Parameter budget accounting.** Dense variants should remain within ±5% active
-   parameters. Sparse MoE comparisons report both active-per-token and total stored
-   parameters. A completed recipe outside tolerance is retained only as a documented
-   limitation; changing its width, depth, routing, or token budget constitutes a new
-   experiment.
-8. **Multiple seeds.** Primary training, checkpoint quality, and paired-tail
-   long-context quality are reported over at least 3 random seeds. Serving and
-   KV-cache diagnostics use one explicitly identified representative checkpoint and
-   are not statistical timing claims.
+   parameters. Sparse MoE experts use half the dense SwiGLU hidden width under top-2
+   routing, so active-per-token FFN parameters match the dense FFN. Both active and
+   stored parameter counts remain mandatory.
+8. **Multiple seeds.** Primary training and checkpoint quality use seeds 42, 137,
+   2024, 31415, and 271828. Serving diagnostics use one explicitly identified
+   representative checkpoint and are not training-seed statistical claims.
 9. **Reproducibility.** Every run is fully specified by:
    `model_config + data_config + train_config + code_version + dataset_manifest`
 
@@ -118,6 +121,9 @@ To ensure meaningful comparisons between variants:
 | Cross-seed uncertainty | sample standard deviation | reported |
 | Prefill throughput at 2048 tokens | tokens/sec | reported |
 | Prefill throughput at 4096 tokens | tokens/sec | reported |
+| Passkey/needle exact retrieval | accuracy | higher is better |
+| Expected answer-token probability | probability | higher is better |
+| Retrieval accuracy by distance | accuracy | reported |
 
 ### Efficiency summary
 
@@ -178,12 +184,15 @@ All of the above, plus:
 ## 9. Data Strategy
 
 - **Debug dataset:** small subset for rapid iteration (5M–20M tokens)
-- **Main dataset:** 100M–300M tokens from publicly available text
+- **Main dataset:** 1B-token FineWeb-Edu shard set; each corrective run consumes
+  499,974,144 tokens from the controlled stream
 - **No paid APIs required.** All data sources must be freely accessible.
 - **Download safety:** all data scripts support `--max-documents`,
   `--max-raw-bytes`, `--max-tokens` limits.
-- **Manifest tracking:** every processed dataset writes a `manifest.json` with
-  checksums, token counts, and source metadata.
+- **Manifest tracking:** the prepared dataset has a `manifest.json` plus the tracked
+  `reports/data/fineweb_1b_sha256.json` inventory containing token counts, source
+  metadata, and all 101 shard hashes. The original upstream revision was not captured
+  and remains an explicit historical limitation.
 
 ---
 
@@ -194,6 +203,7 @@ All of the above, plus:
 ```
 runs/<run_id>/
   config_resolved.yaml
+  run_config.json
   metrics.jsonl
   summary.json
   logs/
@@ -234,6 +244,7 @@ reports/<experiment>/site_assets/
 
 | Date | Change | Justification |
 |------|--------|---------------|
+| 2026-07-18 | Canonical 500M-token, five-seed corrective study | Match MoE active parameters, produce independent histories, run fault-tolerant training, and add retrieval/serving evidence |
 | 2026-07-15 | Active/total parameter accounting; static HTML report | Correct the implemented SwiGLU/MoE counts, preserve documented parity exceptions, and replace the unwanted Streamlit runtime |
 | 2026-07-16 | Fault-tolerant CLI and static-site asset contract | Complete recovery integration while keeping the Jekyll frontend in its own repository |
 | 2025-01-01 | Initial contract | Phase 00 creation |

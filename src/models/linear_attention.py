@@ -12,8 +12,8 @@ recurrence but substantially faster on GPU and under torch.compile.
 
 Following RoFormer equation 19, RoPE rotates the positive query and key features
 used by the numerator, while the normalization denominator remains unrotated.
-Critical prefix-state reductions run in float32. Recurrent generation state is not
-yet exposed through the shared KV-cache interface.
+Critical prefix-state reductions run in float32. At evaluation time the module
+returns fixed-size numerator and denominator states for recurrent generation.
 """
 
 import torch
@@ -68,28 +68,32 @@ class CausalLinearAttention(nn.Module):
 
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x: torch.Tensor, kv_cache=None) -> tuple[torch.Tensor, None]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor, int] | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        tuple[torch.Tensor, torch.Tensor, int] | None,
+    ]:
         """Compute causal linear attention.
 
         Args:
             x: Input tensor of shape (B, T, d_model).
-            kv_cache: Must be None. If non-None, raises NotImplementedError.
+            kv_cache: Optional ``(numerator_state, denominator_state, position)``.
 
         Returns:
-            Tuple of (output, None) where output has shape (B, T, d_model).
+            Tuple of output and recurrent state. Training returns ``None`` for
+            the state; evaluation returns a reusable fixed-size state.
 
         Raises:
-            NotImplementedError: If kv_cache is not None.
             AssertionError: If the input exceeds the configured context length.
         """
-        if kv_cache is not None:
-            raise NotImplementedError(
-                "Recurrent generation state is not yet supported for causal linear attention"
-            )
-
         B, T, C = x.shape
-        assert T <= self.config.seq_len, (
-            f"Input seq_len {T} exceeds config.seq_len {self.config.seq_len}"
+        offset = int(kv_cache[2]) if kv_cache is not None else 0
+        assert offset + T <= self.config.seq_len, (
+            f"Total sequence length {offset + T} exceeds config.seq_len "
+            f"{self.config.seq_len}"
         )
 
         q = self.q_proj(x).view(B, T, self.n_head, self.d_head).transpose(1, 2)
@@ -101,23 +105,39 @@ class CausalLinearAttention(nn.Module):
         with torch.autocast(device_type=x.device.type, enabled=False):
             phi_q = feature_map(q.float())
             phi_k = feature_map(k.float())
-            rotated_phi_q = apply_rope(phi_q, self.rope_cos[:T], self.rope_sin[:T])
-            rotated_phi_k = apply_rope(phi_k, self.rope_cos[:T], self.rope_sin[:T])
+            rope_slice = slice(offset, offset + T)
+            rotated_phi_q = apply_rope(
+                phi_q, self.rope_cos[rope_slice], self.rope_sin[rope_slice]
+            )
+            rotated_phi_k = apply_rope(
+                phi_k, self.rope_cos[rope_slice], self.rope_sin[rope_slice]
+            )
             v_float = v.float()
 
             # Prefix states summarize completed chunks. RoPE appears only in the
             # numerator state; the positive denominator state is unrotated.
-            kv_state = torch.zeros(
-                B,
-                self.n_head,
-                self.d_head,
-                self.d_head,
-                device=x.device,
-                dtype=phi_q.dtype,
-            )
-            k_state = torch.zeros(
-                B, self.n_head, self.d_head, device=x.device, dtype=phi_q.dtype
-            )
+            if kv_cache is None:
+                kv_state = torch.zeros(
+                    B,
+                    self.n_head,
+                    self.d_head,
+                    self.d_head,
+                    device=x.device,
+                    dtype=phi_q.dtype,
+                )
+                k_state = torch.zeros(
+                    B, self.n_head, self.d_head, device=x.device, dtype=phi_q.dtype
+                )
+            else:
+                kv_state, k_state, _ = kv_cache
+                kv_state = kv_state.to(device=x.device, dtype=phi_q.dtype)
+                k_state = k_state.to(device=x.device, dtype=phi_q.dtype)
+                expected_kv_shape = (B, self.n_head, self.d_head, self.d_head)
+                expected_k_shape = (B, self.n_head, self.d_head)
+                if kv_state.shape != expected_kv_shape or k_state.shape != expected_k_shape:
+                    raise ValueError(
+                        "Linear attention cache shape does not match the current batch/model"
+                    )
             chunks: list[torch.Tensor] = []
 
             for start in range(0, T, self.chunk_size):
@@ -162,7 +182,8 @@ class CausalLinearAttention(nn.Module):
         output = output.to(self.out_proj.weight.dtype)
         output = self.resid_dropout(self.out_proj(output))
 
-        return output, None
+        new_cache = None if self.training else (kv_state, k_state, offset + T)
+        return output, new_cache
 
 
 # Temporary import compatibility for code that used the original V5 class name.

@@ -16,6 +16,7 @@ import numpy as np
 from src.evaluation.flops import FLOPBreakdown, compute_step_flops
 from src.evaluation.metrics import MetricsResult, load_metrics_log
 from src.models.config import ModelConfig
+from src.models.swiglu_ffn import swiglu_hidden_dim
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,10 @@ def _run_config_to_model_config(run_config: dict) -> ModelConfig:
     valid_fields = {f.name for f in ModelConfig.__dataclass_fields__.values()}
     merged = vars(config).copy()
     merged.update({k: v for k, v in model_dict.items() if k in valid_fields})
+    if model_dict.get("num_experts") is not None and "moe_expert_hidden_dim" not in model_dict:
+        # Legacy checkpoints used full-width experts. Do not silently rebuild
+        # them with the active-parameter-matched expert width introduced later.
+        merged["moe_expert_hidden_dim"] = None
     merged["variant"] = variant_name
     return ModelConfig(**merged)
 
@@ -241,9 +246,18 @@ def load_variant_data(checkpoint_dirs: list[Path]) -> list[VariantData]:
             logger.warning(f"Path is not a directory, skipping: {checkpoint_dir}")
             continue
 
+        # Canonical runs keep logs/config beside a nested checkpoints/ folder.
+        # Normalize either accepted input form to the run root.
+        run_dir = (
+            checkpoint_dir.parent
+            if checkpoint_dir.name == "checkpoints"
+            and (checkpoint_dir.parent / "metrics.jsonl").exists()
+            else checkpoint_dir
+        )
+
         # Load metrics.jsonl
         try:
-            log_entries = load_metrics_log(checkpoint_dir)
+            log_entries = load_metrics_log(run_dir)
         except FileNotFoundError:
             logger.warning(f"metrics.jsonl not found in {checkpoint_dir}, skipping variant")
             continue
@@ -254,13 +268,13 @@ def load_variant_data(checkpoint_dirs: list[Path]) -> list[VariantData]:
             continue
 
         # Load config
-        config = _load_config_from_dir(checkpoint_dir)
+        config = _load_config_from_dir(run_dir)
 
         # Infer variant name
         if config is not None and hasattr(config, "variant") and config.variant:
             variant_name = config.variant
         else:
-            variant_name = _infer_variant_name(checkpoint_dir)
+            variant_name = _infer_variant_name(run_dir)
 
         # If no config found from files, try to infer from variant name
         if config is None:
@@ -286,7 +300,7 @@ def load_variant_data(checkpoint_dirs: list[Path]) -> list[VariantData]:
 
         variant_data = VariantData(
             name=variant_name,
-            checkpoint_dir=checkpoint_dir,
+            checkpoint_dir=run_dir,
             log_entries=log_entries,
             config=config,
             metrics=None,  # Computed later by metrics module
@@ -507,16 +521,14 @@ def compute_pareto_front(
     return pareto_names
 
 
-def _swiglu_hidden_dim(config: ModelConfig) -> int:
-    """Return the exact hidden width used by ``SwiGLUFeedForward``."""
-    hidden_dim = int(8 * config.d_model / 3)
-    return ((hidden_dim + 63) // 64) * 64
-
-
-def _ffn_parameter_count(config: ModelConfig) -> int:
+def _ffn_parameter_count(config: ModelConfig, *, sparse_expert: bool = False) -> int:
     """Count one dense FFN/expert, including linear biases."""
     if config.ffn_type == "swiglu":
-        hidden_dim = _swiglu_hidden_dim(config)
+        hidden_dim = (
+            config.moe_expert_hidden_dim
+            if sparse_expert and config.moe_expert_hidden_dim is not None
+            else swiglu_hidden_dim(config.d_model)
+        )
         weights = 3 * config.d_model * hidden_dim
         biases = 2 * hidden_dim + config.d_model if config.bias else 0
     else:
@@ -587,8 +599,9 @@ def _estimate_parameter_count(config: ModelConfig, variant_name: str | None = No
     """
     moe_layers = _moe_layer_count(config, variant_name)
     dense_layers = config.n_layer - moe_layers
-    expert_params = _ffn_parameter_count(config)
-    params = _base_parameter_count(config) + dense_layers * expert_params
+    dense_ffn_params = _ffn_parameter_count(config)
+    expert_params = _ffn_parameter_count(config, sparse_expert=True)
+    params = _base_parameter_count(config) + dense_layers * dense_ffn_params
     if moe_layers:
         assert config.num_experts is not None
         router_params = config.d_model * config.num_experts
@@ -600,8 +613,9 @@ def _estimate_active_parameter_count(config: ModelConfig, variant_name: str | No
     """Estimate parameters active per token, counting only routed experts."""
     moe_layers = _moe_layer_count(config, variant_name)
     dense_layers = config.n_layer - moe_layers
-    expert_params = _ffn_parameter_count(config)
-    params = _base_parameter_count(config) + dense_layers * expert_params
+    dense_ffn_params = _ffn_parameter_count(config)
+    expert_params = _ffn_parameter_count(config, sparse_expert=True)
+    params = _base_parameter_count(config) + dense_layers * dense_ffn_params
     if moe_layers:
         assert config.num_experts is not None
         router_params = config.d_model * config.num_experts

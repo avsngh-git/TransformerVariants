@@ -1,21 +1,20 @@
 """Tests for MoE evaluation probes."""
 
-import torch
 import pytest
+import torch
 
 from src.evaluation.moe_probes import (
-    ExpertUtilizationResult,
-    RouterEntropyResult,
     ExpertAffinityResult,
     ExpertPairOverlapResult,
+    ExpertUtilizationResult,
+    RouterEntropyResult,
     RoutingStabilityResult,
-    run_expert_utilization_probe,
-    run_router_entropy_probe,
     run_expert_affinity_probe,
     run_expert_pair_overlap_probe,
+    run_expert_utilization_probe,
+    run_router_entropy_probe,
     run_routing_stability_probe,
 )
-
 
 # --- Fixtures ---
 
@@ -197,6 +196,20 @@ class TestRoutingStabilityProbe:
         result = run_routing_stability_probe(synthetic_routing_data, data_b)
         for layer_idx, rate in result.per_layer.items():
             assert 0.0 <= rate <= 1.0
+
+    def test_global_expert_label_permutation_preserves_stability(
+        self, synthetic_routing_data, num_experts
+    ):
+        permutation = torch.tensor([2, 0, 3, 1])
+        permuted = {
+            layer: [(permutation[indices], weights.clone()) for indices, weights in entries]
+            for layer, entries in synthetic_routing_data.items()
+        }
+
+        result = run_routing_stability_probe(synthetic_routing_data, permuted)
+
+        for rate in result.per_layer.values():
+            assert rate == pytest.approx(1.0)
 
     def test_empty_input_a(self, synthetic_routing_data):
         result = run_routing_stability_probe({}, synthetic_routing_data)

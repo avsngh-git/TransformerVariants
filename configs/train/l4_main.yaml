@@ -3,12 +3,13 @@
 # Designed for ~50M parameter models at seq_len=1024.
 # Effective batch = micro_batch(8) × grad_accum(8) × seq_len(1024) = 65,536 tokens/step
 #
-# Token budget: 200M tokens (adjustable per experiment)
-# Estimated wall-clock: ~3-4 hours per run at ~15k tokens/sec
+# Canonical corrective study: 499,974,144 tokens in 7,629 steps.
+# The executable source of truth is configs/experiment/main_500m_5seed.yaml.
 
 training:
   # Token budget
-  max_tokens: 200_000_000
+  max_tokens: 499_974_144
+  max_steps: 7_629
 
   # Batch size
   micro_batch_size: 8
@@ -26,7 +27,8 @@ training:
 
   # Schedule
   lr_schedule: cosine
-  warmup_tokens: 5_000_000    # ~76 steps
+  warmup_tokens: 16_384_000   # 250 steps
+  warmup_steps: 250
 
   # Precision
   precision: bf16
@@ -34,16 +36,18 @@ training:
 
   # Logging and evaluation
   log_interval_steps: 10
-  eval_interval_tokens: 10_000_000
-  eval_max_batches: 50
+  eval_interval_tokens: 16_384_000
+  eval_interval_steps: 250
+  eval_max_batches: 20
 
   # Checkpointing
-  checkpoint_interval_tokens: 50_000_000
+  checkpoint_interval_tokens: 81_920_000
+  checkpoint_interval_steps: 1_250
   keep_last_n: 3
   keep_best: true
 
   # Reproducibility
-  seed: 1
+  seeds: [42, 137, 2024, 31415, 271828]
   deterministic: false  # true hurts performance; use for debugging only
 
   # Hardware

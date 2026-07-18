@@ -57,7 +57,7 @@ def inspect_kv_cache(model: nn.Module, prompt: torch.Tensor) -> dict:
     prompt = prompt.to(device)
     try:
         _, _, cache = model(prompt, kv_cache=None)
-    except (AssertionError, NotImplementedError, RuntimeError) as exc:
+    except NotImplementedError as exc:
         return {"status": "unsupported", "reason": str(exc)}
     if not _cache_is_reusable(cache):
         return {
@@ -71,6 +71,42 @@ def _peak_memory(device: torch.device) -> int:
     if device.type != "cuda":
         return 0
     return int(torch.cuda.max_memory_allocated(device))
+
+
+def _percentile(values: list[float], quantile: float) -> float:
+    """Return a linearly interpolated percentile without a NumPy dependency."""
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * quantile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _timing_summary(
+    samples: list[tuple[float, int]],
+    *,
+    measured_tokens: int,
+) -> dict:
+    seconds = [sample[0] for sample in samples]
+    seconds_mean = sum(seconds) / len(seconds)
+    seconds_p50 = _percentile(seconds, 0.50)
+    seconds_p95 = _percentile(seconds, 0.95)
+    return {
+        "status": "ok",
+        "tokens_per_second": measured_tokens / seconds_mean,
+        "tokens_per_second_p50": measured_tokens / seconds_p50,
+        "seconds_mean": seconds_mean,
+        "seconds_p50": seconds_p50,
+        "seconds_p95": seconds_p95,
+        "peak_memory_bytes": max(sample[1] for sample in samples),
+        "repeats": len(samples),
+        "samples_seconds": seconds,
+    }
 
 
 @torch.no_grad()
@@ -100,6 +136,39 @@ def _decode_once(
 
 
 @torch.no_grad()
+def _prefill_once(model: nn.Module, prompt: torch.Tensor) -> tuple[float, int]:
+    device = prompt.device
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    _synchronize(device)
+    started = time.perf_counter()
+    model(prompt, kv_cache=None)
+    _synchronize(device)
+    return time.perf_counter() - started, _peak_memory(device)
+
+
+@torch.no_grad()
+def _cached_decode_once(
+    model: nn.Module,
+    prompt: torch.Tensor,
+    new_tokens: int,
+) -> tuple[float, int]:
+    """Measure steady-state decode after an untimed prompt prefill."""
+    logits, _, cache = model(prompt, kv_cache=None)
+    next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+    device = prompt.device
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    _synchronize(device)
+    started = time.perf_counter()
+    for _ in range(new_tokens - 1):
+        logits, _, cache = model(next_token, kv_cache=cache)
+        next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+    _synchronize(device)
+    return time.perf_counter() - started, _peak_memory(device)
+
+
+@torch.no_grad()
 def benchmark_generation(
     model: nn.Module,
     *,
@@ -110,9 +179,13 @@ def benchmark_generation(
     warmups: int = 1,
     seed: int = 1234,
 ) -> dict:
-    """Measure end-to-end greedy decode with and without a reusable cache."""
+    """Measure prefill, steady-state decode, and end-to-end greedy generation."""
     if prompt_length + new_tokens > model.config.seq_len:
         raise ValueError("prompt_length + new_tokens exceeds model context length")
+    if new_tokens < 2:
+        raise ValueError("new_tokens must be at least 2 for a decode measurement")
+    if repeats < 1 or warmups < 0:
+        raise ValueError("repeats must be positive and warmups must be non-negative")
     device = _device_of(model)
     generator = torch.Generator(device=device).manual_seed(seed)
     vocab_size = getattr(model.config, "vocab_size", 16)
@@ -125,57 +198,114 @@ def benchmark_generation(
     )
     cache_result = inspect_kv_cache(model, prompt)
 
-    def measure(use_cache: bool) -> dict:
+    def measure_end_to_end(use_cache: bool) -> dict:
         for _ in range(warmups):
             _decode_once(model, prompt, new_tokens, use_cache=use_cache)
         samples = [
             _decode_once(model, prompt, new_tokens, use_cache=use_cache) for _ in range(repeats)
         ]
-        seconds = [sample[0] for sample in samples]
-        return {
-            "status": "ok",
-            "tokens_per_second": batch_size * new_tokens / (sum(seconds) / len(seconds)),
-            "seconds_mean": sum(seconds) / len(seconds),
-            "peak_memory_bytes": max(sample[1] for sample in samples),
-            "repeats": repeats,
-        }
+        return _timing_summary(samples, measured_tokens=batch_size * new_tokens)
 
-    result = {"uncached": measure(False), "kv_cache": cache_result}
+    for _ in range(warmups):
+        _prefill_once(model, prompt)
+    prefill = _timing_summary(
+        [_prefill_once(model, prompt) for _ in range(repeats)],
+        measured_tokens=batch_size * prompt_length,
+    )
+
+    result = {
+        "uncached": measure_end_to_end(False),
+        "prefill": prefill,
+        "kv_cache": cache_result,
+    }
     if cache_result["status"] == "ok":
-        result["cached"] = measure(True)
+        result["cached"] = measure_end_to_end(True)
+        for _ in range(warmups):
+            _cached_decode_once(model, prompt, new_tokens)
+        decode = _timing_summary(
+            [_cached_decode_once(model, prompt, new_tokens) for _ in range(repeats)],
+            measured_tokens=batch_size * (new_tokens - 1),
+        )
+        decode["generated_tokens_measured"] = new_tokens - 1
+        result["decode_cached"] = decode
     else:
-        result["cached"] = {
-            "status": "unsupported",
-            "reason": cache_result["reason"],
-        }
+        unsupported = {"status": "unsupported", "reason": cache_result["reason"]}
+        result["cached"] = unsupported
+        result["decode_cached"] = unsupported.copy()
     return result
 
 
-def _extend_context(model: nn.Module, context_length: int) -> tuple[bool, str | None]:
+def benchmark_generation_matrix(
+    model: nn.Module,
+    *,
+    prompt_lengths: Iterable[int],
+    batch_sizes: Iterable[int],
+    new_tokens: int = 128,
+    repeats: int = 30,
+    warmups: int = 10,
+    seed: int = 1234,
+) -> dict[str, dict]:
+    """Benchmark every prompt-length and batch-size cell independently."""
+    matrix: dict[str, dict] = {}
+    for prompt_length in prompt_lengths:
+        for batch_size in batch_sizes:
+            key = f"prompt_{prompt_length}_batch_{batch_size}"
+            try:
+                measurement = benchmark_generation(
+                    model,
+                    prompt_length=prompt_length,
+                    new_tokens=new_tokens,
+                    batch_size=batch_size,
+                    repeats=repeats,
+                    warmups=warmups,
+                    seed=seed,
+                )
+            except (NotImplementedError, ValueError) as exc:
+                matrix[key] = {"status": "unsupported", "reason": str(exc)}
+                continue
+            matrix[key] = {
+                "status": "ok",
+                "prompt_length": prompt_length,
+                "batch_size": batch_size,
+                "measurement": measurement,
+            }
+    return matrix
+
+
+def extend_context(
+    model: nn.Module,
+    context_length: int,
+    *,
+    rope_theta: float = 10000.0,
+) -> tuple[bool, str | None]:
+    """Extend declared context and optionally rebuild RoPE at a new base."""
     native = int(model.config.seq_len)
-    if context_length <= native:
-        return True, None
     position_encoding = getattr(model.config, "position_encoding", "unknown")
-    if position_encoding not in {"rope", "alibi"}:
+    if context_length > native and position_encoding not in {"rope", "alibi"}:
         return (
             False,
             f"position encoding '{position_encoding}' has no declared extrapolation path",
         )
 
-    model.config.seq_len = context_length
+    target_length = max(native, context_length)
+    model.config.seq_len = target_length
     for module in model.modules():
         config = getattr(module, "config", None)
         if config is not None and hasattr(config, "seq_len"):
-            config.seq_len = context_length
+            config.seq_len = target_length
         if hasattr(module, "seq_len") and isinstance(module.seq_len, int):
-            module.seq_len = context_length
+            module.seq_len = target_length
         if hasattr(module, "rope_cos") and hasattr(module, "rope_sin"):
             d_head = getattr(module, "d_head", model.config.d_head)
             cos, sin = precompute_rope_frequencies(
-                d_head, context_length, device=module.rope_cos.device
+                d_head,
+                target_length,
+                theta=rope_theta,
+                device=module.rope_cos.device,
             )
             module.rope_cos = cos.to(dtype=module.rope_cos.dtype)
             module.rope_sin = sin.to(dtype=module.rope_sin.dtype)
+    model.config.rope_theta = rope_theta
     return True, None
 
 
@@ -332,7 +462,7 @@ def evaluate_long_context(
     tokens = tokens.to(device)
     results: dict[str, dict] = {}
     for context_length in lengths:
-        supported, reason = _extend_context(model, context_length)
+        supported, reason = extend_context(model, context_length)
         if not supported:
             results[str(context_length)] = {
                 "status": "unsupported",
@@ -392,7 +522,7 @@ def evaluate_long_context(
                 ),
                 "windows": windows,
             }
-        except (AssertionError, NotImplementedError, RuntimeError) as exc:
+        except NotImplementedError as exc:
             results[str(context_length)] = {
                 "status": "unsupported",
                 "reason": str(exc),

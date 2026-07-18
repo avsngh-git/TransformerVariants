@@ -13,7 +13,6 @@ import torch
 from src.models.config import ModelConfig
 from src.models.modern_transformer import ModernTransformer
 
-
 # Skip entire module if CUDA is not available
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(),
@@ -112,8 +111,16 @@ class TestTorchCompileCompatibility:
         from src.models.flash_attention import FlashAttention
 
         # Create two identical models in bfloat16
-        eager_model = ModernTransformer(small_config, attention_class=FlashAttention).cuda().to(torch.bfloat16)
-        compiled_model = ModernTransformer(small_config, attention_class=FlashAttention).cuda().to(torch.bfloat16)
+        eager_model = (
+            ModernTransformer(small_config, attention_class=FlashAttention)
+            .cuda()
+            .to(torch.bfloat16)
+        )
+        compiled_model = (
+            ModernTransformer(small_config, attention_class=FlashAttention)
+            .cuda()
+            .to(torch.bfloat16)
+        )
 
         # Copy weights from eager to compiled so they are identical
         compiled_model.load_state_dict(eager_model.state_dict())
@@ -153,7 +160,11 @@ class TestTorchCompileCompatibility:
         # Compare gradients for all parameters
         eager_params = dict(eager_model.named_parameters())
         # compiled_model._orig_mod gives us the underlying module with gradients
-        compiled_orig = compiled_model._orig_mod if hasattr(compiled_model, "_orig_mod") else compiled_model
+        compiled_orig = (
+            compiled_model._orig_mod
+            if hasattr(compiled_model, "_orig_mod")
+            else compiled_model
+        )
         compiled_params = dict(compiled_orig.named_parameters())
 
         for name in eager_params:
@@ -170,3 +181,27 @@ class TestTorchCompileCompatibility:
                 f"Gradient mismatch for parameter '{name}': "
                 f"max diff = {(eager_grad - compiled_grad).abs().max().item():.6e}"
             )
+
+
+def test_eager_prefill_and_cached_decode_match_full_sequence(flash_model, small_config):
+    """The eager KV-cache path must preserve full-sequence attention logits."""
+    torch.manual_seed(91)
+    prompt = torch.randint(0, small_config.vocab_size, (2, 16), device="cuda")
+    next_token = torch.randint(0, small_config.vocab_size, (2, 1), device="cuda")
+
+    with torch.no_grad():
+        flash_model.train()
+        reference, _, _ = flash_model(torch.cat((prompt, next_token), dim=1))
+
+        flash_model.eval()
+        _, _, cache = flash_model(prompt)
+        cached_logits, _, updated_cache = flash_model(next_token, kv_cache=cache)
+
+    assert all(layer_cache is not None for layer_cache in cache)
+    assert all(layer_cache[2].tolist() == [17, 17] for layer_cache in updated_cache)
+    torch.testing.assert_close(
+        cached_logits[:, -1].float(),
+        reference[:, -1].float(),
+        atol=2e-2,
+        rtol=2e-2,
+    )

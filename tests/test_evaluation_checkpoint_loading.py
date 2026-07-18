@@ -9,6 +9,7 @@ from torch import nn
 from src.evaluation.comparison import VariantData, load_variant_data
 from src.evaluation.pipeline import EvaluationPipeline
 from src.models.config import ModelConfig
+from src.training.checkpoint import AtomicCheckpointWriter, CheckpointRingBuffer
 
 
 def _write_metrics(path: Path) -> None:
@@ -159,3 +160,36 @@ def test_checkpoint_loader_rejects_unexpected_architecture_keys(tmp_path: Path, 
 
     loaded = EvaluationPipeline(device="cpu").load_model_from_checkpoint(variant)
     assert loaded is None
+
+
+def test_canonical_run_layout_loads_verified_compiled_checkpoint(
+    tmp_path: Path, monkeypatch
+):
+    """Evaluation accepts a nested checkpoints path and strips compile prefixes."""
+    run_dir = tmp_path / "runs" / "main_500m_5seed" / "alibi_s42"
+    checkpoint_dir = run_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    _write_metrics(run_dir / "metrics.jsonl")
+    (run_dir / "run_config.json").write_text(
+        json.dumps({"variant": "alibi", "scale": "debug", "model": {}})
+    )
+
+    source = nn.Linear(2, 2, bias=False)
+    state = {f"_orig_mod.{key}": value for key, value in source.state_dict().items()}
+    checkpoint_path = checkpoint_dir / "checkpoint_step_000001.pt"
+    digest = AtomicCheckpointWriter().save(
+        {"model_state_dict": state}, checkpoint_path
+    )
+    CheckpointRingBuffer(checkpoint_dir, capacity=3).register(1, checkpoint_path, digest)
+
+    def fake_build(variant_name, scale, activation, dtype):
+        return nn.Linear(2, 2, bias=False), ModelConfig(variant=variant_name)
+
+    monkeypatch.setattr("src.models.registry.build", fake_build)
+    variants = load_variant_data([checkpoint_dir])
+    loaded = EvaluationPipeline(device="cpu").load_model_from_checkpoint(variants[0])
+
+    assert variants[0].checkpoint_dir == run_dir
+    assert variants[0].name == "alibi"
+    assert loaded is not None
+    torch.testing.assert_close(loaded.weight, source.weight)

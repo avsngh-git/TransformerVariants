@@ -41,7 +41,8 @@ class FeedForward(nn.Module):
 
         # ReLU activation — the nonlinearity between the two linear layers.
         # Without this, two linear layers collapse into one (linear(linear(x)) = linear(x)).
-        # ReLU is the original choice from GPT-2. Modern variants use SwiGLU/GELU instead.
+        # ReLU is the original Transformer choice; GPT-2 uses GELU and modern
+        # recipe variants in this project use SwiGLU.
         if config.activation == "gelu":
             self.act = nn.GELU(approximate="tanh")
         elif config.activation == "relu":

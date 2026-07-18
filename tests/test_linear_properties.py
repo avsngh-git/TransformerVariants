@@ -191,7 +191,7 @@ def test_numerical_stability_finite_outputs(B, T, seed):
 )
 @settings(max_examples=100, deadline=None)
 def test_output_shape_and_interface_contract(B, T, seed):
-    """Output shape is (B, T, d_model) and second return is None.
+    """Output shape is fixed and evaluation returns a reusable recurrent state.
 
     **Validates: Requirements 1.7, 1.9, 4.1**
     """
@@ -232,5 +232,9 @@ def test_output_shape_and_interface_contract(B, T, seed):
         f"Expected shape ({B}, {T}, {d_model}), got {output.shape}"
     )
 
-    # Second element is None
-    assert kv_cache_out is None, f"Expected None, got {type(kv_cache_out)}"
+    assert kv_cache_out is not None
+    numerator_state, denominator_state, position = kv_cache_out
+    d_head = d_model // n_head
+    assert numerator_state.shape == (B, n_head, d_head, d_head)
+    assert denominator_state.shape == (B, n_head, d_head)
+    assert position == T

@@ -28,6 +28,12 @@ import torch.nn.functional as F
 from src.models.config import ModelConfig
 
 
+def swiglu_hidden_dim(d_model: int) -> int:
+    """Return the parameter-matched dense SwiGLU hidden width."""
+    hidden_dim = int(8 * d_model / 3)
+    return ((hidden_dim + 63) // 64) * 64
+
+
 class SwiGLUFeedForward(nn.Module):
     """SwiGLU gated feed-forward network.
 
@@ -42,14 +48,16 @@ class SwiGLUFeedForward(nn.Module):
         config: ModelConfig with d_model, bias, dropout.
     """
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, hidden_dim: int | None = None) -> None:
         super().__init__()
 
-        # Hidden dimension: 8/3 * d_model (rounded to nearest multiple of 64 for efficiency)
-        # This keeps total params comparable to standard 4x FFN
-        hidden_dim = int(8 * config.d_model / 3)
-        # Round up to nearest multiple of 64 (better GPU utilization)
-        hidden_dim = ((hidden_dim + 63) // 64) * 64
+        # Dense default: 8/3 * d_model, rounded for efficient kernels. Sparse
+        # experts can provide an exact smaller width so top-k active experts
+        # collectively match one dense FFN.
+        hidden_dim = hidden_dim if hidden_dim is not None else swiglu_hidden_dim(config.d_model)
+        if hidden_dim < 1:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+        self.hidden_dim = hidden_dim
 
         # Gate projection: d_model → hidden_dim (goes through SiLU)
         self.w_gate = nn.Linear(config.d_model, hidden_dim, bias=config.bias)

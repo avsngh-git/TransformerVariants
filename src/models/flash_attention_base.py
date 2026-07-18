@@ -139,9 +139,9 @@ class FlashAttentionBase(nn.Module, ABC):
         """Compute attention using flash_attn kernels.
 
         Three-way dispatch:
-        - kv_cache is None and T > 1: training path (flash_attn_func)
+        - training and kv_cache is None: training path (flash_attn_func)
         - kv_cache is provided: generation path (flash_attn_with_kvcache)
-        - kv_cache is None and T == 1: auto-allocate fresh cache, then generation path
+        - evaluation and kv_cache is None: allocate a cache and prefill it
 
         Args:
             x: Input of shape (batch, seq_len, d_model).
@@ -158,8 +158,12 @@ class FlashAttentionBase(nn.Module, ABC):
         # q: (B, T, n_head, d_head), k/v: (B, T, n_kv_head, d_head)
 
         # Step 2: Dispatch based on kv_cache state
-        if kv_cache is None and T > 1:
-            # Training path: full-sequence attention
+        # FlashAttention's pybind KV-cache kernel is not traceable by Dynamo.
+        # Compiled models are a training/evaluation optimization in this project;
+        # cache-aware serving is benchmarked eagerly. Keep no-cache compiled
+        # evaluation on the traceable full-sequence kernel.
+        if kv_cache is None and (self.training or torch.compiler.is_compiling()):
+            # Training or compiled no-cache evaluation: full-sequence attention.
             return self._training_forward(q, k, v, B, T)
         elif kv_cache is not None:
             # Generation path with existing cache
@@ -170,7 +174,7 @@ class FlashAttentionBase(nn.Module, ABC):
             )
             return self._generation_forward(q, k, v, kv_cache, B, T)
         else:
-            # kv_cache is None and T == 1: auto-allocate fresh cache
+            # Evaluation prefill: allocate once and append the whole prompt.
             assert T <= self.seq_len, (
                 f"Sequence length {T} exceeds configured seq_len ({self.seq_len})"
             )

@@ -1,0 +1,19 @@
+# Surgical ablation: Modern backbone with a parameter-matched dense GELU FFN.
+model:
+  variant: modern_gelu
+  study_role: secondary_counterfactual
+  norm_type: rmsnorm
+  position_encoding: rope
+  ffn_type: standard
+  attention_type: flash_sdpa
+  attention_backend: sdpa
+  vocab_size: 50257
+  dropout: 0.0
+  bias: false
+  tie_embeddings: true
+  activation: gelu
+  ffn_hidden_dim_policy: 1.5_times_rounded_swiglu_width
+
+  debug: {n_layer: 4, d_model: 256, n_head: 4, seq_len: 512}
+  main: {n_layer: 8, d_model: 512, n_head: 8, seq_len: 1024}
+  stretch: {n_layer: 12, d_model: 768, n_head: 12, seq_len: 1024}

@@ -1,0 +1,64 @@
+schema_version: 1
+experiment_id: smoke_fault_tolerance
+description: >-
+  One optimizer step for every recipe, including verified fault-tolerant final
+  checkpoints.
+
+data_dir: data/processed/fineweb-1B
+dataset_manifest: data/processed/fineweb-1B/manifest.json
+dataset_inventory: reports/data/fineweb_1b_sha256.json
+scale: debug
+variants:
+  - vanilla
+  - modern
+  - alibi
+  - gqa
+  - swa
+  - swa_interleaved
+  - linear
+  - moe
+  - moe_interleaved
+  - moe_deep
+seeds: [42]
+
+training:
+  max_steps: 1
+  target_tokens_per_run: 512
+  sequence_length: 512
+  micro_batch_size: 1
+  grad_accum_steps: 1
+  max_lr: 0.0003
+  min_lr: 0.00003
+  warmup_steps: 1
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  dtype: bfloat16
+  eval_interval: 100
+  eval_steps: 2
+  checkpoint_interval: 1
+  log_interval: 1
+
+fault_tolerance:
+  enabled: true
+  checkpoint_ring_size: 3
+  resume_latest_verified: true
+
+variant_overrides:
+  vanilla: {activation: gelu, compile: true}
+  modern: {compile: true}
+  alibi: {compile: true}
+  gqa: {compile: true}
+  swa: {compile: true}
+  swa_interleaved: {compile: true}
+  linear: {compile: true}
+  moe: {compile: false}
+  moe_interleaved: {compile: false}
+  moe_deep: {compile: false}
+
+output:
+  run_template: /tmp/transformer_variants_smoke/{variant}_s{seed}
+  checkpoint_template: /tmp/transformer_variants_smoke/{variant}_s{seed}/checkpoints
+  resolved_manifest: /tmp/transformer_variants_smoke/resolved_manifest.json
+  report_dir: /tmp/transformer_variants_smoke

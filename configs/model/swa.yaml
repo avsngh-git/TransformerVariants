@@ -1,6 +1,6 @@
 # V4: Sliding Window Attention (SWA)
-# Fixed-proportion window (seq_len // 4). Training uses windowed attention,
-# generation uses full KV-cache without restriction.
+# Fixed-proportion window (seq_len // 4). Training and cached generation both
+# apply the same local attention window. Cache allocation is still pre-sized.
 
 model:
   variant: swa

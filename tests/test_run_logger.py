@@ -5,9 +5,6 @@ Validates: Requirements 7.1
 """
 
 import json
-from pathlib import Path
-
-import pytest
 
 from src.training.run_logger import RunLogger, generate_run_dir
 
@@ -27,6 +24,8 @@ class TestRunLoggerInit:
 
         config_path = run_dir / "run_config.json"
         assert config_path.exists()
+        assert (run_dir / "config_resolved.yaml").exists()
+        assert (run_dir / "logs" / "train.log").exists()
         loaded = json.loads(config_path.read_text())
         assert loaded == config
 

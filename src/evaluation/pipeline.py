@@ -855,6 +855,7 @@ class EvaluationPipeline:
         """Load a model from checkpoint weights using the registry."""
         from src.models.registry import SCALES, VARIANTS
         from src.models.registry import build as registry_build
+        from src.training.checkpoint import AtomicCheckpointWriter
 
         config = variant_data.config
         if config is None:
@@ -887,18 +888,39 @@ class EvaluationPipeline:
             return None
 
         # Look for checkpoint weights
-        checkpoint_dir = Path(variant_data.checkpoint_dir)
+        run_dir = Path(variant_data.checkpoint_dir)
+        checkpoint_dir = run_dir / "checkpoints" if (run_dir / "checkpoints").is_dir() else run_dir
         weight_paths = [
             checkpoint_dir / "checkpoint_latest.pt",
             checkpoint_dir / "model.pt",
             checkpoint_dir / "checkpoint_best.pt",
         ]
+        ring_path = checkpoint_dir / "checkpoint_ring.json"
+        if ring_path.exists():
+            try:
+                ring_entries = json.loads(ring_path.read_text(encoding="utf-8")).get(
+                    "entries", []
+                )
+                weight_paths = [
+                    checkpoint_dir / entry["path"]
+                    for entry in reversed(ring_entries)
+                    if AtomicCheckpointWriter.verify_trusted(
+                        checkpoint_dir / entry["path"]
+                    )
+                ] + weight_paths
+            except (json.JSONDecodeError, KeyError, OSError, TypeError):
+                logger.warning("Could not parse checkpoint ring metadata in %s", checkpoint_dir)
 
         loaded_weights = False
         for weight_path in weight_paths:
             if weight_path.exists():
                 try:
-                    checkpoint = torch.load(weight_path, map_location="cpu", weights_only=True)
+                    # Full training checkpoints include optimizer and RNG state. Ring
+                    # entries are SHA-256 verified above; legacy local checkpoints are
+                    # also project-owned inputs, so load the complete payload.
+                    checkpoint = torch.load(
+                        weight_path, map_location="cpu", weights_only=False
+                    )
                     if isinstance(checkpoint, dict):
                         if "model_state_dict" in checkpoint:
                             state_dict = checkpoint["model_state_dict"]
@@ -909,7 +931,11 @@ class EvaluationPipeline:
                     else:
                         state_dict = checkpoint
 
-                    incompatibility = model.load_state_dict(state_dict, strict=False)
+                    normalized_state = {
+                        key.replace("_orig_mod.", ""): value
+                        for key, value in state_dict.items()
+                    }
+                    incompatibility = model.load_state_dict(normalized_state, strict=False)
                     if incompatibility.missing_keys or incompatibility.unexpected_keys:
                         raise RuntimeError(
                             "checkpoint architecture does not match model: "

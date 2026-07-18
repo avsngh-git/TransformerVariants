@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "scenario": "corrupt newest checkpoint, roll back, and deterministically replay",
+  "corrupted_checkpoint": "checkpoint_step_000002.pt",
+  "corruption_detected": true,
+  "recovered_checkpoint": "checkpoint_step_000001.pt",
+  "recovered_step": 1,
+  "uninterrupted_final_loss": 3.4426982402801514,
+  "resumed_final_loss": 3.4426982402801514,
+  "absolute_loss_difference": 0.0,
+  "parameter_max_absolute_difference": 0.0,
+  "equivalent": true
+}

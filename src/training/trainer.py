@@ -231,6 +231,7 @@ class Trainer:
         eval_start = time.time()
         val_loss = self._evaluate()
         eval_time = time.time() - eval_start
+        self.best_val_loss = min(self.best_val_loss, val_loss)
         print(f"\nTraining complete. Final val_loss: {val_loss:.4f}")
         self._save_checkpoint()
         if self.checkpoint_manager is not None:

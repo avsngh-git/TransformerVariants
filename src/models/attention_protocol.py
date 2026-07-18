@@ -38,7 +38,7 @@ class AttentionModule(Protocol):
         - FlashAttention (V1/V4): RoPE + flash_attn kernels, optional window_size
         - ALiBiAttention (V2): no position rotation, alibi_slopes via kernel
         - GQAAttention (V3): grouped KV heads, separate Q/KV projections
-        - CausalLinearAttention (V5): ELU+1 prefix-state attention, returns None cache
+    - CausalLinearAttention (V5): ELU+1 prefix-state attention with recurrent state
     """
 
     def forward(

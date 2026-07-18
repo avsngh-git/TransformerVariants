@@ -1,9 +1,8 @@
 # V0: Vanilla Transformer (GPT-2 style)
 # Learned position embeddings, Pre-LayerNorm, standard multi-head attention
 
-# --- Two presets ---
-# V0-vanilla: Pure textbook Transformer (ReLU, greedy decode)
-# V0-gpt2:   Matches actual GPT-2 (GELU, sampling decode)
+# The controlled main experiments use GELU. ReLU remains available as an
+# explicit pedagogical ablation, but it is not the reported V0 checkpoint.
 
 model:
   variant: vanilla
@@ -22,8 +21,7 @@ model:
   bias: false             # no bias in linear layers
   tie_embeddings: true    # share token embedding and output head weights
 
-  # Activation: "relu" for pure vanilla, "gelu" for GPT-2 match
-  activation: relu
+  activation: gelu
 
   # Weight initialization
   init_std: 0.02          # N(0, 0.02) for most layers

@@ -9,10 +9,9 @@ Covers:
 import pytest
 import torch
 
-from src.models.registry import build, SCALES
 from src.models.config import ModelConfig
 from src.models.flash_attention import FlashAttention
-
+from src.models.registry import SCALES, build
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -187,6 +186,28 @@ class TestSWAForwardPass:
         """
         _, config = swa_model_and_config
         assert config.window_size == 128
+
+    def test_cached_decode_matches_full_windowed_attention(self, swa_model_and_config):
+        """SWA must apply the same local window during eager cached decoding."""
+        model, config = swa_model_and_config
+        torch.manual_seed(92)
+        prompt = torch.randint(0, config.vocab_size, (1, 64), device="cuda")
+        next_token = torch.randint(0, config.vocab_size, (1, 1), device="cuda")
+
+        with torch.no_grad():
+            model.train()
+            reference, _, _ = model(torch.cat((prompt, next_token), dim=1))
+
+            model.eval()
+            _, _, cache = model(prompt)
+            cached_logits, _, _ = model(next_token, kv_cache=cache)
+
+        torch.testing.assert_close(
+            cached_logits[:, -1].float(),
+            reference[:, -1].float(),
+            atol=2e-2,
+            rtol=2e-2,
+        )
 
 
 # ---------------------------------------------------------------------------

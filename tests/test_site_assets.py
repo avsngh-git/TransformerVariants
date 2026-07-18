@@ -161,6 +161,10 @@ def test_capture_attention_patterns_reconstructs_sdpa_probabilities() -> None:
         seq_len=8,
         dropout=0.0,
         variant="modern",
+        norm_type="rmsnorm",
+        position_encoding="rope",
+        ffn_type="swiglu",
+        activation="swiglu",
         attention_type="flash_sdpa",
     )
     model = ModernTransformer(config).eval()

@@ -23,9 +23,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.models.cache import cache_sequence_length
 from src.models.config import ModelConfig
-from src.models.rmsnorm import RMSNorm
+from src.models.ffn import FeedForward
 from src.models.modern_attention import ModernAttention
+from src.models.rmsnorm import RMSNorm
 from src.models.swiglu_ffn import SwiGLUFeedForward
 
 if TYPE_CHECKING:
@@ -52,16 +54,28 @@ class ModernTransformerBlock(nn.Module):
         attention_class: "Type[AttentionModule]" = ModernAttention,  # type: ignore[assignment]
     ) -> None:
         super().__init__()
-        self.ln1 = RMSNorm(config.d_model)
+        self.ln1 = self._build_norm(config)
         self.attn = attention_class(config)
-        self.ln2 = RMSNorm(config.d_model)
+        self.ln2 = self._build_norm(config)
 
         # Config-driven FFN selection
         if config.num_experts is not None:
             from src.models.moe_ffn import MoEFeedForward
             self.ffn = MoEFeedForward(config)
-        else:
+        elif config.ffn_type == "standard":
+            self.ffn = FeedForward(config)
+        elif config.ffn_type == "swiglu":
             self.ffn = SwiGLUFeedForward(config)
+        else:
+            raise ValueError(f"Unknown ffn_type: {config.ffn_type!r}")
+
+    @staticmethod
+    def _build_norm(config: ModelConfig) -> nn.Module:
+        if config.norm_type == "rmsnorm":
+            return RMSNorm(config.d_model)
+        if config.norm_type == "layernorm":
+            return nn.LayerNorm(config.d_model, bias=config.bias)
+        raise ValueError(f"Unknown norm_type: {config.norm_type!r}")
 
     def forward(
         self,
@@ -112,8 +126,16 @@ class ModernTransformer(nn.Module):
         super().__init__()
         self.config = config
 
-        # Token embedding only (no position embedding — RoPE handles position)
+        # Learned positions are enabled only for the surgical counterfactual.
         self.tok_emb = nn.Embedding(config.vocab_size, config.d_model)
+        if config.position_encoding == "learned":
+            self.pos_emb = nn.Embedding(config.seq_len, config.d_model)
+        elif config.position_encoding not in {"rope", "alibi", "none"}:
+            raise ValueError(
+                "ModernTransformer supports learned, RoPE, ALiBi, or no positional "
+                "encoding; "
+                f"got {config.position_encoding!r}"
+            )
 
         # Dropout after embedding
         self.drop = nn.Dropout(config.dropout)
@@ -135,8 +157,8 @@ class ModernTransformer(nn.Module):
                 for _ in range(config.n_layer)
             ])
 
-        # Final RMSNorm
-        self.ln_f = RMSNorm(config.d_model)
+        # Final norm follows the same one-factor configuration as each block.
+        self.ln_f = ModernTransformerBlock._build_norm(config)
 
         # Output head
         self.head = nn.Linear(config.d_model, config.vocab_size, bias=False)
@@ -155,7 +177,11 @@ class ModernTransformer(nn.Module):
 
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
-                if name.endswith("out_proj") or name.endswith("w_down"):
+                if (
+                    name.endswith("out_proj")
+                    or name.endswith("w_down")
+                    or name.endswith("fc2")
+                ):
                     nn.init.normal_(module.weight, mean=0.0, std=residual_std)
                 else:
                     nn.init.normal_(module.weight, mean=0.0, std=init_std)
@@ -165,6 +191,10 @@ class ModernTransformer(nn.Module):
                 nn.init.normal_(module.weight, mean=0.0, std=init_std)
             elif isinstance(module, RMSNorm):
                 nn.init.ones_(module.weight)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
 
     def get_aux_loss(self) -> torch.Tensor:
         """Sum auxiliary losses across all MoE layers and clear buffers.
@@ -216,7 +246,7 @@ class ModernTransformer(nn.Module):
         # No position offset needed here — RoPE handles it inside attention
         # But we still need to check sequence length
         if kv_cache is not None and kv_cache[0] is not None:
-            past_len = kv_cache[0][0].size(2)
+            past_len = cache_sequence_length(kv_cache[0])
         else:
             past_len = 0
 
@@ -225,8 +255,12 @@ class ModernTransformer(nn.Module):
             f"Total sequence length {total_len} exceeds model max {self.config.seq_len}"
         )
 
-        # Token embedding only (no position embedding!)
         x = self.tok_emb(idx)  # (B, T, d_model)
+        if self.config.position_encoding == "learned":
+            positions = torch.arange(
+                past_len, past_len + T, dtype=torch.long, device=idx.device
+            )
+            x = x + self.pos_emb(positions)
         x = self.drop(x)
 
         # Pass through all blocks
@@ -249,5 +283,3 @@ class ModernTransformer(nn.Module):
             )
 
         return logits, loss, new_kv_cache
-
-

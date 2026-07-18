@@ -49,9 +49,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--activation",
         type=str,
-        default="relu",
+        default="gelu",
         choices=["relu", "gelu"],
-        help="FFN activation function (vanilla only: relu or gelu)",
+        help="FFN activation function (vanilla only; canonical experiment uses gelu)",
     )
 
     # Training
@@ -62,6 +62,10 @@ def parse_args() -> argparse.Namespace:
         help="Training steps (default: 2000 debug, 5000 main/stretch)",
     )
     parser.add_argument("--max_lr", type=float, default=3e-4)
+    parser.add_argument("--min_lr", type=float, default=None)
+    parser.add_argument("--weight_decay", type=float, default=0.1)
+    parser.add_argument("--beta1", type=float, default=0.9)
+    parser.add_argument("--beta2", type=float, default=0.95)
     parser.add_argument("--warmup_steps", type=int, default=100)
     parser.add_argument("--micro_batch_size", type=int, default=8)
     parser.add_argument("--grad_accum_steps", type=int, default=8)
@@ -88,12 +92,19 @@ def parse_args() -> argparse.Namespace:
     # Logging & checkpointing
     parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--eval_interval", type=int, default=100)
+    parser.add_argument("--eval_steps", type=int, default=20)
     parser.add_argument("--checkpoint_interval", type=int, default=500)
     parser.add_argument(
         "--checkpoint_dir",
         type=str,
         default=None,
         help="Override checkpoint dir. Default auto-generates from variant+scale.",
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Canonical run directory containing config, metrics, logs, and checkpoints",
     )
     parser.add_argument(
         "--fault-tolerant",
@@ -179,10 +190,14 @@ def main() -> None:
     )
 
     # Create logger and trainer
-    run_dir = generate_run_dir(
-        variant=args.variant,
-        scale=args.scale,
-        activation=bundle.activation_label,
+    run_dir = (
+        Path(args.run_dir)
+        if args.run_dir is not None
+        else generate_run_dir(
+            variant=args.variant,
+            scale=args.scale,
+            activation=bundle.activation_label,
+        )
     )
     run_logger = RunLogger(run_dir, bundle.run_config)
     print(f"  Run dir: {run_dir}")

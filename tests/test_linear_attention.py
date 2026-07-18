@@ -114,16 +114,28 @@ class TestCausalLinearAttentionForward:
             rtol=1e-5,
         )
 
-    def test_kv_cache_raises_not_implemented(self, config):
-        """Non-None kv_cache raises NotImplementedError with expected message."""
-        attn = CausalLinearAttention(config)
+    def test_recurrent_cache_matches_full_sequence(self, config):
+        """Token-wise recurrent generation matches a full causal forward pass."""
+        torch.manual_seed(11)
+        attn = CausalLinearAttention(config).eval()
         x = torch.randn(2, 8, config.d_model)
-        with pytest.raises(NotImplementedError, match="Recurrent generation state"):
-            attn(x, kv_cache=torch.zeros(1))
+
+        with torch.no_grad():
+            full, full_cache = attn(x)
+            cache = None
+            pieces = []
+            for position in range(x.size(1)):
+                output, cache = attn(x[:, position : position + 1], kv_cache=cache)
+                pieces.append(output)
+
+        assert full_cache is not None
+        assert cache is not None
+        assert cache[2] == x.size(1)
+        torch.testing.assert_close(torch.cat(pieces, dim=1), full, atol=2e-5, rtol=2e-5)
 
     def test_output_shape_full_seq_len(self, config):
         """Forward returns (B, seq_len, d_model) output and None for full seq_len."""
-        attn = CausalLinearAttention(config)
+        attn = CausalLinearAttention(config).train()
         B = 2
         x = torch.randn(B, config.seq_len, config.d_model)
         output, kv_out = attn(x)
@@ -132,7 +144,7 @@ class TestCausalLinearAttentionForward:
 
     def test_output_shape_variable_seq_len(self, config):
         """Forward returns correct shape for T < seq_len."""
-        attn = CausalLinearAttention(config)
+        attn = CausalLinearAttention(config).train()
         B, T = 2, 128
         x = torch.randn(B, T, config.d_model)
         output, kv_out = attn(x)
@@ -179,7 +191,8 @@ class TestCausalLinearCompile:
         with torch.no_grad():
             output, kv_out = compiled_attn(x)
         assert output.shape == (1, 128, config.d_model)
-        assert kv_out is None
+        assert kv_out is not None
+        assert kv_out[2] == 128
 
 
 class TestCausalLinearBfloat16:

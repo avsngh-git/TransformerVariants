@@ -10,13 +10,11 @@ Verifies:
 Requirements traced: 10.1, 10.2, 5.4
 """
 
-import pytest
 import torch
 
-from src.models.registry import build
 from src.models.moe_ffn import MoEFeedForward
+from src.models.registry import build
 from src.models.swiglu_ffn import SwiGLUFeedForward
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -89,22 +87,14 @@ class TestActiveParametersMatchV1:
         moe_model, moe_config = build("moe", "main")
         active = _compute_active_params(moe_model, moe_config)
 
-        lower = v1_total * 0.95
-        upper = v1_total * 1.05
-        # Note: Since MoE uses same SwiGLU hidden dim (1408) as V1,
-        # active params = shared + top_k * expert_ffn * num_moe_layers
-        # With top_k=2 and same hidden dim, active FFN per layer = 2 * dense FFN
-        # So active params will be larger than V1. The key constraint from the
-        # design is that active params should be within 5% of V1.
-        # If the expert hidden dim is the same as V1 (not reduced to 704),
-        # active will be higher. We verify the model builds and compute the ratio.
+        lower = v1_total * 0.99
+        upper = v1_total * 1.01
         ratio = active / v1_total
-        # Active params should be within reasonable range of V1
-        # With same hidden dim, active_ffn = 2x dense_ffn per MoE layer
-        # This means active > V1, but we still check it's not wildly off
-        assert active > 0, "Active params should be positive"
-        # Document the actual ratio for visibility
-        print(f"V1 total: {v1_total:,}, MoE active: {active:,}, ratio: {ratio:.3f}")
+        assert lower <= active <= upper, (
+            f"V1 total: {v1_total:,}, MoE active: {active:,}, ratio: {ratio:.4f}; "
+            "expected active parameters to match within 1%"
+        )
+        assert moe_config.moe_expert_hidden_dim == 704
 
     def test_moe_interleaved_active_params(self):
         """V6-interleaved active params computed correctly."""
@@ -114,15 +104,10 @@ class TestActiveParametersMatchV1:
         moe_model, moe_config = build("moe_interleaved", "main")
         active = _compute_active_params(moe_model, moe_config)
 
-        # Interleaved has 4 MoE layers + 4 dense layers
-        # Active FFN from MoE layers = 4 * (router + top_k * expert)
-        # Active FFN from dense layers = 4 * dense_ffn
-        # This should be closer to V1 than full MoE
-        assert active > 0, "Active params should be positive"
         ratio = active / v1_total
-        print(
+        assert 0.99 <= ratio <= 1.01, (
             f"V1 total: {v1_total:,}, MoE interleaved active: {active:,}, "
-            f"ratio: {ratio:.3f}"
+            f"ratio: {ratio:.4f}; expected active parameters to match within 1%"
         )
 
     def test_moe_deep_active_params(self):
@@ -133,11 +118,10 @@ class TestActiveParametersMatchV1:
         moe_model, moe_config = build("moe_deep", "main")
         active = _compute_active_params(moe_model, moe_config)
 
-        assert active > 0, "Active params should be positive"
         ratio = active / v1_total
-        print(
+        assert 0.99 <= ratio <= 1.01, (
             f"V1 total: {v1_total:,}, MoE deep active: {active:,}, "
-            f"ratio: {ratio:.3f}"
+            f"ratio: {ratio:.4f}; expected active parameters to match within 1%"
         )
 
 

@@ -166,8 +166,9 @@ def _attention_weights(module: torch.nn.Module, x: torch.Tensor) -> torch.Tensor
         q, k, _ = module.qkv_proj(x).chunk(3, dim=-1)
         q = q.view(batch, length, module.n_head, module.d_head).transpose(1, 2)
         k = k.view(batch, length, module.n_head, module.d_head).transpose(1, 2)
-        q = apply_rope(q, module.rope_cos[:length], module.rope_sin[:length])
-        k = apply_rope(k, module.rope_cos[:length], module.rope_sin[:length])
+        if module.config.position_encoding == "rope":
+            q = apply_rope(q, module.rope_cos[:length], module.rope_sin[:length])
+            k = apply_rope(k, module.rope_cos[:length], module.rope_sin[:length])
     elif hasattr(module, "_project_qkv") and hasattr(module, "_apply_position"):
         q, k, _ = module._project_qkv(x, batch, length)
         q, k = module._apply_position(q, k, offset=0)

@@ -205,7 +205,7 @@
 
 This document explains the mathematical, statistical, and computational concepts used across the decoder-only Transformer variants implemented in the project. It deliberately avoids code-level and API-level detail. Each concept has one home section containing its definition, motivation, mechanism, worked intuition, equations, and trade-offs:
 \begin{itemize}
-    \item \textbf{V0 (Vanilla):} GPT-2-style decoder with learned absolute positions, LayerNorm, multi-head attention, and a ReLU/GELU FFN.
+    \item \textbf{V0 (Vanilla):} GPT-2-style decoder with learned absolute positions, LayerNorm, multi-head attention, and the GELU FFN used by the reported checkpoints. ReLU remains an unreported pedagogical option.
     \item \textbf{V1 (Modern):} RoPE, RMSNorm, SwiGLU, and memory-efficient exact attention.
     \item \textbf{V2 (ALiBi):} replaces rotary position geometry with head-specific linear distance biases.
     \item \textbf{V3 (GQA):} reduces the number of key/value heads while retaining many query heads.
@@ -3044,6 +3044,126 @@ denominator do not define a single conventional \(T\!\times\!T\) probability map
 The asset schema therefore records V5 as \texttt{unsupported} with this reason.  It
 does not invent a softmax visualization that the trained model never used.
 \end{warningbox}
+
+% =============================================================================
+\section{Corrective Five-Seed Study}
+\label{sec:corrective-five-seed-study}
+% =============================================================================
+
+The tables in \cref{sec:final-evaluation-corrections} describe the completed
+three-seed, approximately one-billion-token-per-run study and remain historical
+provenance.  They are not silently reinterpreted after changing model width or
+evaluation code.  A new primary experiment is defined by the versioned manifest
+\texttt{configs/experiment/main\_500m\_5seed.yaml}.  It trains all ten recipes for
+7,629 steps, or 499,974,144 tokens, over seeds 42, 137, 2024, 31415, and 271828.
+Every command enables asynchronous atomic checkpoints, a three-entry verified ring,
+health monitoring, and resume from the newest checkpoint whose digest matches ring
+metadata.  The language-modeling loss is token-level cross entropy.  Optimization is
+AdamW with $\beta_1=0.9$, $\beta_2=0.95$, weight decay 0.1 applied only to matrix
+parameters, peak learning rate $3\times10^{-4}$, terminal learning rate
+$3\times10^{-5}$, 250 warmup steps, cosine decay, and gradient-norm clipping at 1.0.
+All of these values, the BF16 precision policy, and the 20-batch evaluation length
+are explicit in the YAML manifest rather than inherited silently from code defaults.
+
+The new matrix contains 50 independent runs and processes approximately 25.0 billion
+tokens.  The earlier matrix processed approximately 29.5 billion tokens.  Thus the
+shorter per-run horizon reduces nominal token compute by about 15.2\%, not 50\%,
+because the seed count increases from three to five.  If between-seed variance were
+unchanged, the standard error would shrink by
+$\sqrt{3/5}\approx0.775$, approximately 22.5\%.  This improves uncertainty
+estimation but does not guarantee that a measured difference will be statistically
+distinguishable, and the new 500M-token regime must not be pooled with the older
+approximately 1B-token regime.
+
+For a metric $x$ measured over $n=5$ independent training seeds, the corrective
+report uses the small-sample interval
+\[
+    \bar{x} \pm t_{0.975,\,4}\frac{s}{\sqrt{5}},
+    \qquad t_{0.975,\,4}=2.776,
+\]
+rather than the large-sample normal multiplier 1.96.  Prespecified recipe
+comparisons are paired by their literal seed and summarize
+$d_s=x_{\mathrm{candidate},s}-x_{\mathrm{baseline},s}$.  Pairing removes seed-level
+variation shared by the two recipes, but neither a confidence interval nor a paired
+effect size turns the bundled V0--V1 comparison into component-level causal
+attribution.
+
+The exact prepared dataset bytes are pinned by
+\texttt{reports/data/fineweb\_1b\_sha256.json}, which records the manifest digest and
+SHA-256 digest of all 101 train/validation shards.  The original preprocessing run
+did not record its upstream Hugging Face revision.  That missing revision is stated
+explicitly; a later local cache revision is not substituted as if it were historical
+provenance.
+
+\subsection{Active-parameter-matched MoE}
+
+The original MoE recipes used a full-width 1,408-unit SwiGLU hidden layer in every
+expert.  Top-2 routing therefore activated twice the dense FFN width.  The corrective
+recipe retains eight stored experts and top-2 routing but sets each expert hidden
+width to 704.  Two selected experts then activate exactly the same expert weights as
+one dense SwiGLU FFN; only the small router remains as active overhead.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lrrr}
+\toprule
+Recipe & Active parameters & Stored parameters & Difference from Modern \\
+\midrule
+Modern & 51,430,400 & 51,430,400 & baseline \\
+MoE & 51,463,168 & 103,367,680 & $+0.064\%$ \\
+MoE-interleaved & 51,446,784 & 77,399,040 & $+0.032\%$ \\
+MoE-deep & 51,446,784 & 77,399,040 & $+0.032\%$ \\
+\bottomrule
+\end{tabular}
+\caption{Corrective MoE parameter accounting.  Active-per-token parity no longer
+confounds sparse quality with twice-dense active FFN width; stored conditional
+capacity remains intentionally larger and is still reported.}
+\label{tab:corrective-moe-parameter-counts}
+\end{table}
+
+\subsection{Retrieval and serving supplements}
+
+Paired-tail perplexity measures length extrapolation but does not establish access to
+distant facts.  The corrective evaluation therefore retains MQAR and adds zero-shot
+passkey and needle retrieval at controlled context lengths and distances.  It reports
+top-1 accuracy, top-5 accuracy, expected-answer probability, and negative
+log-likelihood.  The probability metrics remain informative when exact accuracy has
+a floor effect.  RoPE recipes are evaluated both with their original base 10,000 and
+a no-training base-100,000 extrapolation baseline.  These tests do not replace a
+task-trained associative-recall experiment; they supplement the pretrained-model
+comparison without another training phase.
+
+The serving benchmark now separates prefill, cached steady-state decode, cached
+end-to-end generation, and uncached generation over prompts of 64, 512, 1,024, and
+4,096 tokens, batches 1, 4, and 8, and 128 generated tokens.  Ten warm-ups precede 30
+measured repetitions, and the report preserves mean, median, 95th-percentile latency,
+raw timing samples, throughput, peak memory, and persistent cache bytes.  Flash-based
+models now create a reusable prompt cache; GQA exposes its reduced-KV cache; SWA uses
+its training-time local window during cached generation; and V5 exposes fixed-size
+recurrent numerator and denominator states.  SWA's physical allocation is still
+pre-sized rather than circular, so bounded attention reach must not be misreported as
+a fully bounded physical cache.
+
+\subsection{Secondary attribution study}
+
+The primary V0--V1 comparison remains a recipe-level test of whether a bundle of
+widely adopted modern components improves the GELU Vanilla baseline.  Literature is
+used to explain the expected contribution of RoPE, RMSNorm, SwiGLU, and
+memory-efficient exact attention; the primary experiment does not claim to isolate
+them.  A smaller secondary study will compare Modern against one-factor
+counterfactuals using learned positions, LayerNorm, and a parameter-matched dense
+GELU FFN.  These counterfactuals stop at 3,750 steps and use the first three seeds,
+with ambiguous effects promoted to all five seeds.  SDPA versus FlashAttention is a
+same-weight kernel benchmark and requires no retraining.  Marginal effects may depend
+on the Modern backbone and must not be summed as though component interactions were
+absent.  The three recipes and their isolated nine-run launcher are executable from
+\texttt{configs/experiment/surgical\_ablations.yaml}; they are not members of the
+primary 50-run matrix.  The new runs add 2.212 billion tokens, while the four-recipe
+comparison represents 2.949 billion tokens after counting the reused Modern
+step-3,750 reference histories.  The primary metrics logs preserve those fresh
+validation measurements; the bounded recovery ring is not expected to retain every
+intermediate weight checkpoint through the end of training.
 
 \section{References}
 % =============================================================================

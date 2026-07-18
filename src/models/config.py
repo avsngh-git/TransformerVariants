@@ -19,6 +19,8 @@ class ModelConfig:
         vocab_size: Size of the token vocabulary.
         seq_len: Maximum sequence length the model can handle.
         ffn_multiplier: FFN hidden dim = d_model * ffn_multiplier.
+        ffn_hidden_dim: Optional exact hidden width for a standard FFN. This is
+            used by parameter-matched counterfactuals; None uses ffn_multiplier.
         dropout: Dropout probability (0.0 = no dropout).
         bias: Whether linear layers include a bias term.
         tie_embeddings: Whether to tie input/output embedding weights.
@@ -41,10 +43,11 @@ class ModelConfig:
     vocab_size: int = 50257
     seq_len: int = 512
     ffn_multiplier: int = 4
+    ffn_hidden_dim: int | None = None
     dropout: float = 0.0
     bias: bool = False
     tie_embeddings: bool = True
-    activation: str = "relu"  # "relu" for pure vanilla, "gelu" for GPT-2
+    activation: str = "gelu"  # canonical V0 baseline; ReLU remains an explicit option
 
     # Variant identity fields
     variant: str = "vanilla"
@@ -67,6 +70,7 @@ class ModelConfig:
     # Mixture of Experts
     num_experts: int | None = None  # None = dense FFN, 2+ = MoE
     moe_top_k: int = 2  # Number of experts per token
+    moe_expert_hidden_dim: int | None = None  # Exact SwiGLU width of each sparse expert
     aux_loss_alpha: float = 0.01  # Load-balancing loss coefficient
     z_loss_beta: float = 0.001  # Router z-loss coefficient
 
@@ -86,6 +90,11 @@ class ModelConfig:
                     f"moe_top_k must be between 1 and num_experts ({self.num_experts}) "
                     f"inclusive, got {self.moe_top_k}"
                 )
+            if self.moe_expert_hidden_dim is not None and self.moe_expert_hidden_dim < 1:
+                raise ValueError(
+                    "moe_expert_hidden_dim must be positive when set, got "
+                    f"{self.moe_expert_hidden_dim}"
+                )
 
     @property
     def d_head(self) -> int:
@@ -98,4 +107,8 @@ class ModelConfig:
     @property
     def d_ff(self) -> int:
         """FFN hidden dimension: d_model * ffn_multiplier."""
-        return self.d_model * self.ffn_multiplier
+        return (
+            self.ffn_hidden_dim
+            if self.ffn_hidden_dim is not None
+            else self.d_model * self.ffn_multiplier
+        )

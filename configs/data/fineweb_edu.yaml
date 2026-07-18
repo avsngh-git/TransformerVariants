@@ -9,4 +9,6 @@ data:
   min_doc_tokens: 50
   max_doc_tokens: 10_000
   tokens_per_shard: 10_000_000
-  output_dir: data/processed/fineweb-edu
+  # The existing prepared snapshot predates revision pinning. Its exact bytes
+  # are identified by the checksum inventory generated before the new sweep.
+  output_dir: data/processed/fineweb-1B

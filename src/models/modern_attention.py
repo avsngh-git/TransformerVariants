@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.models.config import ModelConfig
-from src.models.rope import precompute_rope_frequencies, apply_rope
+from src.models.rope import apply_rope, precompute_rope_frequencies
 
 
 class ModernAttention(nn.Module):
@@ -47,10 +47,17 @@ class ModernAttention(nn.Module):
         self.attn_dropout = config.dropout
         self.resid_dropout = nn.Dropout(config.dropout)
 
-        # Precompute RoPE frequencies (cached as buffer — not a learned parameter)
-        cos, sin = precompute_rope_frequencies(config.d_head, config.seq_len)
-        self.register_buffer("rope_cos", cos)  # (seq_len, d_head // 2)
-        self.register_buffer("rope_sin", sin)  # (seq_len, d_head // 2)
+        # RoPE is conditional so the learned-position counterfactual can keep
+        # the same SDPA attention operator without applying a second encoding.
+        if config.position_encoding == "rope":
+            cos, sin = precompute_rope_frequencies(config.d_head, config.seq_len)
+            self.register_buffer("rope_cos", cos)  # (seq_len, d_head // 2)
+            self.register_buffer("rope_sin", sin)  # (seq_len, d_head // 2)
+        elif config.position_encoding != "learned":
+            raise ValueError(
+                "ModernAttention supports position_encoding='rope' or 'learned', "
+                f"got {config.position_encoding!r}"
+            )
 
     def forward(
         self,
@@ -83,12 +90,12 @@ class ModernAttention(nn.Module):
         else:
             past_len = 0
 
-        # Apply RoPE to Q and K (not V — values don't need position info)
-        # Need to slice the precomputed cos/sin for the correct positions
-        rope_cos = self.rope_cos[past_len:past_len + T]
-        rope_sin = self.rope_sin[past_len:past_len + T]
-        q = apply_rope(q, rope_cos, rope_sin)
-        k = apply_rope(k, rope_cos, rope_sin)
+        if self.config.position_encoding == "rope":
+            # Apply RoPE to Q and K (not V — values don't need position info).
+            rope_cos = self.rope_cos[past_len:past_len + T]
+            rope_sin = self.rope_sin[past_len:past_len + T]
+            q = apply_rope(q, rope_cos, rope_sin)
+            k = apply_rope(k, rope_cos, rope_sin)
 
         # KV-cache: concatenate with prior cached keys/values
         if kv_cache is not None:
