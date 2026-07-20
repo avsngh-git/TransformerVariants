@@ -3096,6 +3096,29 @@ to an absolute path at construction, and a regression test reproduces the exact
 relative-path launch shape.  This failure occurred before any optimizer update and no
 result from either failed preflight is part of the primary study.
 
+The first sustained matrix attempt later exposed a subtler monitor error.  GQA seed 42
+had finite, improving loss while its gradient norm fell from approximately 6.6 to 4.0.
+The monitor used absolute z-scores, so sufficiently large downward changes were treated
+as faults: deterministic replay produced gradient z-scores 6.14, 8.17, and 9.73 at
+updates 16--18, causing skip, skip, and rollback.  The rollback then loaded the whole
+checkpoint with \texttt{map\_location=cuda}, moving the saved CPU-generator state onto
+CUDA; PyTorch's CPU generator rejects that tensor.  Restoration now explicitly moves
+CPU and CUDA generator-state byte tensors to CPU at the API boundary, while finite
+z-score decisions detect only upward excursions.  NaN and infinity still request
+immediate rollback.
+
+This incident also revealed that a verified file is not necessarily an acceptable
+experimental endpoint.  The five Vanilla finals contained 25--40 skipped optimizer
+updates, the five Modern finals 81--90, and the five ALiBi finals 93--102.  The rates
+were therefore both nonzero and architecture-dependent.  All fifteen endpoints, plus
+the partial GQA run, are preserved as invalidated provenance and excluded from the
+corrective comparison.  The launcher now accepts a final only when its digest, schema,
+step 7,629, token count 499,974,144, and zero-skipped-update contract all pass.  It
+refuses to overwrite a contract-invalid final or resume a ring checkpoint containing
+skips, and canonical training fails immediately on the first requested skip rather
+than spending the remaining token budget.  No restart was performed as part of this
+repair.
+
 The new matrix contains 50 independent runs and processes approximately 25.0 billion
 tokens.  The earlier matrix processed approximately 29.5 billion tokens.  Thus the
 shorter per-run horizon reduces nominal token compute by about 15.2\%, not 50\%,

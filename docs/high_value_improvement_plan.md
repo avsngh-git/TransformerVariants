@@ -261,10 +261,20 @@ its versioned result belongs at `reports/fault_recovery_demo.json`.
 - [x] Launch the manifest in named tmux session `transformer_500m_5seed` from
   commit `aa49e72bddd2403ecef54e896fb6b9b95663b7ce` (2026-07-18); the real matrix
   passed verified step-zero bootstrap and health-monitor warm-up.
+- [x] Diagnose the 2026-07-19 stop at GQA seed 42: two-sided z-scores treated
+  falling gradients as faults, and CUDA checkpoint mapping broke CPU RNG restore.
+- [x] Make finite anomaly checks one-sided, normalize RNG tensors at restore, and
+  require exact step/token accounting plus zero skipped updates for acceptance;
+  canonical training now fails on the first requested skip.
+- [x] Audit the first 15 finals and invalidate them after finding 25--102 silently
+  skipped optimizer updates per run; preserve all affected artifacts separately.
+- [ ] Relaunch the complete 50-run matrix from the corrected frozen commit. This is
+  intentionally paused until explicit approval.
 - [ ] Produce 50 independent training histories.
 - [ ] Produce 50 verified final checkpoints at step 7,629.
 - [ ] Record any recovery event instead of hiding it.
-- [ ] Stop and diagnose repeated non-finite loss, checksum, or health-monitor errors.
+- [x] Stop and diagnose the first terminal checksum, non-finite, or monitor error
+  before allowing the matrix to continue.
 
 ### Phase C — evaluation
 

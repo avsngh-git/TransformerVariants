@@ -266,6 +266,13 @@ Install: `pip install -e ".[data]"`
 - SHA-256 verified ring rotation retains the newest valid checkpoints.
 - Resume restores the next unprocessed step, loader cursors, progress, optimizer,
   and RNG.
+- Finite anomaly decisions are one-sided: unusually high loss/gradient norms may
+  trigger recovery, while healthy downward optimization drift cannot.
+- RNG tensors are normalized to CPU at generator restoration even when the enclosing
+  checkpoint was mapped to CUDA.
+- Canonical completion requires a verified final checkpoint at the exact step and
+  token budget with zero skipped optimizer updates; canonical runs fail fast on the
+  first requested skip and refuse contaminated resume checkpoints.
 - Fault-injection, checkpoint, monitor, trainer, and CLI seams are covered by tests.
 
 ### Phase 13: Publication Asset Packaging ✅
@@ -277,8 +284,9 @@ Install: `pip install -e ".[data]"`
 
 ## What's next
 
-- Run the canonical 500M-token, five-seed corrective matrix from
-  `configs/experiment/main_500m_5seed.yaml` with verified fault-tolerant checkpoints.
+- The first corrective-matrix attempt is paused and invalidated after 15 finals were
+  found to contain architecture-dependent false-positive skips. Relaunch the complete
+  matrix from `configs/experiment/main_500m_5seed.yaml` only after explicit approval.
 - Evaluate passkey/needle retrieval, the realistic serving matrix, and MoE routing.
 - Freeze an untouched test split before publishing the new primary results.
 - Re-export assets to the separate Jekyll repository after the new report is complete.

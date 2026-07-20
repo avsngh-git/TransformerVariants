@@ -26,6 +26,7 @@ def test_train_help_exposes_fault_tolerant_training_contract() -> None:
     help_text = " ".join(result.stdout.split())
     assert "--fault-tolerant" in help_text
     assert "--checkpoint-ring-size" in help_text
+    assert "--max-skipped-steps" in help_text
     assert "latest verified checkpoint" in help_text
 
 
@@ -56,6 +57,7 @@ def test_run_config_records_fault_tolerance_policy() -> None:
         resume="latest",
         fault_tolerant=True,
         checkpoint_ring_size=5,
+        max_skipped_steps=0,
     )
     config = ModelConfig(n_layer=1, d_model=8, n_head=2, vocab_size=16, seq_len=4)
 
@@ -77,6 +79,7 @@ def test_run_config_records_fault_tolerance_policy() -> None:
         "eval_interval": 1,
         "eval_steps": 2,
         "checkpoint_interval": 1,
+        "max_skipped_steps": 0,
     }
     assert bundle.run_config["fault_tolerance"] == {
         "enabled": True,

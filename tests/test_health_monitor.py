@@ -134,6 +134,40 @@ class TestHealthMonitorWarmup:
 
         assert actions == [Action.CONTINUE] * len(healthy_metrics)
 
+    def test_healthy_gqa_warmup_does_not_treat_falling_gradients_as_anomalies(self):
+        """A fast but finite optimization improvement must not request rollback."""
+        monitor = HealthMonitor()
+        # Deterministic replay of main-scale GQA seed 42 from the failed matrix run.
+        healthy_metrics = [
+            (10.9540, 6.56),
+            (10.9521, 6.75),
+            (10.9484, 7.09),
+            (10.9473, 6.50),
+            (10.9316, 6.88),
+            (10.9163, 6.62),
+            (10.9097, 6.62),
+            (10.8626, 6.31),
+            (10.8269, 6.53),
+            (10.7771, 6.69),
+            (10.7349, 6.56),
+            (10.6789, 6.59),
+            (10.6263, 6.62),
+            (10.5665, 6.28),
+            (10.4907, 5.91),
+            (10.4131, 4.97),
+            (10.3308, 4.44),
+            (10.2885, 4.03),
+            (10.2529, 3.47),
+            (10.2029, 3.20),
+        ]
+
+        actions = [
+            monitor.check(step, loss=loss, grad_norm=grad_norm)
+            for step, (loss, grad_norm) in enumerate(healthy_metrics)
+        ]
+
+        assert actions == [Action.CONTINUE] * len(healthy_metrics)
+
 
 class TestHealthMonitorZScore:
     """Tests for z-score spike detection → SKIP_STEP."""

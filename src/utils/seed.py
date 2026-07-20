@@ -51,9 +51,12 @@ def set_rng_state(state: dict) -> None:
     """Restore RNG state from a checkpoint.
 
     Args:
-        state: Dictionary from get_rng_state().
+        state: Dictionary from get_rng_state(). Tensor values may have been
+            remapped to an accelerator while loading a checkpoint.
     """
     random.setstate(state["python"])
-    torch.random.set_rng_state(state["torch_cpu"])
+    # Generator restoration APIs consume CPU byte tensors even when the
+    # checkpoint containing them was loaded with map_location="cuda".
+    torch.random.set_rng_state(state["torch_cpu"].cpu())
     if "torch_cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["torch_cuda"])
+        torch.cuda.set_rng_state_all([cuda_state.cpu() for cuda_state in state["torch_cuda"]])

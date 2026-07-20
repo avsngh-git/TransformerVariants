@@ -1,7 +1,9 @@
 """Tests for seed setting and RNG state utilities."""
 
 import random
+from unittest.mock import Mock, patch
 
+import pytest
 import torch
 
 from src.utils.seed import get_rng_state, set_rng_state, set_seed
@@ -55,3 +57,46 @@ class TestRngState:
         state = get_rng_state()
         assert "python" in state
         assert "torch_cpu" in state
+
+    def test_restore_normalizes_cpu_rng_state_after_checkpoint_device_mapping(self):
+        """CPU RNG restoration must receive a CPU tensor even after a CUDA map."""
+        state = get_rng_state()
+        mapped_state = Mock()
+        mapped_state.cpu.return_value = state["torch_cpu"]
+        state["torch_cpu"] = mapped_state
+
+        with (
+            patch("torch.random.set_rng_state") as set_cpu_rng_state,
+            patch("torch.cuda.is_available", return_value=False),
+        ):
+            set_rng_state(state)
+
+        mapped_state.cpu.assert_called_once_with()
+        set_cpu_rng_state.assert_called_once_with(mapped_state.cpu.return_value)
+
+    def test_restore_normalizes_cuda_rng_states_after_checkpoint_device_mapping(self):
+        """CUDA generator states are CPU byte tensors at the restoration API boundary."""
+        state = get_rng_state()
+        mapped_cuda_state = Mock()
+        normalized_cuda_state = torch.random.get_rng_state()
+        mapped_cuda_state.cpu.return_value = normalized_cuda_state
+        state["torch_cuda"] = [mapped_cuda_state]
+
+        with (
+            patch("torch.random.set_rng_state"),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.set_rng_state_all") as set_cuda_rng_states,
+        ):
+            set_rng_state(state)
+
+        mapped_cuda_state.cpu.assert_called_once_with()
+        set_cuda_rng_states.assert_called_once_with([normalized_cuda_state])
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+    def test_restore_checkpoint_state_mapped_to_cuda(self):
+        """Reproduce the matrix rollback path with RNG tensors mapped to CUDA."""
+        state = get_rng_state()
+        state["torch_cpu"] = state["torch_cpu"].cuda()
+        state["torch_cuda"] = [cuda_state.cuda() for cuda_state in state["torch_cuda"]]
+
+        set_rng_state(state)

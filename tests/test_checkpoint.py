@@ -8,13 +8,22 @@ Tests cover:
 - Handling when .sha256 sidecar file is missing
 """
 
+import threading
+import time as time_module
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import torch
+import torch.nn as nn
+from torch.optim import SGD
 
-from src.training.checkpoint import AtomicCheckpointWriter
+from src.training.checkpoint import (
+    AsyncCheckpointWriter,
+    AtomicCheckpointWriter,
+    CheckpointRingBuffer,
+    _optimizer_state_to_cpu,
+)
 
 
 @pytest.fixture
@@ -242,9 +251,6 @@ class TestAtomicCheckpointWriterFailure:
 # ============================================================
 # Tests for CheckpointRingBuffer
 # ============================================================
-
-from src.training.checkpoint import CheckpointRingBuffer
-
 
 @pytest.fixture
 def ring_dir(tmp_path):
@@ -568,15 +574,6 @@ class TestCheckpointRingBufferVerification:
 # Tests for AsyncCheckpointWriter
 # ============================================================
 
-import threading
-import time as time_module
-
-import torch.nn as nn
-from torch.optim import SGD
-
-from src.training.checkpoint import AsyncCheckpointWriter, _optimizer_state_to_cpu
-
-
 class SimpleModel(nn.Module):
     """A minimal model for testing checkpoint operations."""
 
@@ -743,7 +740,6 @@ class TestAsyncCheckpointWriterWait:
         ring_buffer = CheckpointRingBuffer(checkpoint_dir, capacity=3)
         writer = AsyncCheckpointWriter(ring_buffer, checkpoint_dir)
 
-        # Make the checkpoint directory read-only to force a write failure
         model = SimpleModel()
         optimizer = SGD(model.parameters(), lr=0.01)
         x = torch.randn(2, 10)
@@ -751,15 +747,12 @@ class TestAsyncCheckpointWriterWait:
         loss.backward()
         optimizer.step()
 
-        # Submit a save to a path that doesn't exist (parent removed)
-        writer.save(step=100, model=model, optimizer=optimizer, training_state={})
-        # Remove the checkpoint dir to trigger an error during background save
-        import shutil
-
-        shutil.rmtree(checkpoint_dir)
-
-        with pytest.raises(Exception):
-            writer.wait()
+        # Inject the failure at the background-write seam. Removing the directory
+        # after save() races the worker and makes this test timing-dependent.
+        with patch.object(writer._atomic_writer, "save", side_effect=OSError("disk failure")):
+            writer.save(step=100, model=model, optimizer=optimizer, training_state={})
+            with pytest.raises(OSError, match="disk failure"):
+                writer.wait()
 
 
 class TestAsyncCheckpointWriterSingleInflight:

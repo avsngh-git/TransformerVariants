@@ -95,6 +95,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval_steps", type=int, default=20)
     parser.add_argument("--checkpoint_interval", type=int, default=500)
     parser.add_argument(
+        "--max-skipped-steps",
+        type=int,
+        default=None,
+        help="Fail after this many health-monitor skips (canonical study uses 0)",
+    )
+    parser.add_argument(
         "--checkpoint_dir",
         type=str,
         default=None,
@@ -155,6 +161,8 @@ def main() -> None:
     bundle = RunConfigBuilder.from_args(args, model_config, model)
     if args.checkpoint_ring_size < 2:
         raise ValueError("--checkpoint-ring-size must be at least 2")
+    if args.max_skipped_steps is not None and args.max_skipped_steps < 0:
+        raise ValueError("--max-skipped-steps must be non-negative")
 
     # Print model info
     device = "cuda" if torch.cuda.is_available() else "cpu"

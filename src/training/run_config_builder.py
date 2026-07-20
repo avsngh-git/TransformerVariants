@@ -99,6 +99,7 @@ class RunConfigBuilder:
             eval_steps=args.eval_steps,
             checkpoint_interval=args.checkpoint_interval,
             checkpoint_dir=checkpoint_dir,
+            max_skipped_steps=getattr(args, "max_skipped_steps", None),
         )
 
         # Detect hardware
@@ -162,6 +163,7 @@ class RunConfigBuilder:
                 "eval_interval": args.eval_interval,
                 "eval_steps": args.eval_steps,
                 "checkpoint_interval": args.checkpoint_interval,
+                "max_skipped_steps": getattr(args, "max_skipped_steps", None),
             },
             "data": {
                 "data_dir": args.data_dir,

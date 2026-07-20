@@ -73,6 +73,7 @@ class TrainConfig:
     # Checkpointing
     checkpoint_interval: int = 500
     checkpoint_dir: str = "checkpoints"
+    max_skipped_steps: int | None = None
 
 
 class Trainer:
@@ -369,6 +370,15 @@ class Trainer:
             if action == Action.SKIP_STEP:
                 self.optimizer.zero_grad(set_to_none=True)
                 self._skipped_steps += 1
+                if (
+                    self.config.max_skipped_steps is not None
+                    and self._skipped_steps > self.config.max_skipped_steps
+                ):
+                    raise RuntimeError(
+                        "Training exceeded the health-monitor skip budget: "
+                        f"allowed={self.config.max_skipped_steps}, "
+                        f"observed={self._skipped_steps}, step={self.step}"
+                    )
                 return metrics
 
             if action == Action.ROLLBACK:
@@ -532,7 +542,19 @@ class Trainer:
         self.step = checkpoint["step"]
         self.tokens_processed = training_state["tokens_processed"]
         self.best_val_loss = training_state["best_val_loss"]
-        self._skipped_steps = training_state.get("skipped_steps", 0)
+        saved_skipped_steps = training_state.get("skipped_steps")
+        if self.config.max_skipped_steps is not None:
+            if (
+                not isinstance(saved_skipped_steps, int)
+                or isinstance(saved_skipped_steps, bool)
+                or saved_skipped_steps < 0
+                or saved_skipped_steps > self.config.max_skipped_steps
+            ):
+                raise RuntimeError(
+                    "Checkpoint violates skipped-step contract: "
+                    f"saved={saved_skipped_steps!r}, allowed={self.config.max_skipped_steps}"
+                )
+        self._skipped_steps = 0 if saved_skipped_steps is None else saved_skipped_steps
         for loader, state_key in (
             (self.train_loader, "train_loader_state"),
             (self.val_loader, "val_loader_state"),

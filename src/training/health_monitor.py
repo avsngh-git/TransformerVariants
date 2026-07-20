@@ -90,14 +90,16 @@ class HealthMonitor:
             self._grad_norm_window.append(grad_norm)
             return Action.CONTINUE
 
-        # Compute z-scores (handle zero std gracefully)
+        # Detect only upward excursions. Falling loss and gradient norms are
+        # expected during optimization and are not evidence of instability.
+        # Non-finite values are handled immediately above.
         loss_mean = statistics.mean(self._loss_window)
         loss_std = statistics.pstdev(self._loss_window)
         grad_mean = statistics.mean(self._grad_norm_window)
         grad_std = statistics.pstdev(self._grad_norm_window)
 
-        loss_z = abs(loss - loss_mean) / loss_std if loss_std > 0 else 0.0
-        grad_z = abs(grad_norm - grad_mean) / grad_std if grad_std > 0 else 0.0
+        loss_z = (loss - loss_mean) / loss_std if loss_std > 0 else 0.0
+        grad_z = (grad_norm - grad_mean) / grad_std if grad_std > 0 else 0.0
 
         is_anomaly = (loss_z > self.loss_z_threshold) or (grad_z > self.grad_norm_z_threshold)
 

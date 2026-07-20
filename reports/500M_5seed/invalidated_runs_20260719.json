@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "experiment_id": "main_500m_5seed",
+  "invalidated_at": "2026-07-20",
+  "source_resolved_manifest": "resolved_manifest_pre_fix_20260719.json",
+  "archive_root": "runs/invalidated/main_500m_5seed_two_sided_health_monitor",
+  "reason": "two_sided_health_monitor_false_positives",
+  "eligible_for_model_quality_analysis": false,
+  "runs": [
+    {"variant": "vanilla", "seed": 42, "status": "invalidated", "final_step": 7629, "skipped_steps": 25},
+    {"variant": "vanilla", "seed": 137, "status": "invalidated", "final_step": 7629, "skipped_steps": 32},
+    {"variant": "vanilla", "seed": 2024, "status": "invalidated", "final_step": 7629, "skipped_steps": 31},
+    {"variant": "vanilla", "seed": 31415, "status": "invalidated", "final_step": 7629, "skipped_steps": 35},
+    {"variant": "vanilla", "seed": 271828, "status": "invalidated", "final_step": 7629, "skipped_steps": 40},
+    {"variant": "modern", "seed": 42, "status": "invalidated", "final_step": 7629, "skipped_steps": 87},
+    {"variant": "modern", "seed": 137, "status": "invalidated", "final_step": 7629, "skipped_steps": 82},
+    {"variant": "modern", "seed": 2024, "status": "invalidated", "final_step": 7629, "skipped_steps": 81},
+    {"variant": "modern", "seed": 31415, "status": "invalidated", "final_step": 7629, "skipped_steps": 83},
+    {"variant": "modern", "seed": 271828, "status": "invalidated", "final_step": 7629, "skipped_steps": 90},
+    {"variant": "alibi", "seed": 42, "status": "invalidated", "final_step": 7629, "skipped_steps": 97},
+    {"variant": "alibi", "seed": 137, "status": "invalidated", "final_step": 7629, "skipped_steps": 93},
+    {"variant": "alibi", "seed": 2024, "status": "invalidated", "final_step": 7629, "skipped_steps": 102},
+    {"variant": "alibi", "seed": 31415, "status": "invalidated", "final_step": 7629, "skipped_steps": 97},
+    {"variant": "alibi", "seed": 271828, "status": "invalidated", "final_step": 7629, "skipped_steps": 101},
+    {"variant": "gqa", "seed": 42, "status": "invalidated_partial", "final_step": null, "skipped_steps": 2}
+  ]
+}

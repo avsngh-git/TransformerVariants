@@ -39,6 +39,7 @@ training:
   eval_steps: 20
   checkpoint_interval: 1250
   log_interval: 10
+  max_skipped_steps: 0
 
 fault_tolerance:
   enabled: true

@@ -13,6 +13,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
+import torch
 import yaml
 
 from src.models.registry import SCALES, VARIANTS
@@ -84,6 +85,7 @@ def _validate_manifest(manifest: dict) -> None:
         "eval_steps",
         "checkpoint_interval",
         "log_interval",
+        "max_skipped_steps",
     }
     missing_training = sorted(training_required - manifest["training"].keys())
     if missing_training:
@@ -99,6 +101,8 @@ def _validate_manifest(manifest: dict) -> None:
         )
     if manifest["training"]["dtype"] not in {"bfloat16", "float16", "float32"}:
         raise ValueError("training.dtype must be bfloat16, float16, or float32")
+    if int(manifest["training"]["max_skipped_steps"]) < 0:
+        raise ValueError("training.max_skipped_steps must be non-negative")
 
     output_required = {"run_template", "checkpoint_template", "resolved_manifest"}
     missing_output = sorted(output_required - manifest["output"].keys())
@@ -155,6 +159,103 @@ def final_checkpoint(manifest: dict, variant: str, seed: int) -> Path:
     return checkpoint_dir(manifest, variant, seed) / f"checkpoint_step_{step:06d}.pt"
 
 
+def assess_final_checkpoint(manifest: dict, path: str | Path) -> dict:
+    """Return whether a final checkpoint satisfies the experiment contract."""
+    assessment = _checkpoint_progress(path)
+    if assessment["reasons"]:
+        return assessment
+
+    if assessment["step"] != int(manifest["training"]["max_steps"]):
+        assessment["reasons"].append("step")
+    if assessment["tokens_processed"] != token_accounting(manifest)["tokens_per_run"]:
+        assessment["reasons"].append("tokens_processed")
+    max_skipped_steps = int(manifest["training"]["max_skipped_steps"])
+    if assessment["skipped_steps"] > max_skipped_steps:
+        assessment["reasons"].append("skipped_steps")
+
+    assessment["accepted"] = not assessment["reasons"]
+    return assessment
+
+
+def _checkpoint_progress(path: str | Path) -> dict:
+    """Load integrity-checked progress fields shared by final and resume checks."""
+    path = Path(path)
+    assessment = {
+        "accepted": False,
+        "verified": AtomicCheckpointWriter.verify_trusted(path),
+        "step": None,
+        "tokens_processed": None,
+        "skipped_steps": None,
+        "reasons": [],
+    }
+    if not assessment["verified"]:
+        assessment["reasons"].append("integrity")
+        return assessment
+
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+        training_state = checkpoint.get("training_state", checkpoint)
+        step = checkpoint["step"]
+        tokens_processed = training_state["tokens_processed"]
+        skipped_steps = training_state["skipped_steps"]
+        if any(
+            not isinstance(value, int) or isinstance(value, bool)
+            for value in (step, tokens_processed, skipped_steps)
+        ) or any(value < 0 for value in (step, tokens_processed, skipped_steps)):
+            raise ValueError("Checkpoint progress fields must be non-negative integers")
+        assessment["step"] = step
+        assessment["tokens_processed"] = tokens_processed
+        assessment["skipped_steps"] = skipped_steps
+    except (KeyError, TypeError, ValueError, OSError, RuntimeError):
+        assessment["reasons"].append("schema")
+        return assessment
+    return assessment
+
+
+def assess_resume_checkpoint(manifest: dict, checkpoint_path: str | Path) -> dict:
+    """Assess the newest verified ring entry before allowing an automatic resume."""
+    checkpoint_path = Path(checkpoint_path)
+    unavailable = {
+        "accepted": False,
+        "available": False,
+        "verified": False,
+        "path": None,
+        "step": None,
+        "tokens_processed": None,
+        "skipped_steps": None,
+        "reasons": [],
+    }
+    ring_path = checkpoint_path / "checkpoint_ring.json"
+    if not ring_path.exists():
+        return unavailable
+    try:
+        entries = json.loads(ring_path.read_text(encoding="utf-8")).get("entries", [])
+    except (json.JSONDecodeError, OSError):
+        unavailable["reasons"].append("ring_metadata")
+        return unavailable
+
+    for entry in reversed(entries):
+        candidate = checkpoint_path / entry.get("path", "")
+        if not AtomicCheckpointWriter.verify_trusted(candidate):
+            continue
+        assessment = _checkpoint_progress(candidate)
+        assessment["available"] = True
+        assessment["path"] = str(candidate)
+        if assessment["reasons"]:
+            return assessment
+        expected_tokens = assessment["step"] * token_accounting(manifest)["tokens_per_step"]
+        if not 0 <= assessment["step"] < int(manifest["training"]["max_steps"]):
+            assessment["reasons"].append("step")
+        if assessment["tokens_processed"] != expected_tokens:
+            assessment["reasons"].append("tokens_processed")
+        max_skipped_steps = int(manifest["training"]["max_skipped_steps"])
+        if assessment["skipped_steps"] > max_skipped_steps:
+            assessment["reasons"].append("skipped_steps")
+        assessment["accepted"] = not assessment["reasons"]
+        return assessment
+    return unavailable
+
+
 def build_training_command(
     manifest: dict,
     *,
@@ -206,6 +307,8 @@ def build_training_command(
         str(training["checkpoint_interval"]),
         "--log_interval",
         str(training["log_interval"]),
+        "--max-skipped-steps",
+        str(training["max_skipped_steps"]),
         "--checkpoint_dir",
         str(checkpoint_dir(manifest, variant, seed)),
         "--run-dir",
@@ -231,7 +334,7 @@ def build_training_command(
 
 
 def _sha256(path: Path) -> str | None:
-    if not path.exists():
+    if not path.is_file():
         return None
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -272,20 +375,6 @@ def write_resolved_manifest(manifest: dict, source_path: Path, runs: list[dict])
     temp.write_text(json.dumps(resolved, indent=2) + "\n", encoding="utf-8")
     temp.replace(output)
     return output
-
-
-def _has_verified_resume(checkpoint_path: Path) -> bool:
-    ring_path = checkpoint_path / "checkpoint_ring.json"
-    if not ring_path.exists():
-        return False
-    try:
-        entries = json.loads(ring_path.read_text(encoding="utf-8")).get("entries", [])
-    except (json.JSONDecodeError, OSError):
-        return False
-    return any(
-        AtomicCheckpointWriter.verify_trusted(checkpoint_path / entry.get("path", ""))
-        for entry in reversed(entries)
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -330,21 +419,44 @@ def main() -> None:
     for variant in variants:
         for seed in seeds:
             final = final_checkpoint(manifest, variant, seed)
-            completed = final.exists() and AtomicCheckpointWriter.verify_trusted(final)
-            resume = not completed and _has_verified_resume(checkpoint_dir(manifest, variant, seed))
+            assessment = assess_final_checkpoint(manifest, final)
+            completed = assessment["accepted"]
+            invalid_final = final.exists() and not completed
+            resume_assessment = assess_resume_checkpoint(
+                manifest, checkpoint_dir(manifest, variant, seed)
+            )
+            invalid_resume = (
+                not completed
+                and not invalid_final
+                and resume_assessment["available"]
+                and not resume_assessment["accepted"]
+            )
+            resume = not completed and not invalid_final and resume_assessment["accepted"]
             command = build_training_command(
                 manifest,
                 variant=variant,
                 seed=seed,
                 resume=resume,
             )
+            if completed:
+                status = "completed"
+            elif invalid_final:
+                status = "invalid_final"
+            elif invalid_resume:
+                status = "invalid_resume"
+            elif resume:
+                status = "resume_pending"
+            else:
+                status = "pending"
             record = {
                 "variant": variant,
                 "seed": seed,
                 "checkpoint_dir": str(checkpoint_dir(manifest, variant, seed)),
                 "run_dir": str(run_dir(manifest, variant, seed)),
-                "status": "completed" if completed else "resume_pending" if resume else "pending",
+                "status": status,
                 "command": command,
+                "checkpoint_acceptance": assessment,
+                "resume_checkpoint_acceptance": resume_assessment,
             }
             if resume:
                 record["recovery_event"] = "resume_from_latest_verified_checkpoint"
@@ -359,6 +471,20 @@ def main() -> None:
     if args.dry_run:
         print(f"Dry run complete: {len(pending)} run(s) pending", flush=True)
         return
+
+    invalid_records = [
+        record
+        for *_rest, record in pending
+        if record["status"] in {"invalid_final", "invalid_resume"}
+    ]
+    if invalid_records:
+        invalid_names = ", ".join(
+            f"{record['variant']}_s{record['seed']}" for record in invalid_records
+        )
+        raise SystemExit(
+            "Refusing to overwrite contract-invalid final checkpoints. Archive their run "
+            f"directories before relaunch: {invalid_names}"
+        )
 
     launch_count = 0
     total_pending = len(pending)
@@ -379,11 +505,16 @@ def main() -> None:
             write_resolved_manifest(manifest, source_path, run_records)
             raise
         final = final_checkpoint(manifest, variant, seed)
-        if not final.exists() or not AtomicCheckpointWriter.verify_trusted(final):
-            record["status"] = "failed_verification"
+        assessment = assess_final_checkpoint(manifest, final)
+        record["checkpoint_acceptance"] = assessment
+        if not assessment["accepted"]:
+            record["status"] = "failed_acceptance"
             record["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             write_resolved_manifest(manifest, source_path, run_records)
-            raise RuntimeError(f"Run returned without a verified final checkpoint: {final}")
+            raise RuntimeError(
+                f"Run returned without a contract-valid final checkpoint: {final}; "
+                f"reasons={assessment['reasons']}"
+            )
         record["status"] = "completed"
         record["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         record["final_checkpoint"] = str(final)
